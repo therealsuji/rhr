@@ -1,0 +1,22 @@
+{
+	"name": "rhr-relay",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev --port 8788",
+		"deploy": "wrangler deploy",
+		"typecheck": "tsc --noEmit",
+		"format": "biome format --write",
+		"lint": "biome lint",
+		"check": "biome check"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.4",
+		"@cloudflare/workers-types": "^4.20260701.0",
+		"typescript": "^5.6.3",
+		"wrangler": "^4.112.0"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": ["esbuild", "workerd"]
+	}
+}

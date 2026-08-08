@@ -1,0 +1,72 @@
+name: Release player APK
+
+# Builds the rhr player debug APK and attaches it to a GitHub Release.
+# Triggers on a version tag (e.g. `git tag v0.1.0 && git push --tags`),
+# or manually from the Actions tab.
+#
+# The player is intentionally a DEBUG build: it needs the Dart VM Service
+# (JIT) to accept hot reloads. Debug APKs are signed with Flutter's
+# auto-generated debug keystore, so no signing secrets are required — the
+# workflow is reproducible for anyone who forks this repo.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      relay_url:
+        description: "Relay URL to bake into the APK (wss://...). Leave blank to use the default in lib/main.dart."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.2"
+          channel: stable
+          cache: true
+
+      - name: Build player APK (debug)
+        working-directory: player
+        env:
+          RELAY: ${{ github.event.inputs.relay_url }}
+        run: |
+          flutter pub get
+          if [ -n "$RELAY" ]; then
+            echo "Baking relay: $RELAY"
+            flutter build apk --debug --dart-define=RHR_RELAY="$RELAY"
+          else
+            flutter build apk --debug
+          fi
+          cp build/app/outputs/flutter-apk/app-debug.apk rhr-player.apk
+
+      - name: Upload artifact (for manual runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhr-player-apk
+          path: player/rhr-player.apk
+
+      - name: Attach APK to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: player/rhr-player.apk
+          body: |
+            **rhr player** — the generic Flutter shell. Sideload on the tester's phone.
+
+            This is a **debug** build (required for hot reload — it needs the Dart VM Service).
+            See the [README](https://github.com/${{ github.repository }}#quick-start) for the full flow.

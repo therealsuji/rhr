@@ -1,0 +1,7 @@
+name: rhr_bridge
+description: Device-side bridge - tunnels the local Dart VM Service to an rhr relay over an outbound WebSocket.
+publish_to: none
+environment:
+  sdk: ^3.10.0
+dependencies:
+  web_socket_channel: ^3.0.0

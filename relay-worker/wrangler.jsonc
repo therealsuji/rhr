@@ -1,0 +1,11 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "rhr-relay",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-01",
+	"durable_objects": {
+		"bindings": [{ "name": "SESSIONS", "class_name": "RelaySession" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelaySession"] }],
+	"observability": { "enabled": true }
+}

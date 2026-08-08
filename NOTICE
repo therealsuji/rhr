@@ -1,0 +1,17 @@
+rhr — remote hot reload player, CLI, and relay
+
+Copyright (c) 2026 Sujitha Wijewantha. Licensed under the MIT License
+(see LICENSE).
+
+Third-party notices
+-------------------
+
+The rhr player is a Flutter application. It embeds the Flutter engine and
+Flutter framework, which are licensed under the BSD-3-Clause license
+(https://flutter.dev), and packages from pub.dev. The in-app "Licenses"
+page (lobby footer) lists every license bundled with the player.
+
+The Android player also uses the Google Material icon set (Apache-2.0).
+
+Each Dart/TypeScript package dependency retains its own license; see the
+individual package sources for the exact terms.

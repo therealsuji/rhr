@@ -1,0 +1,35 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+pubspec.lock
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.fvm/
+
+# Kotlin / Gradle build caches
+**/.kotlin/
+
+# Node / Cloudflare Workers
+node_modules/
+.wrangler/
+
+# Android signing — NEVER commit these
+**/key.properties
+*.jks
+*.keystore
+**/android/local.properties
+
+# rhr CLI local state
+.rhr.yaml
+*.pid
+
+# Local working notes
+notes/
+
+# Misc
+.DS_Store
+*.log
+
+# opencode-goal-plugin persisted state (may contain goal text/checkpoints)
+.opencode/goals/

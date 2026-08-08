@@ -1,0 +1,9 @@
+name: rhr_relay
+description: Dumb WebSocket relay pairing a device bridge with a dev CLI by session code.
+publish_to: none
+environment:
+  sdk: ^3.10.0
+dependencies:
+  shelf: ^1.4.0
+  shelf_web_socket: ^3.0.0
+  web_socket_channel: ^3.0.0
