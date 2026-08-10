@@ -247,9 +247,11 @@ List<String> readUnsupportedAndroidInputs(String project) {
           name == 'GeneratedPluginRegistrant.kt') {
         continue;
       }
-      final relative = file.path.substring(
-        Directory(project).absolute.path.length + 1,
-      );
+      final projectRoot = Directory(project).absolute.path;
+      final absolute = file.absolute.path;
+      final relative = absolute.startsWith('$projectRoot/')
+          ? absolute.substring(projectRoot.length + 1)
+          : file.path;
       if ((name == 'MainActivity.kt' || name == 'MainActivity.java') &&
           _isTemplateMainActivity(file.readAsStringSync())) {
         continue;

@@ -8,5 +8,6 @@ dependencies:
     path: ../bridge
   web_socket_channel: ^3.0.0
   qr: ^3.0.2
+  crypto: ^3.0.0
 dev_dependencies:
   test: ^1.25.0

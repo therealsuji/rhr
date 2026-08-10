@@ -41,8 +41,6 @@ interface ConnMeta {
 }
 
 export class RelaySession implements DurableObject {
-	private code = "?"; // session code, set on first fetch, for logging
-
 	constructor(private ctx: DurableObjectState) {}
 
 	async fetch(request: Request): Promise<Response> {
@@ -50,12 +48,10 @@ export class RelaySession implements DurableObject {
 		// Session code = the DO name = the path segment before the role.
 		// /s/<code>/<role>
 		const parts = url.pathname.split("/").filter(Boolean);
-		const code = parts.length >= 3 ? parts[parts.length - 2] : "?";
-		this.code = code;
 		const role = parts.at(-1) as Role;
 
 		if (request.headers.get("Upgrade") !== "websocket") {
-			console.log(`[rhr][${code}] ${role} NON-WS request → 426`);
+			console.log(`[rhr] ${role} NON-WS request → 426`);
 			return new Response("expected websocket", { status: 426 });
 		}
 
@@ -72,7 +68,7 @@ export class RelaySession implements DurableObject {
 		const meta: ConnMeta = { role, connectedAt: Date.now(), msgs: 0, bytes: 0 };
 		this.ctx.acceptWebSocket(pair[1], [role, JSON.stringify(meta)]);
 		console.log(
-			`[rhr][${code}] ${role} CONNECTED (was dev=${before.dev} device=${before.device})`,
+			`[rhr] ${role} CONNECTED (was dev=${before.dev} device=${before.device})`,
 		);
 		if (role === "dev") {
 			const deviceLive = this.ctx.getWebSockets("device").length > 0;
@@ -80,11 +76,11 @@ export class RelaySession implements DurableObject {
 			const at = (await this.ctx.storage.get<number>("deviceInfoAt")) ?? 0;
 			const fresh = info !== undefined && Date.now() - at < INFO_TTL_MS;
 			console.log(
-				`[rhr][${code}] dev replay check: deviceLive=${deviceLive} hasInfo=${info !== undefined} fresh=${fresh}`,
+				`[rhr] dev replay check: deviceLive=${deviceLive} hasInfo=${info !== undefined} fresh=${fresh}`,
 			);
 			if (deviceLive && fresh) {
 				pair[1].send(info as string);
-				console.log(`[rhr][${code}] dev replayed cached info`);
+				console.log("[rhr] dev replayed cached info");
 			}
 		}
 		return new Response(null, { status: 101, webSocket: pair[0] });
@@ -114,13 +110,6 @@ export class RelaySession implements DurableObject {
 		}
 		const peer: Role = role === "device" ? "dev" : "device";
 		const peers = this.ctx.getWebSockets(peer);
-		// Log control text EXCEPT the high-volume ping keepalives, with the peer
-		// count so `wrangler tail` shows routing without flooding.
-		if (typeof message === "string" && !message.includes('"ping"')) {
-			console.log(
-				`[rhr][${this.code}] ${role} text: ${message.slice(0, 50)} → ${peers.length} ${peer}(s)`,
-			);
-		}
 		for (const other of peers) {
 			try {
 				other.send(message);
@@ -137,10 +126,10 @@ export class RelaySession implements DurableObject {
 	async webSocketClose(
 		ws: WebSocket,
 		code: number,
-		reason: string,
+		_reason: string,
 		clean: boolean,
 	) {
-		this.logDrop(ws, "close", code, reason, clean);
+		this.logDrop(ws, "close", code, clean);
 		const role = this.roleOf(ws);
 		if (role === "device") {
 			await this.ctx.storage.delete("deviceInfo");
@@ -152,8 +141,8 @@ export class RelaySession implements DurableObject {
 		}
 	}
 
-	async webSocketError(ws: WebSocket, error: unknown) {
-		this.logDrop(ws, "error", -1, String(error), false);
+	async webSocketError(ws: WebSocket, _error: unknown) {
+		this.logDrop(ws, "error", -1, false);
 		const role = this.roleOf(ws);
 		if (role === "device") {
 			await this.ctx.storage.delete("deviceInfo");
@@ -171,19 +160,12 @@ export class RelaySession implements DurableObject {
 		}
 	}
 
-	private logDrop(
-		ws: WebSocket,
-		how: string,
-		code: number,
-		reason: string,
-		clean: boolean,
-	) {
+	private logDrop(ws: WebSocket, how: string, code: number, clean: boolean) {
 		const m = this.metaOf(ws);
 		const secs = m ? Math.round((Date.now() - m.connectedAt) / 1000) : -1;
 		console.log(
-			`[rhr][${this.code}] ${m?.role ?? "?"} ${how} code=${code} clean=${clean} ` +
-				`aliveSec=${secs} msgs=${m?.msgs ?? "?"} bytes=${m?.bytes ?? "?"} ` +
-				`reason=${JSON.stringify(reason)}`,
+			`[rhr] ${m?.role ?? "?"} ${how} code=${code} clean=${clean} ` +
+				`aliveSec=${secs} msgs=${m?.msgs ?? "?"} bytes=${m?.bytes ?? "?"}`,
 		);
 	}
 

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
+
 typedef AssetProgress = void Function(String phase, int done, int total);
 
 String devFsAssetUri(String relativePath) =>
@@ -66,12 +68,25 @@ Future<void> syncAssets({
     );
   }
 
+  // Content hash, not mtime: a rebuild rewrites mtimes on files whose bytes
+  // never changed (re-uploading them for nothing), and a restored/checked-out
+  // file can change content while keeping size and mtime (silently skipping a
+  // real change). Size is checked first so differing files skip the read.
+  String hashOf(List<int> bytes) => sha256.convert(bytes).toString();
+
   bool unchanged(File file, String relativePath) {
     final entry = manifest[relativePath];
     if (entry is! Map) return false;
     final stat = file.statSync();
-    return entry['size'] == stat.size &&
-        entry['mtime'] == stat.modified.millisecondsSinceEpoch;
+    if (entry['size'] != stat.size) return false;
+    final hash = entry['sha256'];
+    if (hash is! String) {
+      // Manifest written by an older rhr (size+mtime only). Fall back to the
+      // old check so upgrading doesn't force a full re-upload; the entry gains
+      // a hash the next time this file is pushed.
+      return entry['mtime'] == stat.modified.millisecondsSinceEpoch;
+    }
+    return hash == hashOf(file.readAsBytesSync());
   }
 
   final allFiles = assetDir
@@ -144,10 +159,9 @@ Future<void> syncAssets({
         if (body.contains('"error"')) {
           throw StateError('DevFS write rejected: $body');
         }
-        final stat = file.statSync();
         manifest[relativePath] = {
-          'size': stat.size,
-          'mtime': stat.modified.millisecondsSinceEpoch,
+          'size': bytes.length,
+          'sha256': hashOf(bytes),
         };
         return true;
       } on Exception catch (error) {
