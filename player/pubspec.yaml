@@ -1,7 +1,7 @@
 name: rhr_player
 description: Universal player for rhr remote hot reload — one install runs any project via DevFS sync.
 publish_to: none
-version: 0.1.0+1
+version: 0.1.0+2
 
 environment:
   sdk: ^3.10.0
@@ -9,8 +9,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  # Note: no rhr_bridge dep — the player's tunnel is the NATIVE
-  # RhrSessionService (Dart-side bridges die on guest hot restart).
+  # Shared protocol values only. The player's tunnel remains the NATIVE
+  # RhrSessionService because Dart-side bridges die on guest hot restart.
+  rhr_bridge:
+    path: ../bridge
 
   # Native plugin superset. Only the native halves matter here: guest apps
   # bring their own Dart code via DevFS, but MethodChannels need these

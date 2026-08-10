@@ -44,10 +44,14 @@ class MainActivity : FlutterActivity() {
 			.setMethodCallHandler { call, result ->
 				when (call.method) {
 					"start" -> {
+						val relayUrls = call.argument<List<String>>("relayUrls")
+							?.filter { it.isNotBlank() }
+							?: emptyList()
 						startForegroundService(
 							Intent(this, RhrSessionService::class.java)
 								.putExtra("cmd", "start")
 								.putExtra("relayUrl", call.argument<String>("relayUrl"))
+								.putStringArrayListExtra("relayUrls", ArrayList(relayUrls))
 								.putExtra("code", call.argument<String>("code"))
 								.putExtra("vmUri", call.argument<String>("vmUri")))
 						result.success(null)

@@ -64,6 +64,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           files: player/rhr-player.apk
           body: |
             **rhr player** — the generic Flutter shell. Sideload on the tester's phone.

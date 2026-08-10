@@ -168,7 +168,8 @@ class RhrSessionService : Service() {
 		OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
 	private var ws: WebSocket? = null
 	private val stopped = AtomicBoolean(false)
-	private var relayUrl = ""
+	private var relayUrls: List<String> = emptyList()
+	@Volatile private var activeRelayUrl = ""
 	private var sessionCode = ""
 	private var vmUri = ""
 	private var projectHint: String? = null
@@ -207,6 +208,11 @@ class RhrSessionService : Service() {
 			"start" -> {
 				val requestedRelay =
 					intent.getStringExtra("relayUrl") ?: return START_NOT_STICKY
+				val requestedRelays =
+					(intent.getStringArrayListExtra("relayUrls") ?: arrayListOf(requestedRelay))
+						.filter { it.isNotBlank() }
+						.distinct()
+						.ifEmpty { listOf(requestedRelay) }
 				val requestedCode =
 					intent.getStringExtra("code") ?: return START_NOT_STICKY
 				val requestedVm =
@@ -220,7 +226,7 @@ class RhrSessionService : Service() {
 					// endpoint during same-session auto-resume.
 					Log.i(TAG, "[$sessionCode] preserving live VM URI $vmUri")
 				} else {
-					relayUrl = requestedRelay
+					relayUrls = requestedRelays
 					sessionCode = requestedCode
 					vmUri = requestedVm
 					currentCode = sessionCode
@@ -343,6 +349,7 @@ class RhrSessionService : Service() {
 	private fun infoMessage(): String = JSONObject()
 		.put("t", "info")
 		.put("vm", vmUri)
+		.put("transport", activeRelayUrl)
 		// Readiness is state, not merely an edge-triggered event. A developer
 		// tool can detach and reconnect to the same live VM after the original
 		// {"t":"ready"} frame has already been consumed.
@@ -379,15 +386,21 @@ class RhrSessionService : Service() {
 		Log.i(TAG, "[$sessionCode] STARTING reconnect loop #$loopId")
 		reconnectThread = Thread {
 			var backoffMs = 1000L
+			var candidateIndex = 0
+			var failuresThisRound = 0
 			while (!stopped.get()) {
 				val connected = AtomicBoolean(false)
 				val closed = Object()
+				val relayUrl = relayUrls[candidateIndex % relayUrls.size]
+				candidateIndex = (candidateIndex + 1) % relayUrls.size
 				val url = "$relayUrl/s/$sessionCode/device"
 				Log.i(TAG, "[$sessionCode] loop#$loopId DIALING $url")
 				val req = Request.Builder().url(url).build()
 				ws = client.newWebSocket(req, object : WebSocketListener() {
 					override fun onOpen(webSocket: WebSocket, response: Response) {
 						connected.set(true)
+						activeRelayUrl = relayUrl
+						failuresThisRound = 0
 						// Assume no developer until we actually hear one — the
 						// relay is a dumb pipe, so dev presence is learned from
 						// forwarded dev frames, not from the relay.
@@ -501,7 +514,17 @@ class RhrSessionService : Service() {
 				}
 				cleanupChannels()
 				if (stopped.get()) break
-				backoffMs = if (connected.get()) 1000L else minOf(backoffMs * 2, 30_000L)
+				if (connected.get()) {
+					backoffMs = 1000L
+					failuresThisRound = 0
+				} else {
+					failuresThisRound++
+					// Try the next candidate immediately. Back off only after every
+					// LAN/public candidate has failed once.
+					if (failuresThisRound < relayUrls.size) continue
+					failuresThisRound = 0
+					backoffMs = minOf(backoffMs * 2, 30_000L)
+				}
 				// Sleep on the flow lock so a manual Reconnect ({"cmd":"kick"}
 				// → notifyAll) interrupts the backoff instead of making the
 				// tester wait up to 30s. Interrupt (stop) breaks it the same.

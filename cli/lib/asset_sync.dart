@@ -1,10 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:rhr_cli/asset_transport.dart';
+import 'package:rhr_cli/usb_asset_transport.dart';
 
 typedef AssetProgress = void Function(String phase, int done, int total);
+
+typedef _PreparedAsset = ({
+  Uint8List encoded,
+  int sourceBytes,
+  String sha256,
+  int compressionMs,
+});
 
 String devFsAssetUri(String relativePath) =>
     'build/flutter_assets/'
@@ -16,6 +27,8 @@ Future<void> syncAssets({
   Future<void>? devFsReady,
   String? assetStoreId,
   bool forceResync = false,
+  int maxConcurrentUploads = 4,
+  AssetTransport? transport,
   AssetProgress? onProgress,
   FutureOr<void> Function()? afterSync,
 }) async {
@@ -113,6 +126,10 @@ Future<void> syncAssets({
         return !unchanged(file, relativePath);
       })
       .toList(growable: false);
+  // Workers pop from the end, so this sends large files first. That prevents a
+  // single large video/font from becoming a long serial tail after every small
+  // file has finished.
+  files.sort((a, b) => a.lengthSync().compareTo(b.lengthSync()));
 
   final skipped = allFiles.length - files.length;
   if (skipped > 0) {
@@ -128,99 +145,219 @@ Future<void> syncAssets({
     return;
   }
 
-  final totalBytes = files.fold<int>(0, (sum, file) => sum + file.lengthSync());
+  final transferFiles = files
+      .map(
+        (file) => AssetTransferFile(
+          source: file,
+          relativePath: file.path.substring(assetDir.path.length + 1),
+          size: file.lengthSync(),
+        ),
+      )
+      .toList(growable: false);
+  final totalBytes = transferFiles.fold<int>(0, (sum, file) => sum + file.size);
   // Report KiB rather than file counts: files vary from a few bytes to several
   // megabytes, so byte-weighted progress is both smoother and truthful. KiB
   // also keeps Android's Int-based progress fields safe for very large apps.
   final totalKiB = (totalBytes / 1024).ceil();
   report('assets', 0, totalKiB);
-  var sentFiles = 0;
-  var sentBytes = 0;
-  final stopwatch = Stopwatch()..start();
-  final client = HttpClient();
-
-  Future<bool> upload(File file) async {
-    final relativePath = file.path.substring(assetDir.path.length + 1);
-    final bytes = await file.readAsBytes();
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        final request = await client.putUrl(vmService);
-        request.headers.removeAll(HttpHeaders.acceptEncodingHeader);
-        request.headers.add('dev_fs_name', fsName);
-        request.headers.add(
-          'dev_fs_uri_b64',
-          base64.encode(utf8.encode(devFsAssetUri(relativePath))),
-        );
-        request.add(gzip.encode(bytes));
-        final response = await request.close().timeout(
-          const Duration(seconds: 60),
-        );
-        final body = await response.transform(utf8.decoder).join();
-        if (body.contains('"error"')) {
-          throw StateError('DevFS write rejected: $body');
-        }
-        manifest[relativePath] = {
-          'size': bytes.length,
-          'sha256': hashOf(bytes),
-        };
-        return true;
-      } on Exception catch (error) {
-        if (attempt == 2) {
-          stderr.writeln('[rhr] failed to push $relativePath: $error');
-          return false;
-        }
-        await Future<void>.delayed(const Duration(seconds: 1));
-      }
-    }
-    return false;
-  }
-
-  // Probe serially so an invalid DevFS name fails before a large parallel push.
-  if (!await upload(files.first)) {
-    client.close();
-    throw StateError('DevFS rejected the first asset upload.');
-  }
-  sentFiles = 1;
-  sentBytes = files.first.lengthSync();
-  // Persist the successful probe immediately. If a later parallel upload
-  // fails, the retry can still reuse this known-good file.
-  saveManifest();
-  report('assets', (sentBytes / 1024).ceil(), totalKiB);
-
-  final queue = List.of(files.skip(1));
-  final failedPaths = <String>[];
-  Future<void> worker() async {
-    while (queue.isNotEmpty) {
-      final file = queue.removeLast();
-      final uploaded = await upload(file);
-      if (!uploaded) {
-        failedPaths.add(file.path.substring(assetDir.path.length + 1));
-      }
-      sentFiles++;
-      sentBytes += file.lengthSync();
-      report('assets', (sentBytes / 1024).ceil(), totalKiB);
-      if (sentFiles % 50 == 0 || sentFiles == files.length) {
-        saveManifest();
-        final mb = (sentBytes / 1024 / 1024).toStringAsFixed(1);
-        final totalMb = (totalBytes / 1024 / 1024).toStringAsFixed(1);
-        stderr.writeln(
-          '[rhr] assets: $sentFiles/${files.length} files, '
-          '$mb/$totalMb MB, ${stopwatch.elapsed.inSeconds}s',
-        );
-      }
+  final devFsTransport = _DevFsAssetTransport(
+    vmService: vmService,
+    fsName: fsName,
+    maxConcurrentUploads: maxConcurrentUploads,
+  );
+  AssetTransport selected = transport ?? devFsTransport;
+  if (transport == null) {
+    final usb = await UsbAssetTransport.discover(assetStoreId: assetStoreId);
+    if (usb != null) {
+      stderr.writeln(
+        '[rhr] USB asset fast path: ${usb.serial} '
+        '(wireless fallback enabled)',
+      );
+      selected = FallbackAssetTransport(
+        preferred: usb,
+        fallback: devFsTransport,
+        onFallback: (error) => stderr.writeln(
+          '[rhr] USB asset transfer failed: $error\n'
+          '[rhr] falling back to the selected wireless tunnel...',
+        ),
+      );
     }
   }
 
-  await Future.wait([for (var index = 0; index < 4; index++) worker()]);
-  client.close();
+  AssetTransferResult result;
+  try {
+    result = await selected.transfer(
+      AssetTransferRequest(
+        assetRoot: assetDir,
+        projectName: fsName,
+        files: transferFiles,
+        onProgress: (sentBytes) =>
+            report('assets', (sentBytes / 1024).ceil(), totalKiB),
+      ),
+    );
+  } on AssetTransferException catch (error) {
+    _applyFingerprints(manifest, error.partialResult.completed);
+    saveManifest();
+    throw StateError(error.message);
+  }
+
+  _applyFingerprints(manifest, result.completed);
   saveManifest();
-  if (failedPaths.isNotEmpty) {
-    failedPaths.sort();
+  final missing = transferFiles
+      .map((file) => file.relativePath)
+      .where((path) => !result.completed.containsKey(path))
+      .toList();
+  if (missing.isNotEmpty) {
     throw StateError(
-      'Asset sync incomplete; ${failedPaths.length} file(s) failed: '
-      '${failedPaths.join(', ')}',
+      'Asset sync incomplete; ${missing.length} file(s) were not verified: '
+      '${missing.join(', ')}',
     );
   }
-  stderr.writeln('[rhr] asset sync done in ${stopwatch.elapsed.inSeconds}s.');
+  final elapsedSeconds = result.elapsed.inMilliseconds / 1000;
+  final rawMb = totalBytes / 1024 / 1024;
+  final wireMb = result.wireBytes / 1024 / 1024;
+  final throughput = elapsedSeconds == 0 ? 0 : wireMb / elapsedSeconds;
+  stderr.writeln(
+    '[rhr] asset sync via ${result.transportLabel} done in '
+    '${elapsedSeconds.toStringAsFixed(1)}s: '
+    '${rawMb.toStringAsFixed(1)} MB raw → ${wireMb.toStringAsFixed(1)} MB wire, '
+    '${throughput.toStringAsFixed(1)} MB/s, '
+    '${result.compressionMilliseconds}ms aggregate compression.',
+  );
   await afterSync?.call();
+}
+
+void _applyFingerprints(
+  Map<String, dynamic> manifest,
+  Map<String, AssetFingerprint> fingerprints,
+) {
+  for (final entry in fingerprints.entries) {
+    manifest[entry.key] = {
+      'size': entry.value.size,
+      'sha256': entry.value.sha256,
+    };
+  }
+}
+
+final class _DevFsAssetTransport implements AssetTransport {
+  const _DevFsAssetTransport({
+    required this.vmService,
+    required this.fsName,
+    required this.maxConcurrentUploads,
+  });
+
+  final Uri vmService;
+  final String fsName;
+  final int maxConcurrentUploads;
+
+  @override
+  String get label => 'DevFS tunnel';
+
+  @override
+  Future<AssetTransferResult> transfer(AssetTransferRequest request) async {
+    final stopwatch = Stopwatch()..start();
+    final client = HttpClient();
+    final completed = <String, AssetFingerprint>{};
+    final queue = List.of(request.files);
+    final failedPaths = <String>[];
+    var sentFiles = 0;
+    var sentBytes = 0;
+    var encodedBytes = 0;
+    var compressionMs = 0;
+
+    Future<_PreparedAsset> prepare(AssetTransferFile file) async {
+      final bytes = await file.source.readAsBytes();
+      return Isolate.run(() {
+        final timer = Stopwatch()..start();
+        final encoded = Uint8List.fromList(
+          ZLibEncoder(gzip: true, level: 6).convert(bytes),
+        );
+        timer.stop();
+        return (
+          encoded: encoded,
+          sourceBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          compressionMs: timer.elapsedMilliseconds,
+        );
+      });
+    }
+
+    Future<bool> upload(AssetTransferFile file, _PreparedAsset prepared) async {
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          final httpRequest = await client.putUrl(vmService);
+          httpRequest.headers.removeAll(HttpHeaders.acceptEncodingHeader);
+          httpRequest.headers.add('dev_fs_name', fsName);
+          httpRequest.headers.add(
+            'dev_fs_uri_b64',
+            base64.encode(utf8.encode(devFsAssetUri(file.relativePath))),
+          );
+          httpRequest.add(prepared.encoded);
+          final response = await httpRequest.close().timeout(
+            const Duration(seconds: 60),
+          );
+          final body = await response.transform(utf8.decoder).join();
+          if (body.contains('"error"')) {
+            throw Exception('DevFS write rejected: $body');
+          }
+          completed[file.relativePath] = AssetFingerprint(
+            size: prepared.sourceBytes,
+            sha256: prepared.sha256,
+          );
+          return true;
+        } on Exception catch (error) {
+          if (attempt == 2) {
+            stderr.writeln('[rhr] failed to push ${file.relativePath}: $error');
+            return false;
+          }
+          await Future<void>.delayed(const Duration(seconds: 1));
+        }
+      }
+      return false;
+    }
+
+    Future<void> worker() async {
+      while (queue.isNotEmpty) {
+        final file = queue.removeLast();
+        final prepared = await prepare(file);
+        compressionMs += prepared.compressionMs;
+        encodedBytes += prepared.encoded.length;
+        if (!await upload(file, prepared)) failedPaths.add(file.relativePath);
+        sentFiles++;
+        sentBytes += file.size;
+        request.onProgress(sentBytes);
+        if (sentFiles % 50 == 0 || sentFiles == request.files.length) {
+          final mb = (sentBytes / 1024 / 1024).toStringAsFixed(1);
+          final totalMb = (request.totalBytes / 1024 / 1024).toStringAsFixed(1);
+          stderr.writeln(
+            '[rhr] assets: $sentFiles/${request.files.length} files, '
+            '$mb/$totalMb MB, ${stopwatch.elapsed.inSeconds}s',
+          );
+        }
+      }
+    }
+
+    final workerCount = maxConcurrentUploads.clamp(1, request.files.length);
+    await Future.wait([
+      for (var index = 0; index < workerCount; index++) worker(),
+    ]);
+    client.close();
+    stopwatch.stop();
+    final result = AssetTransferResult(
+      completed: completed,
+      wireBytes: encodedBytes,
+      elapsed: stopwatch.elapsed,
+      transportLabel: label,
+      compressionMilliseconds: compressionMs,
+    );
+    if (failedPaths.isNotEmpty) {
+      failedPaths.sort();
+      throw AssetTransferException(
+        'Asset sync incomplete; ${failedPaths.length} file(s) failed: '
+        '${failedPaths.join(', ')}',
+        result,
+      );
+    }
+    return result;
+  }
 }

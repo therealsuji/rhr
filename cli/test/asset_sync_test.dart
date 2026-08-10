@@ -78,43 +78,45 @@ void main() {
     expect(savedManifest['files'], isEmpty);
   });
 
-  test('skips a touched file and re-pushes a same-size content change',
-      () async {
-    final project = await Directory.systemTemp.createTemp('rhr_asset_hash_');
-    addTearDown(() => project.delete(recursive: true));
+  test(
+    'skips a touched file and re-pushes a same-size content change',
+    () async {
+      final project = await Directory.systemTemp.createTemp('rhr_asset_hash_');
+      addTearDown(() => project.delete(recursive: true));
 
-    final asset = File('${project.path}/build/flutter_assets/assets/a.bin');
-    asset.parent.createSync(recursive: true);
-    asset.writeAsBytesSync([1, 2, 3, 4]);
+      final asset = File('${project.path}/build/flutter_assets/assets/a.bin');
+      asset.parent.createSync(recursive: true);
+      asset.writeAsBytesSync([1, 2, 3, 4]);
 
-    final receivedUris = <String>[];
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(server.close);
-    server.listen((request) async {
-      receivedUris.add(
-        utf8.decode(base64.decode(request.headers.value('dev_fs_uri_b64')!)),
+      final receivedUris = <String>[];
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(server.close);
+      server.listen((request) async {
+        receivedUris.add(
+          utf8.decode(base64.decode(request.headers.value('dev_fs_uri_b64')!)),
+        );
+        await request.drain<void>();
+        request.response.write('{}');
+        await request.response.close();
+      });
+      final vmService = Uri.parse('http://127.0.0.1:${server.port}/');
+
+      await syncAssets(vmService: vmService, project: project.path);
+      expect(receivedUris, hasLength(1));
+
+      // Rebuild-style touch: mtime moves, bytes identical → must NOT re-upload.
+      asset.setLastModifiedSync(
+        asset.lastModifiedSync().add(const Duration(hours: 1)),
       );
-      await request.drain<void>();
-      request.response.write('{}');
-      await request.response.close();
-    });
-    final vmService = Uri.parse('http://127.0.0.1:${server.port}/');
+      await syncAssets(vmService: vmService, project: project.path);
+      expect(receivedUris, hasLength(1));
 
-    await syncAssets(vmService: vmService, project: project.path);
-    expect(receivedUris, hasLength(1));
-
-    // Rebuild-style touch: mtime moves, bytes identical → must NOT re-upload.
-    asset.setLastModifiedSync(
-      asset.lastModifiedSync().add(const Duration(hours: 1)),
-    );
-    await syncAssets(vmService: vmService, project: project.path);
-    expect(receivedUris, hasLength(1));
-
-    // Same size, different bytes → must re-upload (mtime alone could miss it).
-    asset.writeAsBytesSync([9, 9, 9, 9]);
-    await syncAssets(vmService: vmService, project: project.path);
-    expect(receivedUris, hasLength(2));
-  });
+      // Same size, different bytes → must re-upload (mtime alone could miss it).
+      asset.writeAsBytesSync([9, 9, 9, 9]);
+      await syncAssets(vmService: vmService, project: project.path);
+      expect(receivedUris, hasLength(2));
+    },
+  );
 
   test('honours a legacy size+mtime manifest without re-uploading', () async {
     final project = await Directory.systemTemp.createTemp('rhr_asset_legacy_');
@@ -204,6 +206,16 @@ void main() {
       ),
       throwsA(isA<StateError>()),
     );
+    final partialManifest =
+        jsonDecode(
+              File(
+                '${project.path}/.dart_tool/rhr/pushed_assets.json',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    final verified = (partialManifest['files'] as Map<String, dynamic>).keys;
+    expect(verified, hasLength(1));
+    expect(verified.single, isNot(failedUri!.split('/').last));
     rejectOne = false;
     received.clear();
     await syncAssets(

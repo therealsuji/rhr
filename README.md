@@ -52,7 +52,7 @@ Then pass `--relay` to the CLI, or bake it in with `--dart-define=RHR_RELAY=…`
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.1
+  --git-ref v0.1.0-beta.2
 
 rhr doctor
 ```
@@ -71,6 +71,27 @@ Scan the printed QR with the player (or type the session code). rhr builds an An
 
 `--resync` ignores the device-side asset cache and re-uploads everything. `q` leaves the device VM alive, so `rhr run --code <same-code>` reconnects later without reopening the player.
 
+When the phone is connected over USB, `rhr run` automatically sends the initial
+asset bundle and later asset deltas through `adb`; the session, VM Service, and
+hot-reload protocol still use the normal rhr tunnel. The CLI matches the cable
+to the active Player's private store identity, so another connected Android
+device cannot receive the files accidentally. If USB disappears, the same
+range waits for adb to recover and retries automatically; repeated failures
+fall back to the wireless tunnel without changing the command.
+
+Without USB, a phone on the same network can use the temporary LAN relay carried
+in the QR. The player tries that first and falls back to the public relay, while
+the CLI races both paths and reports which one won. No flag or network setup is
+required. The LAN listener exists only for the session and uses the same bearer
+code and tunnel protocol as the public path.
+
+Asset uploads are content-addressed per installed player. Unchanged files stay
+in the phone's persistent cache. USB archives are SHA-256 verified in bounded
+chunks, while files larger than 16 MiB use independently retryable 4 MiB byte
+ranges. Wireless retries at file granularity, and gzip work runs in parallel
+without blocking VM-service traffic. `rhr run` prints raw/wire bytes,
+throughput, and compression time so slow projects can be measured directly.
+
 ## Measured
 
 On a Samsung SM-A566B (Android 16, arm64) over the public Cloudflare relay, streaming a stock `flutter create` app:
@@ -84,6 +105,20 @@ On a Samsung SM-A566B (Android 16, arm64) over the public Cloudflare relay, stre
 
 App state survives reloads — a counter at 3 stayed at 3 across a reload that changed the widget tree.
 
+The larger Velia benchmark (519 files, 421.3 MB raw) on the same phone measured:
+
+| Asset route | Cold sync |
+|---|---:|
+| Public relay | 173.4 s |
+| Initial LAN path | 161.6 s |
+| Optimized LAN pipeline (350.1 MB wire) | 143.4 s |
+| **USB fast path, forced adb reset (491.7 MB wire)** | **42.3 s** |
+
+The fault-injected USB run recovered without wireless fallback, then an
+independent inventory matched all 519 phone files to the host SHA-256 digests.
+A warm run skips unchanged files; changing one generated asset uploads only
+that file.
+
 ## Installing the CLI
 
 The beta is installed directly from its locked Git tag:
@@ -92,12 +127,12 @@ The beta is installed directly from its locked Git tag:
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.1
+  --git-ref v0.1.0-beta.2
 ```
 
 This is a one-time setup. Afterward, use `rhr run` from any Flutter project.
-Run `rhr doctor` to check Flutter and make sure no adb device will interfere
-with the remote attach flow.
+Run `rhr doctor` to check Flutter and see whether the optional USB asset fast
+path is available.
 
 ## Repo layout
 
@@ -119,6 +154,11 @@ with the remote attach flow.
 ## Security
 
 A session code is a **bearer token**: anyone who knows it can attach to the relayed VM service, which is arbitrary code execution inside the running app. Treat codes like credentials, and prefer your own relay for real work — on a shared relay the code is your only isolation.
+
+The automatic LAN path is an unencrypted `ws://` connection inside the local
+network. It carries compiled debug artifacts, not source, and still requires
+the random session bearer code. Disable untrusted local networks or use the
+public `wss://` path when local-network observers are in scope.
 
 The relay carries compiled kernel bytes only; your source never leaves your machine. Its application logs do not record session codes, VM Service URIs, or frame contents.
 

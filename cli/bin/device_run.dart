@@ -22,9 +22,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
@@ -52,7 +52,7 @@ Future<void> main(List<String> args) async {
   }
   // Mint a fresh random code each run (Expo-style): unique, unguessable, and
   // avoids leftover sessions on the shared public relay.
-  code ??= _mintCode();
+  code ??= mintRhrSessionCode();
 
   // Show the QR the tester scans. Keep the payload SMALL so the QR stays small:
   // when the relay is the player's built-in default, encode just the bare code
@@ -466,19 +466,6 @@ Future<bool> _serve(String relay, String code) async {
   sockets.clear();
   await ws.sink.close();
   return flutterEnded;
-}
-
-/// Fresh bearer-token session code grouped for painless manual entry.
-/// Ambiguous characters (0/1/i/l/o) are deliberately excluded.
-String _mintCode() {
-  final r = Random.secure();
-  const alphabet = '23456789abcdefghjkmnpqrstuvwxyz';
-  final token = List.generate(
-    10,
-    (_) => alphabet[r.nextInt(alphabet.length)],
-  ).join();
-  return 'rhr-${token.substring(0, 4)}-${token.substring(4, 8)}-'
-      '${token.substring(8)}';
 }
 
 /// Render a scannable QR to the terminal (stderr, so it never pollutes the

@@ -19,10 +19,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:rhr_bridge/session_code.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const _relayUrl = String.fromEnvironment('RHR_RELAY',
-    defaultValue: 'wss://rhr-relay.codeforge007.workers.dev');
+const _relayUrl = String.fromEnvironment(
+  'RHR_RELAY',
+  defaultValue: 'wss://rhr-relay.codeforge007.workers.dev',
+);
 
 const _session = MethodChannel('rhr/session');
 
@@ -41,7 +44,9 @@ class PlayerApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xFF7C4DFF), brightness: Brightness.dark),
+          seedColor: const Color(0xFF7C4DFF),
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
       ),
       home: const LobbyScreen(),
@@ -56,15 +61,7 @@ class LobbyScreen extends StatefulWidget {
   State<LobbyScreen> createState() => _LobbyScreenState();
 }
 
-class _LobbyScreenState extends State<LobbyScreen>
-    with WidgetsBindingObserver {
-  // Codes minted by `rhr run` always look like rhr-xxxx-xxxx-xxxx (chars from
-  // a no-0/1/i/l/o alphabet). Rejecting anything else catches typos instantly
-  // instead of dialing the relay with a code that can never match.
-  static final _codeRe = RegExp(
-      r'^rhr-[23456789abcdefghjkmnpqrstuvwxyz]{4}-'
-      r'[23456789abcdefghjkmnpqrstuvwxyz]{4}-'
-      r'[23456789abcdefghjkmnpqrstuvwxyz]{4}$');
+class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   final _code = TextEditingController();
   String? _status;
   bool _active = false; // a session is running → show Disconnect
@@ -91,6 +88,7 @@ class _LobbyScreenState extends State<LobbyScreen>
   // Relay for the current session. Defaults to the baked-in relay; a scanned QR
   // can point the player at a different relay (encoded alongside the code).
   String _relay = _relayUrl;
+  List<String> _fallbackRelays = const [];
 
   @override
   void initState() {
@@ -99,9 +97,16 @@ class _LobbyScreenState extends State<LobbyScreen>
     _pollStatus();
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getString('rhr_session_code');
+      final savedRelays = prefs.getStringList('rhr_relay_urls');
       final autoResume = prefs.getBool('rhr_auto_resume') ?? true;
       if (saved != null && _code.text.isEmpty) {
-        setState(() => _code.text = saved);
+        setState(() {
+          _code.text = saved;
+          if (savedRelays != null && savedRelays.isNotEmpty) {
+            _relay = savedRelays.first;
+            _fallbackRelays = savedRelays.skip(1).toList(growable: false);
+          }
+        });
         // Auto-resume: Android reaps backgrounded players (memory pressure,
         // crash, reboot); on relaunch, re-arm the session unprompted so a
         // mid-QA process death is invisible to the tester — the dev's CLI
@@ -135,7 +140,8 @@ class _LobbyScreenState extends State<LobbyScreen>
         } else {
           _waitingSince = null;
         }
-        final showHint = waiting &&
+        final showHint =
+            waiting &&
             _waitingSince != null &&
             DateTime.now().difference(_waitingSince!) >=
                 const Duration(seconds: 90);
@@ -145,7 +151,9 @@ class _LobbyScreenState extends State<LobbyScreen>
             _showWaitingHint = showHint;
           });
         }
-      } catch (_) {/* channel not ready yet */}
+      } catch (_) {
+        /* channel not ready yet */
+      }
     });
   }
 
@@ -174,10 +182,12 @@ class _LobbyScreenState extends State<LobbyScreen>
       // native service re-announces from this. Android ignores the arg and
       // discovers the URI from logcat itself.
       final vm = Service.getInfo();
-      vm.then((info) => _session.invokeMethod('kick', {
-            'vmUri': (info.serverUri ?? Uri.parse('http://127.0.0.1:0/'))
-                .toString(),
-          }));
+      vm.then(
+        (info) => _session.invokeMethod('kick', {
+          'vmUri': (info.serverUri ?? Uri.parse('http://127.0.0.1:0/'))
+              .toString(),
+        }),
+      );
     }
   }
 
@@ -185,20 +195,34 @@ class _LobbyScreenState extends State<LobbyScreen>
   /// fields, and connect — the Expo Go flow. Falls back gracefully if the QR
   /// isn't ours.
   Future<void> _scan() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const _ScannerScreen()),
-    );
+    final result = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const _ScannerScreen()));
     if (result == null) return;
     String code = result;
     String relay = _relay;
+    var fallbackRelays = _fallbackRelays;
     // Prefer the structured payload; tolerate a bare code string too.
     try {
       final m = jsonDecode(result) as Map<String, dynamic>;
       if (m['code'] is String) code = m['code'] as String;
-      if (m['relay'] is String) relay = m['relay'] as String;
-    } catch (_) {/* bare code */}
+      final encodedRelays = m['relays'];
+      if (encodedRelays is List) {
+        final parsed = encodedRelays.whereType<String>().toList();
+        if (parsed.isNotEmpty) {
+          relay = parsed.first;
+          fallbackRelays = parsed.skip(1).toList(growable: false);
+        }
+      } else if (m['relay'] is String) {
+        relay = m['relay'] as String;
+        fallbackRelays = const [];
+      }
+    } catch (_) {
+      /* bare code */
+    }
     setState(() {
       _relay = relay;
+      _fallbackRelays = fallbackRelays;
       _code.text = code;
     });
     await _connect();
@@ -210,31 +234,38 @@ class _LobbyScreenState extends State<LobbyScreen>
     await _session.invokeMethod('stop');
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('rhr_session_code');
+    await prefs.remove('rhr_relay_urls');
     if (!mounted) return;
     setState(() {
       _active = false;
       _code.clear();
       _relay = _relayUrl;
+      _fallbackRelays = const [];
       _status = 'Disconnected. Scan a QR or enter a code to connect.';
     });
   }
 
   Future<void> _connect({bool auto = false}) async {
     final code = _code.text.trim();
-    if (!_codeRe.hasMatch(code)) {
+    if (!isValidRhrSessionCode(code)) {
       if (!auto) {
-        setState(() => _status =
-            "That doesn't look like an rhr code — codes look like "
-            'rhr-xxxx-xxxx-xxxx.');
+        setState(
+          () => _status =
+              "That doesn't look like an rhr code — codes look like "
+              'rhr-xxxx-xxxx-xxxx.',
+        );
       }
       return;
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('rhr_session_code', code);
+    await prefs.setStringList('rhr_relay_urls', [_relay, ..._fallbackRelays]);
     if (!kDebugMode) {
-      setState(() => _status =
-          'Release build — no VM service, hot reload cannot work. '
-          'Install the debug player.');
+      setState(
+        () => _status =
+            'Release build — no VM service, hot reload cannot work. '
+            'Install the debug player.',
+      );
       return;
     }
     // Seed the service with whatever URI is available now; the native
@@ -244,18 +275,21 @@ class _LobbyScreenState extends State<LobbyScreen>
     final vm = (await Service.getInfo()).serverUri;
     await _session.invokeMethod('start', {
       'relayUrl': _relay,
+      'relayUrls': [_relay, ..._fallbackRelays],
       'code': code,
       'vmUri': (vm ?? Uri.parse('http://127.0.0.1:0/')).toString(),
     });
     setState(() => _active = true);
-    setState(() => _status = auto
-        ? 'Session restored — waiting for developer.\n'
-            'Start rhr run on your machine and it will reconnect.'
-        : 'Session service running — "$code". Waiting for developer.\n'
-            'On your machine:\n'
-            'rhr attach --sync-assets --relay $_relay --code $code\n'
-            'then press R (hot restart) to boot your app here.\n'
-            'The tunnel survives hot restarts and backgrounding.');
+    setState(
+      () => _status = auto
+          ? 'Session restored — waiting for developer.\n'
+                'Start rhr run on your machine and it will reconnect.'
+          : 'Session service running — "$code". Waiting for developer.\n'
+                'On your machine:\n'
+                'rhr attach --sync-assets --relay $_relay --code $code\n'
+                'then press R (hot restart) to boot your app here.\n'
+                'The tunnel survives hot restarts and backgrounding.',
+    );
   }
 
   @override
@@ -274,170 +308,215 @@ class _LobbyScreenState extends State<LobbyScreen>
         child: SafeArea(
           // Scroll-safe layout: centered when it fits, scrolls when the
           // keyboard shrinks the viewport (fixes "BOTTOM OVERFLOWED").
-          child: LayoutBuilder(builder: (context, constraints) {
-            return SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
-              child: ConstrainedBox(
-                constraints:
-                    BoxConstraints(minHeight: constraints.maxHeight - 32),
-                child: IntrinsicHeight(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(children: [
-                        _chip('rhr', _violet),
-                        const Spacer(),
-                        _dot(statusColor),
-                        const SizedBox(width: 7),
-                        Flexible(
-                          child: Text(statusLabel,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(color: _inkDim, fontSize: 12.5)),
-                        ),
-                      ]),
-                      const SizedBox(height: 40),
-                      const Text(
-                        'Stream your app\nstraight to this phone.',
-                        style: TextStyle(
-                            color: _ink,
-                            fontSize: 27,
-                            height: 1.18,
-                            fontWeight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'rhr plays any Flutter project over the internet. '
-                        'Scan the QR from your terminal (rhr run) or enter a '
-                        'code, then hot reload like the phone is plugged in.',
-                        style: TextStyle(color: _inkDim, fontSize: 14, height: 1.45),
-                      ),
-                      const SizedBox(height: 26),
-                      _scanButton(),
-                      const SizedBox(height: 18),
-                      _divider(),
-                      const SizedBox(height: 18),
-                      _codeEntry(),
-                      const SizedBox(height: 18),
-                      if (_active) _sessionCard() else _statusHint(),
-                      const SizedBox(height: 20),
-                      Center(
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: constraints.maxHeight - 32,
+                  ),
+                  child: IntrinsicHeight(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
                           children: [
-                            GestureDetector(
-                              onTap: _onFooterTap,
-                              child: const Text('rhr player · debug build',
-                                  style: TextStyle(
-                                      color: Color(0xFF5A4E80), fontSize: 11)),
-                            ),
-                            const Text(' · ',
-                                style:
-                                    TextStyle(color: Color(0xFF5A4E80), fontSize: 11)),
-                            GestureDetector(
-                              onTap: () => showLicensePage(context: context),
-                              child: const Text('Licenses',
-                                  style: TextStyle(
-                                      color: Color(0xFF5A4E80),
-                                      fontSize: 11,
-                                      decoration: TextDecoration.underline)),
+                            _chip('rhr', _violet),
+                            const Spacer(),
+                            _dot(statusColor),
+                            const SizedBox(width: 7),
+                            Flexible(
+                              child: Text(
+                                statusLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: _inkDim,
+                                  fontSize: 12.5,
+                                ),
+                              ),
                             ),
                           ],
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 40),
+                        const Text(
+                          'Stream your app\nstraight to this phone.',
+                          style: TextStyle(
+                            color: _ink,
+                            fontSize: 27,
+                            height: 1.18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'rhr plays any Flutter project over the internet. '
+                          'Scan the QR from your terminal (rhr run) or enter a '
+                          'code, then hot reload like the phone is plugged in.',
+                          style: TextStyle(
+                            color: _inkDim,
+                            fontSize: 14,
+                            height: 1.45,
+                          ),
+                        ),
+                        const SizedBox(height: 26),
+                        _scanButton(),
+                        const SizedBox(height: 18),
+                        _divider(),
+                        const SizedBox(height: 18),
+                        _codeEntry(),
+                        const SizedBox(height: 18),
+                        if (_active) _sessionCard() else _statusHint(),
+                        const SizedBox(height: 20),
+                        Center(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              GestureDetector(
+                                onTap: _onFooterTap,
+                                child: const Text(
+                                  'rhr player · debug build',
+                                  style: TextStyle(
+                                    color: Color(0xFF5A4E80),
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ),
+                              const Text(
+                                ' · ',
+                                style: TextStyle(
+                                  color: Color(0xFF5A4E80),
+                                  fontSize: 11,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: () => showLicensePage(context: context),
+                                child: const Text(
+                                  'Licenses',
+                                  style: TextStyle(
+                                    color: Color(0xFF5A4E80),
+                                    fontSize: 11,
+                                    decoration: TextDecoration.underline,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            );
-          }),
+              );
+            },
+          ),
         ),
       ),
     );
   }
 
   Widget _chip(String text, Color color) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-            color: color, borderRadius: BorderRadius.circular(8)),
-        child: Text(text,
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w600)),
-      );
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+    decoration: BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Text(
+      text,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
 
   Widget _dot(Color color) => Container(
-        width: 8,
-        height: 8,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      );
+    width: 8,
+    height: 8,
+    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+  );
 
   Widget _scanButton() => FilledButton.icon(
-        onPressed: _scan,
-        icon: const Icon(Icons.qr_code_scanner_rounded, size: 22),
-        label: const Text('Scan QR to connect'),
-        style: FilledButton.styleFrom(
-          backgroundColor: _violet,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          textStyle:
-              const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
-        ),
-      );
+    onPressed: _scan,
+    icon: const Icon(Icons.qr_code_scanner_rounded, size: 22),
+    label: const Text('Scan QR to connect'),
+    style: FilledButton.styleFrom(
+      backgroundColor: _violet,
+      foregroundColor: Colors.white,
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      textStyle: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
+    ),
+  );
 
-  Widget _divider() => const Row(children: [
-        Expanded(child: Divider(color: _surfaceHi)),
-        Padding(
-          padding: EdgeInsets.symmetric(horizontal: 12),
-          child: Text('or enter code',
-              style: TextStyle(color: _inkDim, fontSize: 12.5)),
+  Widget _divider() => const Row(
+    children: [
+      Expanded(child: Divider(color: _surfaceHi)),
+      Padding(
+        padding: EdgeInsets.symmetric(horizontal: 12),
+        child: Text(
+          'or enter code',
+          style: TextStyle(color: _inkDim, fontSize: 12.5),
         ),
-        Expanded(child: Divider(color: _surfaceHi)),
-      ]);
+      ),
+      Expanded(child: Divider(color: _surfaceHi)),
+    ],
+  );
 
-  Widget _codeEntry() => Row(children: [
-        Expanded(
-          child: TextField(
-            controller: _code,
-            autocorrect: false,
-            enableSuggestions: false,
-            style: const TextStyle(color: _ink, fontSize: 14),
-            decoration: InputDecoration(
-              hintText: 'rhr-xxxx-xxxx-xxxx',
-              hintStyle: const TextStyle(color: Color(0xFF5A4E80)),
-              prefixIcon: const Icon(Icons.tag, color: _inkDim, size: 18),
-              filled: true,
-              fillColor: _surface,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none),
-              enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: const BorderSide(color: _surfaceHi)),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: const BorderSide(color: _violet, width: 1.5)),
+  Widget _codeEntry() => Row(
+    children: [
+      Expanded(
+        child: TextField(
+          controller: _code,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: const TextStyle(color: _ink, fontSize: 14),
+          decoration: InputDecoration(
+            hintText: 'rhr-xxxx-xxxx-xxxx',
+            hintStyle: const TextStyle(color: Color(0xFF5A4E80)),
+            prefixIcon: const Icon(Icons.tag, color: _inkDim, size: 18),
+            filled: true,
+            fillColor: _surface,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 16,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: BorderSide.none,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: _surfaceHi),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: _violet, width: 1.5),
             ),
           ),
         ),
-        const SizedBox(width: 10),
-        FilledButton(
-          onPressed: _connect,
-          style: FilledButton.styleFrom(
-            backgroundColor: _violet,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+      const SizedBox(width: 10),
+      FilledButton(
+        onPressed: _connect,
+        style: FilledButton.styleFrom(
+          backgroundColor: _violet,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
           ),
-          child: const Text('Connect', style: TextStyle(fontWeight: FontWeight.w600)),
         ),
-      ]);
+        child: const Text(
+          'Connect',
+          style: TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+    ],
+  );
 
   /// Live session card: code, status, and next step, plus Disconnect.
   Widget _sessionCard() {
@@ -449,48 +528,69 @@ class _LobbyScreenState extends State<LobbyScreen>
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: _surfaceHi),
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          _dot(color),
-          const SizedBox(width: 8),
-          const Text('SESSION',
-              style: TextStyle(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _dot(color),
+              const SizedBox(width: 8),
+              const Text(
+                'SESSION',
+                style: TextStyle(
                   color: _inkDim,
                   fontSize: 11,
                   letterSpacing: 1.2,
-                  fontWeight: FontWeight.w600)),
-          const Spacer(),
-          Flexible(
-            child: Text(_code.text,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style:
-                    const TextStyle(color: _ink, fontSize: 13, fontFamily: 'monospace')),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              Flexible(
+                child: Text(
+                  _code.text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ],
           ),
-        ]),
-        const SizedBox(height: 12),
-        Text(_activeStatusCopy(),
-            style: const TextStyle(color: _ink, fontSize: 13.5, height: 1.35)),
-        const SizedBox(height: 12),
-        Row(children: [
-          if (_canReconnect)
-            TextButton.icon(
-              onPressed: _reconnect,
-              icon: const Icon(Icons.refresh, size: 16),
-              label: const Text('Reconnect'),
-              style: TextButton.styleFrom(
-                  foregroundColor: _violet, padding: EdgeInsets.zero),
-            ),
-          const Spacer(),
-          TextButton.icon(
-            onPressed: _disconnect,
-            icon: const Icon(Icons.link_off, size: 16),
-            label: const Text('Disconnect / reset'),
-            style:
-                TextButton.styleFrom(foregroundColor: _err, padding: EdgeInsets.zero),
+          const SizedBox(height: 12),
+          Text(
+            _activeStatusCopy(),
+            style: const TextStyle(color: _ink, fontSize: 13.5, height: 1.35),
           ),
-        ]),
-      ]),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              if (_canReconnect)
+                TextButton.icon(
+                  onPressed: _reconnect,
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('Reconnect'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: _violet,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _disconnect,
+                icon: const Icon(Icons.link_off, size: 16),
+                label: const Text('Disconnect / reset'),
+                style: TextButton.styleFrom(
+                  foregroundColor: _err,
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -505,7 +605,9 @@ class _LobbyScreenState extends State<LobbyScreen>
   Future<void> _reconnect() async {
     try {
       await _session.invokeMethod('kick');
-    } catch (_) {/* service may be gone */}
+    } catch (_) {
+      /* service may be gone */
+    }
   }
 
   void _onFooterTap() {
@@ -532,23 +634,31 @@ class _LobbyScreenState extends State<LobbyScreen>
       context: context,
       backgroundColor: _surface,
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Test faults',
-                  style: TextStyle(
-                      color: _ink, fontSize: 16, fontWeight: FontWeight.w600)),
+              child: Text(
+                'Test faults',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
             for (final (icon, label, name) in _faults)
               ListTile(
                 dense: true,
                 leading: Icon(icon, color: _violet, size: 20),
-                title: Text(label,
-                    style: const TextStyle(color: _ink, fontSize: 14)),
+                title: Text(
+                  label,
+                  style: const TextStyle(color: _ink, fontSize: 14),
+                ),
                 onTap: () {
                   _session.invokeMethod('debug/fault', {'name': name});
                   Navigator.of(context).pop();
@@ -574,7 +684,8 @@ class _LobbyScreenState extends State<LobbyScreen>
       case 'waiting_dev':
       case 'idle':
       default:
-        final base = 'Waiting for developer — they can attach with:\n'
+        final base =
+            'Waiting for developer — they can attach with:\n'
             'rhr attach --relay $_relay --code ${_code.text}';
         if (_showWaitingHint) {
           return '$base\n\nNo developer has connected on this code yet. '
@@ -595,9 +706,15 @@ class _LobbyScreenState extends State<LobbyScreen>
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: _surfaceHi),
       ),
-      child: Text(msg,
-          style: const TextStyle(
-              color: _inkDim, fontSize: 12.5, height: 1.4, fontFamily: 'monospace')),
+      child: Text(
+        msg,
+        style: const TextStyle(
+          color: _inkDim,
+          fontSize: 12.5,
+          height: 1.4,
+          fontFamily: 'monospace',
+        ),
+      ),
     );
   }
 }
@@ -626,8 +743,10 @@ class _ScannerScreenState extends State<_ScannerScreen> {
               if (_handled) return;
               final raw = capture.barcodes
                   .map((b) => b.rawValue)
-                  .firstWhere((v) => v != null && v.isNotEmpty,
-                      orElse: () => null);
+                  .firstWhere(
+                    (v) => v != null && v.isNotEmpty,
+                    orElse: () => null,
+                  );
               if (raw == null) return;
               _handled = true;
               Navigator.of(context).pop(raw);
@@ -644,8 +763,10 @@ class _ScannerScreenState extends State<_ScannerScreen> {
           ),
           const Positioned(
             bottom: 48,
-            child: Text('Point at the QR in the dev’s terminal',
-                style: TextStyle(color: Colors.white70)),
+            child: Text(
+              'Point at the QR in the dev’s terminal',
+              style: TextStyle(color: Colors.white70),
+            ),
           ),
         ],
       ),

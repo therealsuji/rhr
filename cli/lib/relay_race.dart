@@ -1,0 +1,131 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:web_socket_channel/io.dart';
+
+/// Connects the dev end to several relay candidates and selects the first one
+/// that produces a device `info` message.
+///
+/// Callers see one stream and one send method; LAN/public fallback, loser
+/// cleanup, and pre-selection buffering stay inside this deep module.
+final class RelayRace {
+  RelayRace._();
+
+  final _events = StreamController<Object>();
+  final _selected = Completer<String>();
+  final _candidates = <_RelayCandidate>[];
+  _RelayCandidate? _winner;
+  var _closed = false;
+
+  Stream<Object> get stream => _events.stream;
+  Future<String> get selectedRelay => _selected.future;
+  String? get closeReason => _winner?.channel.closeReason;
+
+  static Future<RelayRace> connect({
+    required List<String> relays,
+    required String code,
+  }) async {
+    final race = RelayRace._();
+    final uniqueRelays = relays.toSet();
+    await Future.wait(
+      uniqueRelays.map((relay) => race._connectCandidate(relay, code)),
+    );
+    if (race._candidates.isEmpty) {
+      throw StateError('could not connect to any relay candidate');
+    }
+    for (final candidate in race._candidates) {
+      candidate.channel.sink.add(jsonEncode({'t': 'hello'}));
+    }
+    return race;
+  }
+
+  Future<void> _connectCandidate(String relay, String code) async {
+    final channel = IOWebSocketChannel.connect(
+      '$relay/s/$code/dev',
+      pingInterval: const Duration(seconds: 20),
+    );
+    try {
+      await channel.ready.timeout(const Duration(seconds: 8));
+    } catch (_) {
+      await channel.sink.close();
+      return;
+    }
+    if (_closed || _winner != null) {
+      await channel.sink.close();
+      return;
+    }
+    final candidate = _RelayCandidate(relay, channel);
+    _candidates.add(candidate);
+    candidate.subscription = channel.stream.listen(
+      (message) => _onMessage(candidate, message),
+      onDone: () => _onClosed(candidate),
+      onError: (_) => _onClosed(candidate),
+    );
+  }
+
+  void _onMessage(_RelayCandidate candidate, Object message) {
+    if (_winner == null) {
+      if (!_isDeviceInfo(message)) return;
+      _winner = candidate;
+      if (!_selected.isCompleted) _selected.complete(candidate.relay);
+      for (final loser in _candidates.where((item) => item != candidate)) {
+        unawaited(loser.channel.sink.close());
+      }
+    }
+    if (identical(_winner, candidate) && !_events.isClosed) {
+      _events.add(message);
+    }
+  }
+
+  static bool _isDeviceInfo(Object message) {
+    if (message is! String) return false;
+    try {
+      final decoded = jsonDecode(message);
+      return decoded is Map<String, dynamic> && decoded['t'] == 'info';
+    } on FormatException {
+      return false;
+    }
+  }
+
+  void _onClosed(_RelayCandidate candidate) {
+    if (candidate.closed) return;
+    candidate.closed = true;
+    if (identical(_winner, candidate)) {
+      if (!_events.isClosed) unawaited(_events.close());
+      return;
+    }
+    if (_winner == null && _candidates.every((item) => item.closed)) {
+      if (!_selected.isCompleted) {
+        _selected.completeError(StateError('all relay candidates closed'));
+      }
+      if (!_events.isClosed) unawaited(_events.close());
+    }
+  }
+
+  void send(Object message) {
+    final winner = _winner;
+    if (winner == null) {
+      throw StateError('no relay transport has been selected yet');
+    }
+    winner.channel.sink.add(message);
+  }
+
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    for (final candidate in _candidates) {
+      await candidate.subscription?.cancel();
+      await candidate.channel.sink.close();
+    }
+    if (!_events.isClosed) await _events.close();
+  }
+}
+
+final class _RelayCandidate {
+  _RelayCandidate(this.relay, this.channel);
+
+  final String relay;
+  final IOWebSocketChannel channel;
+  StreamSubscription<Object?>? subscription;
+  bool closed = false;
+}
