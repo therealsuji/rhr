@@ -26,7 +26,9 @@ The **player** is a generic debug Flutter app. It boots to a lobby, takes a sess
 
 ## Quick start
 
-**1. Install the player.** Grab `rhr-player.apk` from [Releases](../../releases) and sideload it, or build it:
+**1. Install the player.** Grab the arm64 Player APK from
+[Releases](https://github.com/therealsuji/rhr/releases) and sideload it, or
+build it:
 
 ```bash
 cd player && flutter build apk --debug
