@@ -26,6 +26,7 @@ import 'package:rhr_cli/asset_sync.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/player_builder.dart';
 import 'package:rhr_cli/terminal_qr.dart';
+import 'package:rhr_cli/version.dart';
 import 'package:web_socket_channel/io.dart';
 
 const _usage = '''
@@ -34,6 +35,8 @@ rhr — Expo Go for Flutter, over the internet.
 Usage:
   rhr run [options]           run Flutter with automatic initial launch
   rhr attach [options]        connect to a session and hot reload into it
+  rhr doctor                  check the local Flutter/RHR setup
+  rhr --version               print the installed CLI version
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
 
@@ -67,12 +70,22 @@ flags override the file.
 ''';
 
 Future<void> main(List<String> args) async {
+  if (args.length == 1 &&
+      (args.first == '--version' || args.first == 'version')) {
+    stdout.writeln('rhr $rhrVersion');
+    return;
+  }
+
   if (args.isEmpty ||
       args.contains('-h') ||
       args.contains('--help') ||
       args.first == 'help') {
     stdout.write(_usage);
     exit(args.isEmpty ? 64 : 0);
+  }
+
+  if (args.first == 'doctor') {
+    exit(await _doctor());
   }
 
   // rhr setup [--relay <wss://...>]
@@ -292,6 +305,77 @@ Future<void> main(List<String> args) async {
     );
     await Future<void>.delayed(delay);
   }
+}
+
+Future<int> _doctor() async {
+  stdout.writeln('RHR doctor');
+  stdout.writeln('[OK] rhr $rhrVersion');
+
+  var healthy = true;
+  try {
+    final flutter = await Process.run('flutter', ['--version', '--machine']);
+    if (flutter.exitCode != 0) {
+      healthy = false;
+      stdout.writeln('[FAIL] flutter exited with code ${flutter.exitCode}');
+      final message = '${flutter.stderr}'.trim();
+      if (message.isNotEmpty) stdout.writeln('       $message');
+    } else {
+      final metadata = jsonDecode('${flutter.stdout}');
+      if (metadata is! Map<String, dynamic>) {
+        throw const FormatException('unexpected flutter version output');
+      }
+      final version = metadata['frameworkVersion'] ?? 'unknown';
+      final channel = metadata['channel'] ?? 'unknown channel';
+      final dart = metadata['dartSdkVersion'] ?? 'unknown';
+      stdout.writeln('[OK] Flutter $version ($channel), Dart $dart');
+    }
+  } on ProcessException catch (error) {
+    healthy = false;
+    stdout.writeln('[FAIL] flutter is not available on PATH');
+    stdout.writeln('       ${error.message}');
+  } on FormatException catch (error) {
+    healthy = false;
+    stdout.writeln('[FAIL] could not read the local Flutter version: $error');
+  }
+
+  try {
+    final adb = await Process.run('adb', ['devices']);
+    if (adb.exitCode == 0) {
+      final devices = '${adb.stdout}'
+          .split('\n')
+          .map((line) => line.trim())
+          .where((line) => line.endsWith('\tdevice'))
+          .toList();
+      if (devices.isEmpty) {
+        stdout.writeln('[OK] no adb devices are connected');
+      } else {
+        healthy = false;
+        stdout.writeln('[FAIL] ${devices.length} adb device(s) connected');
+        stdout.writeln(
+          '       Disconnect them before `rhr run`; Flutter otherwise rewrites '
+          'the remote debug URL through adb.',
+        );
+      }
+    }
+  } on ProcessException {
+    stdout.writeln('[INFO] adb is not on PATH; no adb check was performed');
+  }
+
+  final pubspec = File('pubspec.yaml');
+  if (pubspec.existsSync() &&
+      RegExp(
+        r'^\s+sdk:\s+flutter\s*$',
+        multiLine: true,
+      ).hasMatch(pubspec.readAsStringSync())) {
+    stdout.writeln('[OK] current directory is a Flutter project');
+  } else {
+    stdout.writeln('[INFO] run `rhr run` from a Flutter project directory');
+  }
+
+  stdout.writeln(
+    healthy ? '\nRHR is ready.' : '\nFix the failures above, then run again.',
+  );
+  return healthy ? 0 : 1;
 }
 
 /// Minimal `.rhr.yaml` reader: pulls the flat `relay:` / `code:` keys so the

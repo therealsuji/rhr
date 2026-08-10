@@ -44,11 +44,25 @@ cd relay-worker && pnpm install && pnpm run deploy
 
 Then pass `--relay` to the CLI, or bake it in with `--dart-define=RHR_RELAY=…`.
 
-**3. Run from your project.**
+**3. Install the CLI once.**
+
+```bash
+dart pub global activate --source git \
+  https://github.com/therealsuji/rhr.git \
+  --git-path cli \
+  --git-ref v0.1.0-beta.1
+
+rhr doctor
+```
+
+If your shell cannot find `rhr`, add `$HOME/.pub-cache/bin` to `PATH`
+(`%LOCALAPPDATA%\Pub\Cache\bin` on Windows).
+
+**4. Run from your project.**
 
 ```bash
 cd your-flutter-project
-dart run <path-to>/rhr/cli/bin/rhr.dart run
+rhr run
 ```
 
 Scan the printed QR with the player (or type the session code). rhr builds an Android bundle, syncs it to the device, and boots your app automatically. Then `r` to reload, `R` to restart, `q` to quit.
@@ -70,11 +84,18 @@ App state survives reloads — a counter at 3 stayed at 3 across a reload that c
 
 ## Installing the CLI
 
-Run it from the repo (`dart run cli/bin/rhr.dart …`) or install globally:
+The beta is installed directly from its locked Git tag:
 
 ```bash
-dart pub global activate --source git https://github.com/therealsuji/rhr --git-path cli
+dart pub global activate --source git \
+  https://github.com/therealsuji/rhr.git \
+  --git-path cli \
+  --git-ref v0.1.0-beta.1
 ```
+
+This is a one-time setup. Afterward, use `rhr run` from any Flutter project.
+Run `rhr doctor` to check Flutter and make sure no adb device will interfere
+with the remote attach flow.
 
 ## Repo layout
 

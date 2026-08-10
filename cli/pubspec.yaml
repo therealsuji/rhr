@@ -1,8 +1,11 @@
 name: rhr_cli
 description: Dev-side CLI - tunnels a remote VM service to localhost and wraps flutter attach.
+version: 0.1.0-beta.1
 publish_to: none
 environment:
   sdk: ^3.10.0
+executables:
+  rhr:
 dependencies:
   rhr_bridge:
     path: ../bridge
