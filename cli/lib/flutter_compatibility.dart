@@ -46,6 +46,51 @@ final class FlutterCompatibility {
   }
 }
 
+/// The compatibility inputs captured from one Flutter project. Both CLI
+/// entrypoints use this same snapshot so their gates cannot drift apart.
+final class ProjectCompatibilityProfile {
+  const ProjectCompatibilityProfile({
+    required this.flutter,
+    required this.androidPlugins,
+    required this.androidPermissions,
+    required this.unsupportedAndroidInputs,
+  });
+
+  final FlutterCompatibility flutter;
+  final Map<String, String> androidPlugins;
+  final Set<String> androidPermissions;
+  final List<String> unsupportedAndroidInputs;
+
+  List<String> differencesFrom(Map<String, dynamic> player) {
+    final differences = flutter.differencesFrom(
+      FlutterCompatibility.fromJson(player),
+    );
+    differences.addAll(
+      androidPluginDifferences(
+        required: androidPlugins,
+        available: parseAndroidPluginProfile(player['androidPlugins']),
+      ),
+    );
+    differences.addAll(
+      androidPermissionDifferences(
+        required: androidPermissions,
+        available: parseAndroidPermissionProfile(player['androidPermissions']),
+      ),
+    );
+    differences.addAll(unsupportedAndroidInputs);
+    return differences;
+  }
+}
+
+ProjectCompatibilityProfile readProjectCompatibilityProfile(String project) {
+  return ProjectCompatibilityProfile(
+    flutter: readLocalFlutterCompatibility(),
+    androidPlugins: readAndroidPluginProfile(project),
+    androidPermissions: readAndroidPermissionProfile(project),
+    unsupportedAndroidInputs: readUnsupportedAndroidInputs(project),
+  );
+}
+
 final class AndroidPluginSource {
   const AndroidPluginSource({
     required this.name,
@@ -205,17 +250,19 @@ List<String> androidPermissionDifferences({
   required Set<String> required,
   required Set<String> available,
 }) {
-  final missing = required
-      .difference(available)
-      .map((permission) => '$permission: required, missing from player')
-      .toList()
-    ..sort();
+  final missing =
+      required
+          .difference(available)
+          .map((permission) => '$permission: required, missing from player')
+          .toList()
+        ..sort();
   // WRITE_EXTERNAL_STORAGE is a maxSdkVersion=28 legacy permission: modern
   // Androids filter it out of the player's requestedPermissions list entirely,
   // and on API 29+ it is functionally inert anyway. A project that "requires"
   // it still runs fine on the player, so never block on it.
-  missing.removeWhere((line) =>
-      line.startsWith('android.permission.WRITE_EXTERNAL_STORAGE:'));
+  missing.removeWhere(
+    (line) => line.startsWith('android.permission.WRITE_EXTERNAL_STORAGE:'),
+  );
   return missing;
 }
 

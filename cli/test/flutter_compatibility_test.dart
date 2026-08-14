@@ -16,6 +16,27 @@ void main() {
     expect(local.differencesFrom(local), isEmpty);
   });
 
+  test('project profile applies the same gate to every player capability', () {
+    const profile = ProjectCompatibilityProfile(
+      flutter: local,
+      androidPlugins: {'camera_android': '1.2.3'},
+      androidPermissions: {'android.permission.CAMERA'},
+      unsupportedAndroidInputs: ['android/app/src/main/kotlin/Payments.kt'],
+    );
+
+    expect(
+      profile.differencesFrom({
+        'frameworkVersion': '3.44.2',
+        'frameworkRevision': 'framework-a',
+        'engineRevision': 'engine-a',
+        'dartSdkVersion': '3.12.2',
+        'androidPlugins': {'camera_android': '1.2.3'},
+        'androidPermissions': ['android.permission.CAMERA'],
+      }),
+      ['android/app/src/main/kotlin/Payments.kt'],
+    );
+  });
+
   test('reports every incompatible runtime field', () {
     const player = FlutterCompatibility(
       frameworkVersion: '3.43.0',

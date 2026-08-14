@@ -1,4 +1,4 @@
-// rhr attach --relay ws://host:8787 --code mysession [--project <dir>]
+// rhr attach --relay ws://host:8123 --code mysession [--project <dir>]
 //            [--no-flutter] [--pid-file <path>] [--sync-assets]
 //
 // Connects to the relay as the dev end, waits for the device bridge's info
@@ -23,10 +23,12 @@ import 'dart:io';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
+import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/player_builder.dart';
 import 'package:rhr_cli/relay_race.dart';
+import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/restart_tracker.dart';
 import 'package:rhr_cli/terminal_qr.dart';
 import 'package:rhr_cli/usb_asset_transport.dart';
@@ -45,7 +47,9 @@ Usage:
 
 run options:
   --project <dir>       Flutter project dir (default: current dir)
+  --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      reuse a specific pairing code (default: generate one)
+  --direct              attempt a direct WebRTC/STUN payload path, then fall back
   --resync              ignore the local asset manifest and re-push all assets
 
 The player must already be installed. Flutter's normal terminal commands work:
@@ -64,13 +68,20 @@ attach options:
                         generic player (its APK has no per-project assets)
   --resync              forget the pushed-asset manifest and re-push all
   --no-flutter          just print the tunneled VM URI; don't run flutter attach
+  --direct              attempt a direct WebRTC/STUN payload path, then fall back
   --pid-file <path>     write the flutter process pid here
   -h, --help            show this help
 
-Config: values in ./.rhr.yaml (keys `relay:` and `code:`) are used as
+Config: values in ./.rhr.yaml (keys `relay:`, `code:`, and optional
+`direct: true`) are used as
 defaults, so you can run just `rhr attach --sync-assets`. Command-line
 flags override the file.
 ''';
+
+// EX_TEMPFAIL: the relay was reachable, but no player joined this session.
+// Retrying forever turns a typo into a silent background loop; callers can
+// correct the code and start a fresh attach instead.
+const _noDeviceExitCode = 75;
 
 Future<void> main(List<String> args) async {
   if (args.length == 1 &&
@@ -157,14 +168,20 @@ Future<void> main(List<String> args) async {
   // sync assets, and automatically launch the guest app.
   if (args[0] == 'run') {
     String project = '.';
+    String? relay;
     String? code;
     var resync = false;
+    var direct = false;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
         case '--project':
           project = args[++i];
+        case '--relay':
+          relay = args[++i];
         case '--code':
           code = args[++i];
+        case '--direct':
+          direct = true;
         case '--resync':
           resync = true;
         default:
@@ -172,7 +189,15 @@ Future<void> main(List<String> args) async {
           exit(64);
       }
     }
-    exit(await _runFlutter(project: project, code: code, resync: resync));
+    exit(
+      await _runAttachProductFlow(
+        project: project,
+        relay: relay,
+        code: code,
+        preferDirect: direct,
+        resync: resync,
+      ),
+    );
   }
 
   // rhr push-assets --vm-url <tunneled-vm-uri> [--project <dir>] --pid-file <path>
@@ -211,6 +236,7 @@ Future<void> main(List<String> args) async {
   var runFlutter = true;
   var syncAssets = false;
   var resync = false;
+  var direct = false;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
       case 'attach':
@@ -231,6 +257,8 @@ Future<void> main(List<String> args) async {
         // Escape hatch when the device store and local manifest disagree
         // (e.g. app data cleared): forget what we think is on the device.
         resync = true;
+      case '--direct':
+        direct = true;
       default:
         stderr.writeln('unknown arg: ${args[i]}');
         exit(64);
@@ -240,6 +268,7 @@ Future<void> main(List<String> args) async {
   final cfg = _loadConfig(project);
   relay ??= cfg['relay'];
   code ??= cfg['code'];
+  direct = direct || cfg['direct']?.toLowerCase() == 'true';
 
   if (relay == null || code == null) {
     stderr.writeln(
@@ -287,10 +316,12 @@ Future<void> main(List<String> args) async {
         pidFile: pidFile,
         runFlutter: runFlutter,
         syncAssets: syncAssets,
+        preferDirect: direct,
       );
       // Clean flutter exit (user pressed q) => done. A nonzero exit is a
       // failed attach (e.g. the flaky first-connect DDS race) => reconnect.
       if (result == 0) exit(0);
+      if (result == _noDeviceExitCode) exit(result!);
       if (result != null) {
         failures++;
         stderr.writeln('[rhr] flutter attach exited ($result)');
@@ -381,8 +412,8 @@ Future<int> _doctor() async {
   return healthy ? 0 : 1;
 }
 
-/// Minimal `.rhr.yaml` reader: pulls the flat `relay:` / `code:` keys so the
-/// two values you'd otherwise retype every run can live next to the project.
+/// Minimal `.rhr.yaml` reader: pulls the flat `relay:` / `code:` / `direct:`
+/// keys so session defaults can live next to the project.
 /// Deliberately not a real YAML parser (keeps the CLI dependency-free per the
 /// repo convention) — it only understands `key: value` lines and `#` comments.
 Map<String, String> _loadConfig(String project) {
@@ -401,7 +432,7 @@ Map<String, String> _loadConfig(String project) {
             (value.startsWith("'") && value.endsWith("'")))) {
       value = value.substring(1, value.length - 1);
     }
-    if (key == 'relay' || key == 'code') out[key] = value;
+    if (key == 'relay' || key == 'code' || key == 'direct') out[key] = value;
   }
   return out;
 }
@@ -416,22 +447,23 @@ Future<int?> _runSession({
   required String? pidFile,
   required bool runFlutter,
   required bool syncAssets,
+  bool preferDirect = false,
 }) async {
-  final localCompatibility = readLocalFlutterCompatibility();
-  final requiredPlugins = readAndroidPluginProfile(project);
-  final requiredPermissions = readAndroidPermissionProfile(project);
-  final unsupportedInputs = readUnsupportedAndroidInputs(project);
+  final compatibility = readProjectCompatibilityProfile(project);
   String? assetStoreId;
-  late final RelayRace transport;
+  late final RelayRace relayTransport;
   try {
-    transport = await RelayRace.connect(relays: relays, code: code);
+    relayTransport = await RelayRace.connect(relays: relays, code: code);
   } catch (e) {
     stderr.writeln('[rhr] could not connect to any relay for code "$code": $e');
     return null;
   }
+  final SessionTransport transport = preferDirect
+      ? DirectSessionTransport(relayTransport)
+      : relayTransport;
   stderr.writeln('[rhr] connected to relay candidate(s): ${relays.join(', ')}');
   unawaited(
-    transport.selectedRelay.then<void>(
+    relayTransport.selectedRelay.then<void>(
       (relay) => stderr.writeln(
         '[rhr] selected ${relay.startsWith('ws://127.0.0.1') ? 'LAN' : 'internet'} '
         'transport $relay (session $code)',
@@ -450,10 +482,10 @@ Future<int?> _runSession({
       if (msg is String) {
         final m = jsonDecode(msg) as Map<String, dynamic>;
         if (m['t'] == 'info' && !vmReady.isCompleted) {
-          assetStoreId = m['assetStoreId'] as String?;
+          final announcedAssetStoreId = m['assetStoreId'];
           final raw = m['compatibility'];
-          if (assetStoreId == null ||
-              assetStoreId!.isEmpty ||
+          if (announcedAssetStoreId is! String ||
+              announcedAssetStoreId.isEmpty ||
               raw is! Map<String, dynamic>) {
             stderr.writeln(
               '[rhr] COMPATIBILITY_BLOCKED: reinstall a current rhr player; '
@@ -461,24 +493,8 @@ Future<int?> _runSession({
             );
             exit(78);
           }
-          final differences = localCompatibility.differencesFrom(
-            FlutterCompatibility.fromJson(raw),
-          );
-          differences.addAll(
-            androidPluginDifferences(
-              required: requiredPlugins,
-              available: parseAndroidPluginProfile(raw['androidPlugins']),
-            ),
-          );
-          differences.addAll(
-            androidPermissionDifferences(
-              required: requiredPermissions,
-              available: parseAndroidPermissionProfile(
-                raw['androidPermissions'],
-              ),
-            ),
-          );
-          differences.addAll(unsupportedInputs);
+          assetStoreId = announcedAssetStoreId;
+          final differences = compatibility.differencesFrom(raw);
           if (differences.isNotEmpty) {
             stderr.writeln('[rhr] COMPATIBILITY_BLOCKED:');
             for (final difference in differences) {
@@ -489,7 +505,14 @@ Future<int?> _runSession({
             );
             exit(78);
           }
-          vmReady.complete(Uri.parse(m['vm'] as String));
+          final vmValue = m['vm'];
+          if (vmValue is! String || vmValue.isEmpty) {
+            stderr.writeln(
+              '[rhr] COMPATIBILITY_BLOCKED: player announced no VM service.',
+            );
+            exit(78);
+          }
+          vmReady.complete(Uri.parse(vmValue));
         }
         return;
       }
@@ -530,7 +553,7 @@ Future<int?> _runSession({
   // reach the CF edge; idle Durable Object connections were observed being
   // killed at ~10 minutes). The device end treats it as a developer-presence
   // heartbeat: its watchdog expires if these stop for >45s.
-  final keepalive = Timer.periodic(const Duration(seconds: 20), (_) {
+  final keepalive = Timer.periodic(developerLeasePingInterval, (_) {
     try {
       transport.send(jsonEncode({'t': 'ping'}));
     } on StateError {
@@ -539,7 +562,18 @@ Future<int?> _runSession({
   });
 
   stderr.writeln('[rhr] waiting for device bridge...');
-  final vm = await _waitForDeviceBridge(vmReady, wsDied, code);
+  Uri? vm;
+  try {
+    vm = await _waitForDeviceBridge(vmReady, wsDied, code);
+  } on _WaitTimedOut {
+    keepalive.cancel();
+    await transport.close();
+    stderr.writeln(
+      '[rhr] no player joined session "$code" within 5 minutes. '
+      'Check the code, scan the QR again, and rerun rhr attach.',
+    );
+    return _noDeviceExitCode;
+  }
   if (vm == null) {
     keepalive.cancel();
     return null; // relay died while waiting
@@ -625,6 +659,16 @@ Future<int?> _runSession({
       'rhr',
       '--debug-url',
       local.toString(),
+      // The rhr custom device intentionally has no port-forward command: the
+      // VM service is already exposed on this host-local tunnel port. Without
+      // an explicit host port Flutter asks the device for a forward and
+      // silently ends up with port 0, leaving attach waiting forever.
+      '--host-vmservice-port',
+      '${local.port}',
+      // DDS tries to claim the same host port for a custom device whose VM
+      // service is already exposed by our tunnel. The tunneled VM service is
+      // sufficient for attach/hot reload, so keep DDS out of this path.
+      '--no-dds',
       if (effectivePidFile != null) ...['--pid-file', effectivePidFile],
     ],
     workingDirectory: project,
@@ -665,11 +709,11 @@ Future<int?> _runSession({
   // Whichever ends first decides: flutter exiting on its own ends the CLI;
   // the relay dying means we kill flutter and reconnect.
   final flutterExit = proc.exitCode;
-  final ended = await Future.any<Object?>([
+  final ended = await Future.any<Object>([
     flutterExit.then((c) => c),
-    wsDied.future.then((_) => null),
+    wsDied.future.then((_) => const _RelayEnded()),
   ]);
-  if (ended == null) {
+  if (ended is _RelayEnded) {
     proc.kill();
     await flutterExit; // reap
     await cleanup();
@@ -690,7 +734,18 @@ Future<int?> _runSession({
     }
   }
   await cleanup();
-  return ended as int;
+  if (ended is! int) {
+    throw StateError('Flutter process completed without an exit code');
+  }
+  return ended;
+}
+
+final class _RelayEnded {
+  const _RelayEnded();
+}
+
+final class _WaitTimedOut {
+  const _WaitTimedOut();
 }
 
 /// Waits for the device's info announcement. Unlike an indefinite hang, a slow
@@ -702,14 +757,21 @@ Future<Uri?> _waitForDeviceBridge(
   Completer<void> wsDied,
   String code,
 ) async {
+  final deadline = DateTime.now().add(const Duration(minutes: 5));
   while (true) {
-    final result = await Future.any<Object?>([
+    final remaining = deadline.difference(DateTime.now());
+    var wait = const Duration(seconds: 30);
+    if (remaining.compareTo(wait) < 0) wait = remaining;
+    final result = await Future.any<Object>([
       vmReady.future,
-      wsDied.future,
-      Future<void>.delayed(const Duration(minutes: 5)).then((_) => 'timeout'),
+      wsDied.future.then((_) => const _RelayEnded()),
+      Future<void>.delayed(
+        remaining.isNegative ? Duration.zero : wait,
+      ).then((_) => const _WaitTimedOut()),
     ]);
     if (result is Uri) return result;
-    if (wsDied.isCompleted) return null;
+    if (result is _RelayEnded) return null;
+    if (DateTime.now().isAfter(deadline)) throw const _WaitTimedOut();
     stderr.writeln(
       '[rhr] still waiting for the player on code "$code" — '
       'make sure it is connected (scan the QR or enter this code).',
@@ -761,8 +823,7 @@ Future<void> _syncAssetsAfterAttach(
       await trackHotRestart(
         vmService: vmService,
         trigger: () => Process.killPid(pid, ProcessSignal.sigusr2),
-        onProgress: (phase, done, total) =>
-            onProgress?.call(phase, done, total),
+        onProgress: onProgress ?? (_, _, _) {},
       );
       stderr.writeln('[rhr] hot restart completed; main isolate replaced');
     },
@@ -786,25 +847,29 @@ Future<void> _deviceRun(List<String> args) async {
 /// target and allows Flutter to replace the generic player's root isolate.
 Future<int> _runAttachProductFlow({
   required String project,
+  String? relay,
   String? code,
+  bool preferDirect = false,
   bool resync = false,
 }) async {
   final sessionCode = code ?? mintRhrSessionCode();
-  const publicRelay = 'wss://rhr-relay.codeforge007.workers.dev';
+  final config = _loadConfig(project);
+  final configuredRelay = relay ?? config['relay'];
+  preferDirect = preferDirect || config['direct']?.toLowerCase() == 'true';
   final localRelay = await LocalRelay.start(sessionCode);
-  final deviceRelays = [
-    if (localRelay != null) localRelay.advertisedUrl,
-    publicRelay,
-  ];
-  final devRelays = [
-    if (localRelay != null) localRelay.loopbackUrl,
-    publicRelay,
-  ];
-  final qrPayload = localRelay == null
+  final deviceRelays = relayCandidates(
+    local: localRelay?.advertisedUrl,
+    configured: configuredRelay,
+  );
+  final devRelays = relayCandidates(
+    local: localRelay?.loopbackUrl,
+    configured: configuredRelay,
+  );
+  final qrPayload = configuredRelay == null && localRelay == null
       ? sessionCode
       : jsonEncode({
           'code': sessionCode,
-          'relay': localRelay.advertisedUrl,
+          'relay': deviceRelays.first,
           'relays': deviceRelays,
         });
   final qr = renderTerminalQr(qrPayload);
@@ -814,8 +879,10 @@ Future<int> _runAttachProductFlow({
   if (localRelay != null) {
     stderr.writeln(
       '[rhr] LAN fast path: ${localRelay.advertisedUrl} '
-      '(public relay fallback enabled)',
+      '(relay fallback: ${deviceRelays.last})',
     );
+  } else if (configuredRelay != null) {
+    stderr.writeln('[rhr] configured relay: $configuredRelay');
   } else {
     stderr.writeln('[rhr] no private LAN address found; using public relay');
   }
@@ -848,8 +915,10 @@ Future<int> _runAttachProductFlow({
           pidFile: null,
           runFlutter: true,
           syncAssets: true,
+          preferDirect: preferDirect,
         );
         if (result == 0) return 0;
+        if (result == _noDeviceExitCode) return result!;
         failures++;
         stderr.writeln(
           '[rhr] Flutter attach ended${result == null ? '' : ' ($result)'}.',
@@ -869,21 +938,13 @@ Future<int> _runAttachProductFlow({
   }
 }
 
-/// Owns `flutter run --machine` so rhr can use Flutter's supported daemon
-/// protocol for reload/restart instead of patching an SDK or editor extension.
-Future<int> _runFlutter({
-  required String project,
-  String? code,
-  bool resync = false,
-}) => _runAttachProductFlow(project: project, code: code, resync: resync);
-
 /// `rhr setup`: enable Flutter custom devices and register the `rhr` device so
 /// the QA phone appears in the device picker. Idempotent — re-running refreshes
 /// the entry.
 Future<void> _setup(String? relay) async {
   relay ??= const String.fromEnvironment(
     'RHR_RELAY',
-    defaultValue: 'wss://rhr-relay.codeforge007.workers.dev',
+    defaultValue: defaultPublicRelay,
   );
 
   stderr.writeln('[rhr] enabling Flutter custom devices…');

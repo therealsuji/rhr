@@ -53,7 +53,8 @@ class MainActivity : FlutterActivity() {
 								.putExtra("relayUrl", call.argument<String>("relayUrl"))
 								.putStringArrayListExtra("relayUrls", ArrayList(relayUrls))
 								.putExtra("code", call.argument<String>("code"))
-								.putExtra("vmUri", call.argument<String>("vmUri")))
+								.putExtra("vmUri", call.argument<String>("vmUri"))
+								.putExtra("preferDirect", call.argument<Boolean>("preferDirect") ?: false))
 						result.success(null)
 					}
 					"kick" -> {

@@ -9,9 +9,9 @@ Hot reload a Flutter app running on an Android device **anywhere on the internet
 Install one app on the device — the **rhr player** — and stream *any* of your Flutter projects into it. Nothing to install per project, nothing to rebuild when you change code.
 
 ```
-Your machine                   Cloudflare (Durable Object)         Remote device
+Your machine                   Relay (Cloudflare or self-hosted)   Remote device
 ┌──────────────────┐           ┌──────────────────────┐           ┌─────────────────────┐
-│ rhr run          │◄──WSS────►│  RelaySession per    │◄───WSS────│ rhr player          │
+│ rhr run          │◄──WSS────►│  one session/code    │◄───WSS────│ rhr player          │
 │ └ flutter attach │           │  session code        │ (outbound)│ (generic shell app) │
 │   --debug-url    │           └──────────────────────┘           │   └► Dart VM Service │
 │   localhost:...  │                                              │      (debug build)  │
@@ -37,7 +37,13 @@ adb install -r build/app/outputs/flutter-apk/app-debug.apk
 
 It must be a **debug** build — hot reload needs the Dart VM Service (JIT), which release builds don't have.
 
-**2. Pick a relay.** The player ships pointed at a public relay (`wss://rhr-relay.codeforge007.workers.dev`) so you can try it with zero setup. For real work, deploy your own — it runs on Cloudflare's **free tier**, realistically $0/mo:
+The beta3 Player artifact is built for Android `arm64-v8a` with Flutter
+3.44.2 stable (Dart 3.12.2, engine revision
+`77e2e94772b6eb43759e34ed1ad7da4674e19cab`). The CLI compares framework,
+engine, Dart, Android plugin, and permission metadata before it streams. The
+matching release includes `FLUTTER_VERSION.json` and `RELEASE_MANIFEST.txt`.
+
+**2. Pick a relay.** The player ships pointed at a public relay (`wss://rhr-relay.codeforge007.workers.dev`) so you can try it with zero setup. For real work, use your own relay so the session bearer codes and traffic stay within infrastructure you control. The supported private option is another deployment of the same Cloudflare Worker, which runs on Cloudflare's **free tier** for small personal use:
 
 ```bash
 cd relay-worker && pnpm install && pnpm run deploy
@@ -46,13 +52,31 @@ cd relay-worker && pnpm install && pnpm run deploy
 
 Then pass `--relay` to the CLI, or bake it in with `--dart-define=RHR_RELAY=…`.
 
+For the product flow, pass the private relay directly to `rhr run`:
+
+```bash
+rhr run --relay wss://rhr-relay.<account>.workers.dev
+```
+
+You can avoid repeating it by putting `relay: wss://…` in `.rhr.yaml` next to
+the Flutter project. An explicit private relay replaces the shared public
+fallback; the temporary LAN relay is still preferred when the phone and
+computer share a network. For the Dart bridge experiment, add `direct: true`
+to the same file instead of passing `--direct` each time.
+
+The Dart relay in [`relay/`](relay/) is a development/self-hosting building
+block for a single-server deployment. It is plain HTTP/WebSocket and should be
+placed behind a TLS reverse proxy before exposing it to the internet; the
+Cloudflare Worker remains the easiest hosted default while this path is being
+hardened. A Docker image and deployment notes are in [`relay/README.md`](relay/README.md).
+
 **3. Install the CLI once.**
 
 ```bash
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.2
+  --git-ref v0.1.0-beta.3
 
 rhr doctor
 ```
@@ -69,6 +93,11 @@ rhr run
 
 Scan the printed QR with the player (or type the session code). rhr builds an Android bundle, syncs it to the device, and boots your app automatically. Then `r` to reload, `R` to restart, `q` to quit.
 
+The session code is a bearer credential: anyone who has it can control the
+debug VM. Keep it private and never use rhr with production data. If no Player
+joins an `attach` session within five minutes, the CLI exits with an actionable
+message instead of retrying forever.
+
 `--resync` ignores the device-side asset cache and re-uploads everything. `q` leaves the device VM alive, so `rhr run --code <same-code>` reconnects later without reopening the player.
 
 When the phone is connected over USB, `rhr run` automatically sends the initial
@@ -84,6 +113,39 @@ in the QR. The player tries that first and falls back to the public relay, while
 the CLI races both paths and reports which one won. No flag or network setup is
 required. The LAN listener exists only for the session and uses the same bearer
 code and tunnel protocol as the public path.
+
+### Direct WebRTC/STUN payloads (opt-in)
+
+The Dart bridge and CLI can now try an ordered, reliable WebRTC data channel for
+the tunnel payload. The existing relay carries the small offer/answer and ICE
+messages and remains the automatic fallback, so this is safe to try before a
+full relay-free signaling service exists:
+
+```dart
+RhrBridge.start(
+  relayUrl: relay,
+  sessionCode: code,
+  preferDirect: true,
+);
+```
+
+Run the matching attach with `rhr attach --direct`. If ICE or DTLS cannot
+complete, the command continues over the normal WebSocket tunnel. The generic
+Player can opt into the same native path when built with
+`--dart-define=RHR_DIRECT=true`; cellular validation and moving signaling off
+the public relay are the next gates for making this the default.
+
+The native Android path has now been exercised on the real Samsung test phone:
+the direct data channel negotiated over Wi-Fi and carried a VM-service request
+without dropping the relay fallback. This is still an opt-in experiment; the
+cellular and strict-NAT matrix is not proven yet.
+
+For a development APK with native direct transport enabled:
+
+```bash
+cd player
+flutter build apk --debug --dart-define=RHR_DIRECT=true
+```
 
 Asset uploads are content-addressed per installed player. Unchanged files stay
 in the phone's persistent cache. USB archives are SHA-256 verified in bounded
@@ -127,7 +189,7 @@ The beta is installed directly from its locked Git tag:
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.2
+  --git-ref v0.1.0-beta.3
 ```
 
 This is a one-time setup. Afterward, use `rhr run` from any Flutter project.
@@ -138,8 +200,8 @@ path is available.
 
 - `player/` — the rhr player: generic Flutter shell + native Android session service.
 - `cli/` — `rhr run`: builds, attaches, syncs assets, gates compatibility.
-- `relay-worker/` — production relay: Cloudflare Worker, one Durable Object per session.
-- `relay/` — the same protocol as a local Dart server, for development.
+- `relay-worker/` — hosted relay: Cloudflare Worker, one Durable Object per session.
+- `relay/` — single-instance Dart relay for development and self-hosting.
 - `bridge/` — device-side Dart package plus the shared tunnel protocol.
 
 ## Constraints
@@ -160,11 +222,11 @@ network. It carries compiled debug artifacts, not source, and still requires
 the random session bearer code. Disable untrusted local networks or use the
 public `wss://` path when local-network observers are in scope.
 
-The relay carries compiled kernel bytes only; your source never leaves your machine. Its application logs do not record session codes, VM Service URIs, or frame contents.
+The relay carries compiled kernel bytes only; your source never leaves your machine. Its application logs do not record session codes, VM Service URIs, or frame contents. See [SECURITY.md](SECURITY.md) before reporting a problem.
 
 ## Alternatives to the generic player
 
-**Bridge-in-your-own-app.** Instead of the player, embed the tunnel in your own debug app — add `rhr_bridge` as a path dependency and call `RhrBridge.start(relayUrl: …, sessionCode: …)` in `main()` under `kDebugMode`, then `rhr attach`. This is the older path and less exercised than the player; note that a hot *restart* tears down the Dart-side bridge until the app relaunches.
+**Bridge-in-your-own-app.** Instead of the player, embed the tunnel in your own debug app — add `rhr_bridge` as a path dependency and call `RhrBridge.start(relayUrl: …, sessionCode: …)` in `main()` under `kDebugMode`, then `rhr attach`. Add `preferDirect: true` and use `rhr attach --direct` to exercise the opt-in WebRTC/STUN payload path. This is the older path and less exercised than the player; note that a hot *restart* tears down the Dart-side bridge until the app relaunches.
 
 **Project-specific player.** For apps with uncommon native dependencies, `rhr player build --project .` generates a matching player APK. It pins your resolved Android plugins and merges required permissions, leaving your app source untouched. Custom Android source, native libraries, and Firebase config aren't covered yet — this is a prototype, not part of the normal flow.
 
@@ -173,8 +235,8 @@ The relay carries compiled kernel bytes only; your source never leaves your mach
 ```bash
 # End-to-end smoke test on the desktop, no device required:
 cd relay  && dart run bin/relay.dart 8123 &
-cd bridge && dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8123 test &
-cd cli    && dart run bin/rhr.dart attach --relay ws://127.0.0.1:8123 --code test --no-flutter
+cd bridge && dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8123 rhr-test-2345-6789-abcd &
+cd cli    && dart run bin/rhr.dart attach --relay ws://127.0.0.1:8123 --code rhr-test-2345-6789-abcd --no-flutter
 ```
 
 Checks before a release:
@@ -189,3 +251,7 @@ cd player         && dart analyze && flutter test && dart run tool/check_16kb.da
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Contributions and safe bug reports are covered by [CONTRIBUTING.md](CONTRIBUTING.md)
+and [SECURITY.md](SECURITY.md). Please use the issue forms for reproducible
+compatibility reports and keep bearer session codes out of public discussions.

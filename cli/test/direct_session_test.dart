@@ -1,0 +1,145 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:test/test.dart';
+
+String _findRepo() {
+  var directory = Directory.current;
+  while (true) {
+    if (File('${directory.path}/relay/bin/relay.dart').existsSync()) {
+      return directory.path;
+    }
+    final parent = directory.parent;
+    if (parent.path == directory.path) {
+      throw StateError('repo root not found from ${Directory.current.path}');
+    }
+    directory = parent;
+  }
+}
+
+final _repo = _findRepo();
+
+Future<int> _freePort() async {
+  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  final port = server.port;
+  await server.close();
+  return port;
+}
+
+Future<Process> _spawn(
+  List<String> args, {
+  required String workDir,
+  required List<String> lines,
+}) async {
+  final process = await Process.start(Platform.resolvedExecutable, [
+    'run',
+    ...args,
+  ], workingDirectory: workDir);
+  void drain(Stream<List<int>> stream) {
+    stream
+        .transform(SystemEncoding().decoder)
+        .transform(const LineSplitter())
+        .listen(lines.add);
+  }
+
+  drain(process.stdout);
+  drain(process.stderr);
+  return process;
+}
+
+Future<void> _waitFor(
+  List<String> lines,
+  RegExp pattern,
+  String description,
+) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 120));
+  while (DateTime.now().isBefore(deadline)) {
+    if (lines.any(pattern.hasMatch)) return;
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+  }
+  fail('timed out waiting for $description:\n${lines.join('\n')}');
+}
+
+void main() {
+  test(
+    'opt-in direct transport negotiates and carries a VM request',
+    () async {
+      final port = await _freePort();
+      final code = 'direct-${DateTime.now().millisecondsSinceEpoch}';
+      final relayLines = <String>[];
+      final cliLines = <String>[];
+      final deviceLines = <String>[];
+      final relay = await _spawn(
+        ['bin/relay.dart', '$port'],
+        workDir: '$_repo/relay',
+        lines: relayLines,
+      );
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--direct',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      final device = await _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+          '--direct',
+        ],
+        workDir: '$_repo/bridge',
+        lines: deviceLines,
+      );
+
+      Future<void> stop(Process process) async {
+        process.kill();
+        await process.exitCode.timeout(const Duration(seconds: 10));
+      }
+
+      addTearDown(() async {
+        await stop(device);
+        await stop(cli);
+        await stop(relay);
+      });
+
+      await _waitFor(
+        deviceLines,
+        RegExp('direct WebRTC/STUN path is ready'),
+        'direct peer',
+      );
+      await _waitFor(
+        cliLines,
+        RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
+        'tunnel',
+      );
+
+      final tunnelLine = cliLines.firstWhere(
+        (line) => line.contains('tunneled VM service:'),
+      );
+      final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
+      final client = HttpClient();
+      try {
+        final response = await client
+            .getUrl(uri.resolve('getVMInfo'))
+            .then((request) => request.close())
+            .timeout(const Duration(seconds: 10));
+        final body = await utf8.decoder.bind(response).join();
+        expect(response.statusCode, HttpStatus.ok);
+        expect(body, contains('jsonrpc'));
+      } finally {
+        client.close(force: true);
+      }
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
+}

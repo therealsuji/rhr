@@ -55,7 +55,10 @@ Future<String?> _tryMainIsolateId(Uri vmService) async {
     final isolates = result['isolates'];
     if (isolates is! List) return null;
     for (final isolate in isolates.whereType<Map<String, dynamic>>()) {
-      if (isolate['name'] == 'main') return isolate['id'] as String?;
+      if (isolate['name'] == 'main') {
+        final id = isolate['id'];
+        if (id is String) return id;
+      }
     }
     return null;
   } on Exception {

@@ -1,0 +1,31 @@
+name: Compatibility request
+description: Report a Flutter/plugin/Android compatibility gap
+title: "[Compatibility] "
+labels: [compatibility]
+body:
+  - type: input
+    id: flutter
+    attributes:
+      label: Flutter and Dart versions
+      placeholder: "Flutter 3.x, Dart 3.x"
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+    validations:
+      required: true
+  - type: textarea
+    id: plugins
+    attributes:
+      label: Plugins, permissions, or native code required
+      description: Include package names and versions; do not include private source.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Observed result
+    validations:
+      required: true

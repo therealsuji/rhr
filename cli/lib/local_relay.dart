@@ -15,9 +15,10 @@ final class LocalRelay {
   WebSocket? _device;
   WebSocket? _dev;
   String? _lastDeviceInfo;
-  final _subscriptions = <StreamSubscription<Object?>>[];
+  final _subscriptions = <WebSocket, StreamSubscription<Object?>>{};
 
   int get port => _server.port;
+  int get activeSubscriptionCount => _subscriptions.length;
   String get loopbackUrl => 'ws://127.0.0.1:$port';
   String get advertisedUrl => 'ws://${lanAddress.address}:$port';
 
@@ -70,15 +71,19 @@ final class LocalRelay {
   void _attachDevice(WebSocket socket) {
     _device?.close(4001, 'replaced by new connection');
     _device = socket;
-    _subscriptions.add(
-      socket.listen(
-        (message) {
-          if (message is String) _lastDeviceInfo = message;
-          _safeAdd(_dev, message);
-        },
-        onDone: () => _deviceClosed(socket),
-        onError: (_) => _deviceClosed(socket),
-      ),
+    _subscriptions[socket] = socket.listen(
+      (message) {
+        if (message is String) _lastDeviceInfo = message;
+        _safeAdd(_dev, message);
+      },
+      onDone: () {
+        _subscriptions.remove(socket);
+        _deviceClosed(socket);
+      },
+      onError: (_) {
+        _subscriptions.remove(socket);
+        _deviceClosed(socket);
+      },
     );
     final info = _lastDeviceInfo;
     if (info != null) _safeAdd(_dev, info);
@@ -87,16 +92,16 @@ final class LocalRelay {
   void _attachDev(WebSocket socket) {
     _dev?.close(4001, 'replaced by new connection');
     _dev = socket;
-    _subscriptions.add(
-      socket.listen(
-        (message) => _safeAdd(_device, message),
-        onDone: () {
-          if (identical(_dev, socket)) _dev = null;
-        },
-        onError: (_) {
-          if (identical(_dev, socket)) _dev = null;
-        },
-      ),
+    _subscriptions[socket] = socket.listen(
+      (message) => _safeAdd(_device, message),
+      onDone: () {
+        _subscriptions.remove(socket);
+        if (identical(_dev, socket)) _dev = null;
+      },
+      onError: (_) {
+        _subscriptions.remove(socket);
+        if (identical(_dev, socket)) _dev = null;
+      },
     );
     final info = _lastDeviceInfo;
     if (info != null) _safeAdd(socket, info);
@@ -120,7 +125,7 @@ final class LocalRelay {
   }
 
   Future<void> close() async {
-    for (final subscription in _subscriptions) {
+    for (final subscription in _subscriptions.values.toList()) {
       await subscription.cancel();
     }
     _subscriptions.clear();

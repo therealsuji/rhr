@@ -1,4 +1,4 @@
-// rhr custom-device `runDebug` helper (SPIKE).
+// rhr custom-device `runDebug` helper.
 //
 // A Flutter custom device drives a run through lifecycle commands. This is the
 // runDebug command: it opens the relay tunnel to the player, waits for the
@@ -16,9 +16,6 @@
 //
 // Usage: dart run device_run.dart --relay <wss://...> --code <session>
 //
-// This is the minimal spike to prove the handshake. Once proven it folds into
-// the main `rhr` binary as a `device-run` subcommand.
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -28,6 +25,7 @@ import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
+import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/terminal_qr.dart';
 import 'package:web_socket_channel/io.dart';
 
@@ -60,8 +58,7 @@ Future<void> main(List<String> args) async {
   // payload). Only when a custom relay is used do we encode the full {relay,
   // code} JSON. Printed to stderr so it never pollutes the stdout line Flutter's
   // ProtocolDiscovery parses.
-  const defaultRelay = 'wss://rhr-relay.codeforge007.workers.dev';
-  final payload = relay == defaultRelay
+  final payload = relay == defaultPublicRelay
       ? code
       : jsonEncode({'relay': relay, 'code': code});
   _printQr(payload, code);
@@ -192,16 +189,7 @@ Future<bool> _serve(String relay, String code) async {
   final flow = FlowControl();
   Uri? activeVm;
   String? assetStoreId;
-  final localCompatibility = readLocalFlutterCompatibility();
-  final requiredAndroidPlugins = readAndroidPluginProfile(
-    Directory.current.path,
-  );
-  final requiredAndroidPermissions = readAndroidPermissionProfile(
-    Directory.current.path,
-  );
-  final unsupportedAndroidInputs = readUnsupportedAndroidInputs(
-    Directory.current.path,
-  );
+  final compatibility = readProjectCompatibilityProfile(Directory.current.path);
 
   ws.stream.listen(
     (msg) {
@@ -230,79 +218,26 @@ Future<bool> _serve(String relay, String code) async {
             );
             exit(78);
           }
-          final playerCompatibility = FlutterCompatibility.fromJson(
-            rawCompatibility,
-          );
-          final differences = localCompatibility.differencesFrom(
-            playerCompatibility,
-          );
+          final differences = compatibility.differencesFrom(rawCompatibility);
           if (differences.isNotEmpty) {
-            stderr.writeln(
-              '[rhr] COMPATIBILITY_BLOCKED: Flutter SDK mismatch:',
-            );
+            stderr.writeln('[rhr] COMPATIBILITY_BLOCKED:');
             for (final difference in differences) {
               stderr.writeln('  - $difference');
             }
             stderr.writeln(
-              '[rhr] Rebuild and reinstall the player using the local Flutter '
-              'SDK (${localCompatibility.frameworkVersion}).',
+              '[rhr] Rebuild and reinstall a player compatible with this '
+              'Flutter project.',
             );
             exit(78);
           }
-          final playerAndroidPlugins = parseAndroidPluginProfile(
-            rawCompatibility['androidPlugins'],
-          );
-          final pluginDifferences = androidPluginDifferences(
-            required: requiredAndroidPlugins,
-            available: playerAndroidPlugins,
-          );
-          if (pluginDifferences.isNotEmpty) {
+          final vmValue = m['vm'];
+          if (vmValue is! String || vmValue.isEmpty) {
             stderr.writeln(
-              '[rhr] COMPATIBILITY_BLOCKED: Android plugin drift:',
-            );
-            for (final difference in pluginDifferences) {
-              stderr.writeln('  - $difference');
-            }
-            stderr.writeln(
-              '[rhr] Build and install a player that includes these exact '
-              'resolved Android plugins.',
+              '[rhr] COMPATIBILITY_BLOCKED: player announced no VM service.',
             );
             exit(78);
           }
-          final playerAndroidPermissions = parseAndroidPermissionProfile(
-            rawCompatibility['androidPermissions'],
-          );
-          final permissionDifferences = androidPermissionDifferences(
-            required: requiredAndroidPermissions,
-            available: playerAndroidPermissions,
-          );
-          if (permissionDifferences.isNotEmpty) {
-            stderr.writeln(
-              '[rhr] COMPATIBILITY_BLOCKED: Android permission drift:',
-            );
-            for (final difference in permissionDifferences) {
-              stderr.writeln('  - $difference');
-            }
-            stderr.writeln(
-              '[rhr] Build and install a player that declares these Android '
-              'permissions.',
-            );
-            exit(78);
-          }
-          if (unsupportedAndroidInputs.isNotEmpty) {
-            stderr.writeln(
-              '[rhr] COMPATIBILITY_BLOCKED: project-specific Android inputs:',
-            );
-            for (final input in unsupportedAndroidInputs) {
-              stderr.writeln('  - $input');
-            }
-            stderr.writeln(
-              '[rhr] Build and install a project-specific player containing '
-              'these native inputs.',
-            );
-            exit(78);
-          }
-          final announcedVm = Uri.parse(m['vm'] as String);
+          final announcedVm = Uri.parse(vmValue);
           if (!vmReady.isCompleted) {
             activeVm = announcedVm;
             vmReady.complete(announcedVm);
@@ -348,18 +283,23 @@ Future<bool> _serve(String relay, String code) async {
     },
   );
 
-  final keepalive = Timer.periodic(const Duration(seconds: 60), (_) {
+  final keepalive = Timer.periodic(developerLeasePingInterval, (_) {
     ws.sink.add(jsonEncode({'t': 'ping'}));
   });
 
-  final vm = await Future.any<Object?>([
+  final vmResult = await Future.any<Object>([
     vmReady.future,
-    wsDied.future,
-  ]).then((v) => v as Uri?);
-  if (vm == null) {
+    wsDied.future.then((_) => const _RelayEnded()),
+  ]);
+  if (vmResult is _RelayEnded) {
     keepalive.cancel();
     return false; // relay dropped before the phone showed up — retry
   }
+  if (vmResult is! Uri) {
+    keepalive.cancel();
+    throw StateError('relay returned an unexpected VM-service result');
+  }
+  final vm = vmResult;
 
   // Reload activity indicator: the compile happens on THIS machine, so the
   // phone can't know a reload started until bytes arrive — leaving a silent gap
@@ -466,6 +406,10 @@ Future<bool> _serve(String relay, String code) async {
   sockets.clear();
   await ws.sink.close();
   return flutterEnded;
+}
+
+final class _RelayEnded {
+  const _RelayEnded();
 }
 
 /// Render a scannable QR to the terminal (stderr, so it never pollutes the

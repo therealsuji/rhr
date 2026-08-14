@@ -123,6 +123,9 @@ flutter {
 dependencies {
     // Native tunnel bridge (RhrSessionService)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Native WebRTC data channel for the opt-in direct payload path. The
+    // relay remains the signaling and fallback transport.
+    implementation("io.github.webrtc-sdk:android:144.7559.12")
     // Spring physics for the dev overlay animations
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
     // Core library desugaring (see compileOptions above)

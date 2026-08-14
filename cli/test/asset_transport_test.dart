@@ -265,20 +265,17 @@ OFFLINE offline transport_id:6
   });
 
   test('USB archive writer waits for remote tar completion without a PTY', () {
-    expect(
-      usbArchiveWriteAdbArguments('/data/player/assets/flutter_assets'),
-      [
-        'shell',
-        '-T',
-        'run-as',
-        'dev.rhr.rhr_player',
-        'tar',
-        '-xf',
-        '-',
-        '-C',
-        '/data/player/assets/flutter_assets',
-      ],
-    );
+    expect(usbArchiveWriteAdbArguments('/data/player/assets/flutter_assets'), [
+      'shell',
+      '-T',
+      'run-as',
+      'dev.rhr.rhr_player',
+      'tar',
+      '-xf',
+      '-',
+      '-C',
+      '/data/player/assets/flutter_assets',
+    ]);
   });
 
   test('USB inventory rejects missing and corrupt remote files', () {

@@ -182,7 +182,19 @@ class RhrSessionService : Service() {
 	private val unacked = ConcurrentHashMap<Int, Int>()
 	private val flowLock = Object()
 	private var reconnectThread: Thread? = null
+	// A reconnect loop belongs to the session code it was created for. The
+	// service can receive a new code while the old OkHttp callback is still
+	// unwinding, so a boolean stopped flag alone is not enough: it gets reset
+	// for the replacement session and lets the old loop dial the new code (or
+	// block the new loop from starting).
+	@Volatile private var sessionGeneration = 0L
+	@Volatile private var reconnectGeneration: Long? = null
 	private var vmWatchThread: Thread? = null
+	// Optional direct payload path. This object deliberately lives beside the
+	// relay WebSocket in the foreground service, never in the guest Flutter
+	// engine, so hot restart cannot destroy the peer connection.
+	private var directTransport: RhrDirectTransport? = null
+	private var preferDirect = false
 	// Last time we heard from the developer (any dev→device message, or a
 	// relay dev_present). Drives the presence lease expiry.
 	@Volatile private var lastDevActivity = 0L
@@ -217,6 +229,7 @@ class RhrSessionService : Service() {
 					intent.getStringExtra("code") ?: return START_NOT_STICKY
 				val requestedVm =
 					intent.getStringExtra("vmUri") ?: return START_NOT_STICKY
+				val requestedDirect = intent.getBooleanExtra("preferDirect", false)
 				val sameLiveSession = reconnectThread?.isAlive == true &&
 					!stopped.get() && sessionCode == requestedCode
 				if (sameLiveSession) {
@@ -226,9 +239,21 @@ class RhrSessionService : Service() {
 					// endpoint during same-session auto-resume.
 					Log.i(TAG, "[$sessionCode] preserving live VM URI $vmUri")
 				} else {
+					// Replace the old transport before adopting the new code. The old
+					// reconnect thread may still be inside an OkHttp callback; the
+					// generation check below makes that thread exit without touching
+					// the replacement session's status or sockets.
+					sessionGeneration += 1
+					stopped.set(true)
+					ws?.close(1000, "session replaced")
+					directTransport?.close()
+					directTransport = null
+					reconnectThread?.interrupt()
+					stopped.set(false)
 					relayUrls = requestedRelays
 					sessionCode = requestedCode
 					vmUri = requestedVm
+					preferDirect = requestedDirect
 					currentCode = sessionCode
 					currentVm = vmUri
 					readySent = false // re-arm sync-ready for a genuinely new session
@@ -237,7 +262,7 @@ class RhrSessionService : Service() {
 					watchForDevfsDirs()
 					startVmUriWatch()
 					startPresenceWatch()
-					startReconnectLoop()
+					startReconnectLoop(sessionGeneration)
 				}
 				onUpdate?.invoke()
 				startForeground(NOTIF_ID, buildNotification())
@@ -246,6 +271,8 @@ class RhrSessionService : Service() {
 			"stop" -> {
 				stopped.set(true)
 				ws?.close(1000, "stopped")
+				directTransport?.close()
+				directTransport = null
 				// Wake the reconnect thread NOW so it sees `stopped` and exits,
 				// instead of sleeping up to 20s in its keepalive wait and
 				// re-dialing in the meantime (the "still retrying after
@@ -263,6 +290,8 @@ class RhrSessionService : Service() {
 	override fun onDestroy() {
 		stopped.set(true)
 		ws?.close(1000, "service destroyed")
+		directTransport?.close()
+		directTransport = null
 		devfsObserver?.stopWatching()
 		if (RhrSessionService.current === this) RhrSessionService.current = null
 		super.onDestroy()
@@ -368,6 +397,22 @@ class RhrSessionService : Service() {
 				.put("androidPermissions", androidPermissions()))
 		.toString()
 
+	private fun startDirectTransport(webSocket: WebSocket) {
+		directTransport?.close()
+		directTransport = RhrDirectTransport(
+			this,
+			sendSignal = { signal -> webSocket.send(signal) },
+			onFrame = { frame -> handleFrame(frame) },
+			onState = { state ->
+				Log.i(TAG, "[$sessionCode] direct transport $state")
+				if (state == RhrDirectTransport.State.OPEN) {
+					Log.i(TAG, "[$sessionCode] direct WebRTC payload path ready")
+				}
+			},
+		)
+		directTransport?.startOffer()
+	}
+
 	private fun androidPermissions(): org.json.JSONArray {
 		val info = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
 		return org.json.JSONArray(info.requestedPermissions?.sorted() ?: emptyList<String>())
@@ -377,18 +422,19 @@ class RhrSessionService : Service() {
 
 	private val loopSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
-	private fun startReconnectLoop() {
-		if (reconnectThread?.isAlive == true) {
+	private fun startReconnectLoop(generation: Long = sessionGeneration) {
+		if (reconnectThread?.isAlive == true && reconnectGeneration == generation) {
 			Log.w(TAG, "[$sessionCode] startReconnectLoop SKIPPED — a loop is already alive")
 			return
 		}
+		reconnectGeneration = generation
 		val loopId = loopSeq.incrementAndGet()
 		Log.i(TAG, "[$sessionCode] STARTING reconnect loop #$loopId")
 		reconnectThread = Thread {
 			var backoffMs = 1000L
 			var candidateIndex = 0
 			var failuresThisRound = 0
-			while (!stopped.get()) {
+			while (!stopped.get() && generation == sessionGeneration) {
 				val connected = AtomicBoolean(false)
 				val closed = Object()
 				val relayUrl = relayUrls[candidateIndex % relayUrls.size]
@@ -396,8 +442,9 @@ class RhrSessionService : Service() {
 				val url = "$relayUrl/s/$sessionCode/device"
 				Log.i(TAG, "[$sessionCode] loop#$loopId DIALING $url")
 				val req = Request.Builder().url(url).build()
-				ws = client.newWebSocket(req, object : WebSocketListener() {
+				val socket = client.newWebSocket(req, object : WebSocketListener() {
 					override fun onOpen(webSocket: WebSocket, response: Response) {
+						if (generation != sessionGeneration) return
 						connected.set(true)
 						activeRelayUrl = relayUrl
 						failuresThisRound = 0
@@ -415,8 +462,13 @@ class RhrSessionService : Service() {
 					}
 
 					override fun onMessage(webSocket: WebSocket, text: String) {
+						if (generation != sessionGeneration) return
 						Log.i(TAG, "[$sessionCode] RX text: ${text.take(60)}")
 						lastDevActivity = System.currentTimeMillis()
+						if (text.contains("\"t\":\"direct_") || text.contains("\"t\": \"direct_")) {
+							directTransport?.handleSignal(text)
+							return
+						}
 						// The CLI's farewell on clean quit: leave "Connected" and
 						// clear progress it owned.
 						if (text.contains("\"dev_gone\"")) {
@@ -434,6 +486,13 @@ class RhrSessionService : Service() {
 						// and we answer with a fresh info so pairing is robust to
 						// connection order. Unknown text (e.g. pings) is ignored.
 						if (text.contains("\"hello\"") && !vmUri.contains(":0/")) {
+							// Wait for the developer hello before creating the offer. A
+							// device can connect to the relay before the CLI subscribes;
+							// starting here keeps the first offer and ICE candidates on a
+							// live developer stream instead of losing them in the relay.
+							if (preferDirect && directTransport == null) {
+								startDirectTransport(webSocket)
+							}
 							announceInfo()
 						} else if (text.contains("\"reloading\"")) {
 							// The dev detected reload/sync traffic starting → show an
@@ -463,13 +522,15 @@ class RhrSessionService : Service() {
 					}
 
 					override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+						if (generation != sessionGeneration) return
 						lastDevActivity = System.currentTimeMillis()
 						if (status != "connected") status = "connected"
-						handleFrame(webSocket, bytes.toByteArray())
+						handleFrame(bytes.toByteArray())
 					}
 
 					override fun onFailure(
 						webSocket: WebSocket, t: Throwable, response: Response?) {
+						if (generation != sessionGeneration) return
 						val code = response?.code
 						Log.w(TAG, "[$sessionCode] ONFAILURE ${t.javaClass.simpleName}: " +
 							"${t.message} httpResp=$code")
@@ -488,32 +549,45 @@ class RhrSessionService : Service() {
 						// dies, keeping the last byte count makes a completed guest app
 						// look permanently stuck (for example, "Syncing assets 1%").
 						setProgress("", 0, 0)
+						directTransport?.close()
+						directTransport = null
 						connected.set(false)
-						synchronized(closed) { (closed as Object).notifyAll() }
+						synchronized(closed) { closed.notifyAll() }
 					}
 
 					override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+						if (generation != sessionGeneration) return
 						Log.w(TAG, "[$sessionCode] ONCLOSING code=$code reason=\"$reason\"")
 					}
 
 					override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+						if (generation != sessionGeneration) return
 						Log.w(TAG, "[$sessionCode] ONCLOSED code=$code reason=\"$reason\"")
 						status = "closed"
 						setProgress("", 0, 0)
+						directTransport?.close()
+						directTransport = null
 						connected.set(false)
-						synchronized(closed) { (closed as Object).notifyAll() }
+						synchronized(closed) { closed.notifyAll() }
 					}
 				})
+				if (generation == sessionGeneration) {
+					ws = socket
+				} else {
+					socket.close(1000, "session replaced")
+				}
 				// Block this loop until the socket dies (onClosed/onFailure call
 				// notifyAll). Plain indefinite wait — do NOT gate on `connected`,
 				// which isn't set until the async onOpen fires; gating raced past
 				// it and re-dialed every ~1s, and each re-dial made the relay kick
 				// the prior connection ("replaced by new connection") — a storm.
 				synchronized(closed) {
-					try { (closed as Object).wait() } catch (_: InterruptedException) {}
+					try { closed.wait() } catch (_: InterruptedException) {}
 				}
 				cleanupChannels()
-				if (stopped.get()) break
+				directTransport?.close()
+				directTransport = null
+				if (stopped.get() || generation != sessionGeneration) break
 				if (connected.get()) {
 					backoffMs = 1000L
 					failuresThisRound = 0
@@ -529,7 +603,7 @@ class RhrSessionService : Service() {
 				// → notifyAll) interrupts the backoff instead of making the
 				// tester wait up to 30s. Interrupt (stop) breaks it the same.
 				synchronized(flowLock) {
-					try { (flowLock as Object).wait(backoffMs) }
+					try { flowLock.wait(backoffMs) }
 					catch (_: InterruptedException) {}
 				}
 			}
@@ -537,7 +611,9 @@ class RhrSessionService : Service() {
 			// (which hides the overlay pill). Only mark "stopped" if the loop
 			// somehow ended on its own — otherwise the pill would sit on
 			// "Connection: stopped…" over the lobby after Disconnect.
-			status = if (stopped.get()) "idle" else "stopped"
+			if (generation == sessionGeneration) {
+				status = if (stopped.get()) "idle" else "stopped"
+			}
 		}.also { it.isDaemon = true; it.start() }
 	}
 
@@ -578,14 +654,20 @@ class RhrSessionService : Service() {
 
 	// ---- tunnel frames ----------------------------------------------------
 
-	private fun handleFrame(ws: WebSocket, frame: ByteArray) {
+	private fun sendBinaryFrame(frame: ByteArray): Boolean {
+		val direct = directTransport
+		if (direct != null && direct.send(frame)) return true
+		return ws?.send(frame.toByteString()) == true
+	}
+
+	private fun handleFrame(frame: ByteArray) {
 		if (frame.size < 5) return
 		val op = frame[0].toInt()
 		val channel = ByteBuffer.wrap(frame, 1, 4).int
 		when (op) {
 			OP_OPEN -> {
 				pending[channel] = java.io.ByteArrayOutputStream()
-				openChannel(ws, channel)
+				openChannel(channel)
 			}
 			OP_DATA -> {
 				val sock = sockets[channel]
@@ -598,7 +680,7 @@ class RhrSessionService : Service() {
 				} else {
 					pending[channel]?.write(frame, 5, frame.size - 5)
 				}
-				ws.send(encodeAck(channel, frame.size - 5).toByteString())
+				sendBinaryFrame(encodeAck(channel, frame.size - 5))
 			}
 			OP_ACK -> {
 				val n = ByteBuffer.wrap(frame, 5, 4).int
@@ -611,7 +693,7 @@ class RhrSessionService : Service() {
 		}
 	}
 
-	private fun openChannel(ws: WebSocket, channel: Int) {
+	private fun openChannel(channel: Int) {
 		Thread {
 			try {
 				val vm = android.net.Uri.parse(vmUri)
@@ -638,7 +720,7 @@ class RhrSessionService : Service() {
 						while (true) {
 							val n = input.read(buf)
 							if (n < 0) break
-							ws.send(encodeData(channel, buf, n).toByteString())
+							sendBinaryFrame(encodeData(channel, buf, n))
 							// Flow control: block while this channel's window is full.
 							synchronized(flowLock) {
 								unacked[channel] = (unacked[channel] ?: 0) + n
@@ -652,7 +734,7 @@ class RhrSessionService : Service() {
 					} catch (_: Exception) {
 					} finally {
 						if (sockets.remove(channel) != null) {
-							ws.send(encodeClose(channel).toByteString())
+							sendBinaryFrame(encodeClose(channel))
 						}
 						readers.remove(channel)
 						synchronized(flowLock) { unacked.remove(channel) }
@@ -663,7 +745,7 @@ class RhrSessionService : Service() {
 				reader.start()
 			} catch (e: Exception) {
 				Log.w(TAG, "channel $channel: VM connect failed: $e")
-				ws.send(encodeClose(channel).toByteString())
+				sendBinaryFrame(encodeClose(channel))
 			}
 		}.also { it.isDaemon = true }.start()
 	}
@@ -673,7 +755,7 @@ class RhrSessionService : Service() {
 		sockets.remove(channel)?.let { try { it.close() } catch (_: Exception) {} }
 		readers.remove(channel)?.interrupt()
 		synchronized(flowLock) { unacked.remove(channel); flowLock.notifyAll() }
-		if (notifyPeer) ws?.send(encodeClose(channel).toByteString())
+		if (notifyPeer) sendBinaryFrame(encodeClose(channel))
 	}
 
 	private fun cleanupChannels() {
@@ -708,7 +790,7 @@ class RhrSessionService : Service() {
 	// and the overlay can ask the developer for the initial Hot Restart.
 	private val readyHandler = android.os.Handler(android.os.Looper.getMainLooper())
 	private var readyRunnable: Runnable? = null
-	private var readySent = false
+	@Volatile private var readySent = false
 
 	private fun armGuestReady() {
 		// Show an indeterminate "Syncing…" bar while DevFS writes are landing —
@@ -764,8 +846,15 @@ class RhrSessionService : Service() {
 	}
 
 	private fun sweepOrphanedDevfsDirs() {
+		// Flutter's VM service can still issue _deleteDevFS for a previous
+		// directory after the relay session has been replaced. Deleting a fresh
+		// directory here races that cleanup and surfaces as PathNotFoundException
+		// in `flutter attach`. Keep recent directories available for Flutter's
+		// idempotent cleanup; only reclaim genuinely old leftovers.
+		val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
 		codeCacheDir.listFiles()?.forEach { f ->
-			if (f.isDirectory && devfsProjectName(f.name) != null) {
+			if (f.isDirectory && devfsProjectName(f.name) != null &&
+				f.lastModified() < cutoff) {
 				deleteWithoutFollowingSymlinks(f)
 				Log.i(TAG, "swept orphaned DevFS dir ${f.name}")
 			}

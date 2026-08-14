@@ -3,13 +3,23 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/io.dart';
 
+abstract interface class SessionTransport {
+  Stream<Object> get stream;
+  Future<String> get selectedRelay;
+  String? get closeReason;
+  void send(Object message);
+  Future<void> close();
+}
+
 /// Connects the dev end to several relay candidates and selects the first one
 /// that produces a device `info` message.
 ///
 /// Callers see one stream and one send method; LAN/public fallback, loser
 /// cleanup, and pre-selection buffering stay inside this deep module.
-final class RelayRace {
+final class RelayRace implements SessionTransport {
   RelayRace._();
+
+  static const _hello = '{"t":"hello"}';
 
   final _events = StreamController<Object>();
   final _selected = Completer<String>();
@@ -34,7 +44,7 @@ final class RelayRace {
       throw StateError('could not connect to any relay candidate');
     }
     for (final candidate in race._candidates) {
-      candidate.channel.sink.add(jsonEncode({'t': 'hello'}));
+      candidate.channel.sink.add(_hello);
     }
     return race;
   }
@@ -68,6 +78,11 @@ final class RelayRace {
       if (!_isDeviceInfo(message)) return;
       _winner = candidate;
       if (!_selected.isCompleted) _selected.complete(candidate.relay);
+      // The initial hello may have crossed the relay before the device
+      // connected. Repeat it after the cached info arrives so a dev-first
+      // pairing can still trigger optional device-side upgrades (such as
+      // direct WebRTC signaling).
+      candidate.channel.sink.add(_hello);
       for (final loser in _candidates.where((item) => item != candidate)) {
         unawaited(loser.channel.sink.close());
       }

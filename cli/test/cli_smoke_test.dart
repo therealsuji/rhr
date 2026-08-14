@@ -25,6 +25,7 @@ void main() {
 
     expect(result.exitCode, 0);
     expect('${result.stdout}', contains('rhr run [options]'));
+    expect('${result.stdout}', contains('--relay <wss://...>'));
     expect('${result.stdout}', contains('rhr doctor'));
   });
 }

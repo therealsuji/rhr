@@ -12,17 +12,26 @@ import 'dart:developer' show Service;
 import 'dart:io';
 
 import 'package:web_socket_channel/io.dart';
+import 'package:webrtc_dart/webrtc_dart.dart';
 
+import 'direct_signaling.dart';
+import 'direct_webrtc.dart';
 import 'tunnel.dart';
 
 class RhrBridge {
   RhrBridge._(
-      this.relayUrl, this.sessionCode, this.assetStoreId, this.compatibility);
+    this.relayUrl,
+    this.sessionCode,
+    this.assetStoreId,
+    this.compatibility,
+    this.preferDirect,
+  );
 
   final String relayUrl;
   final String sessionCode;
   final String? assetStoreId;
   final Map<String, dynamic>? compatibility;
+  final bool preferDirect;
   final _sockets = <int, Socket>{};
   final _subs = <int, StreamSubscription<Uint8List>>{};
   final _flow = FlowControl();
@@ -46,10 +55,11 @@ class RhrBridge {
     try {
       await _ws?.sink.close(1000, 'dispose');
     } catch (_) {}
+    if (identical(_instance, this)) _instance = null;
   }
 
   /// Starts the bridge and keeps it connected (with backoff) forever.
-  /// [relayUrl] like `ws://relay.example.com:8787`.
+  /// [relayUrl] like `ws://relay.example.com:8123`.
   /// [assetStoreId] and [compatibility] are announced in the info message so
   /// the dev CLI's compatibility gate can pass on desktop/testing devices
   /// (the Android player supplies these from BuildConfig).
@@ -58,9 +68,18 @@ class RhrBridge {
     required String sessionCode,
     String? assetStoreId,
     Map<String, dynamic>? compatibility,
+    bool preferDirect = false,
   }) {
-    final b = _instance ??=
-        RhrBridge._(relayUrl, sessionCode, assetStoreId, compatibility);
+    final existing = _instance;
+    if (existing != null && !existing._stopped) return existing;
+    final b = RhrBridge._(
+      relayUrl,
+      sessionCode,
+      assetStoreId,
+      compatibility,
+      preferDirect,
+    );
+    _instance = b;
     unawaited(b._run());
     return b;
   }
@@ -87,20 +106,35 @@ class RhrBridge {
         await ws.ready;
         backoff = const Duration(seconds: 1);
         _log('connected to relay, vm=$vmUri');
-        ws.sink.add(jsonEncode({
-          't': 'info',
-          'vm': vmUri.toString(),
-          if (assetStoreId != null) 'assetStoreId': assetStoreId,
-          if (compatibility != null) 'compatibility': compatibility,
-        }));
 
-        await for (final msg in ws.stream) {
-          if (msg is String) continue; // no device-bound control messages yet
-          final f = decodeFrame(msg as List<int>);
+        DirectWebRtcPeer? direct;
+        var directReady = false;
+        var directStarted = false;
+
+        Future<void> sendFrame(Uint8List frame) async {
+          final peer = direct;
+          if (!directReady || peer == null) {
+            ws.sink.add(frame);
+            return;
+          }
+          try {
+            await peer.send(frame);
+          } catch (_) {
+            directReady = false;
+            try {
+              ws.sink.add(frame);
+            } on StateError {
+              // The relay can be closing at the same time as the direct peer.
+            }
+          }
+        }
+
+        void handleFrame(Object raw) {
+          final f = decodeFrame(raw as List<int>);
           switch (f.op) {
             case opOpen:
               _pending[f.channel] = [];
-              unawaited(_openChannel(ws, f.channel, vmUri));
+              unawaited(_openChannel(ws, f.channel, vmUri, sendFrame));
             case opData:
               final sock = _sockets[f.channel];
               if (sock != null) {
@@ -109,7 +143,7 @@ class RhrBridge {
                 _pending[f.channel]?.addAll(f.payload);
               }
               // Ack on receipt: buffered bytes are bounded by the window.
-              ws.sink.add(encodeAck(f.channel, f.payload.length));
+              unawaited(sendFrame(encodeAck(f.channel, f.payload.length)));
             case opAck:
               _flow.acked(f.channel, decodeAckCount(f.payload));
             case opClose:
@@ -119,6 +153,90 @@ class RhrBridge {
               _sockets.remove(f.channel)?.destroy();
           }
         }
+
+        ws.sink.add(
+          jsonEncode({
+            't': 'info',
+            'vm': vmUri.toString(),
+            if (assetStoreId != null) 'assetStoreId': assetStoreId,
+            if (compatibility != null) 'compatibility': compatibility,
+          }),
+        );
+
+        if (preferDirect) {
+          direct = DirectWebRtcPeer(
+            onSignal: (signal) {
+              try {
+                ws.sink.add(signal.encode());
+              } on StateError {
+                // Relay shutdown is handled by the outer reconnect loop.
+              }
+            },
+          );
+          direct.messages.listen(handleFrame);
+          direct.connectionStates.listen((state) {
+            if (state == PeerConnectionState.failed ||
+                state == PeerConnectionState.disconnected ||
+                state == PeerConnectionState.closed) {
+              directReady = false;
+            }
+          });
+        }
+
+        await for (final msg in ws.stream) {
+          if (msg is String) {
+            if (preferDirect &&
+                direct != null &&
+                !directStarted &&
+                _isHello(msg)) {
+              directStarted = true;
+              final peer = direct;
+              unawaited(
+                peer
+                    .startOffer()
+                    .then<void>((_) async {
+                      try {
+                        await peer.waitUntilOpen(
+                          timeout: const Duration(seconds: 20),
+                        );
+                        directReady = true;
+                        _log('direct WebRTC/STUN path is ready');
+                      } catch (error) {
+                        _log(
+                          'direct WebRTC path unavailable; using relay: $error',
+                        );
+                      }
+                    })
+                    .catchError((error) {
+                      _log('direct WebRTC offer failed; using relay: $error');
+                    }),
+              );
+            }
+            if (direct != null) {
+              final peer = direct;
+              try {
+                final signal = DirectSignal.decode(msg);
+                switch (signal) {
+                  case DirectDescriptionSignal(:final type):
+                    if (type == 'answer') {
+                      unawaited(peer.acceptAnswer(signal));
+                    }
+                  case DirectCandidateSignal():
+                    unawaited(peer.addCandidate(signal));
+                  case DirectEndSignal():
+                    break;
+                }
+              } on FormatException {
+                // Other text is the normal application-level control channel.
+              }
+            }
+            continue;
+          }
+          handleFrame(msg);
+        }
+        await direct?.close();
+        direct = null;
+        directReady = false;
       } catch (e) {
         _log('relay connection error: $e');
       }
@@ -138,8 +256,7 @@ class RhrBridge {
       // Backoff, but let kick() cut it short (e.g. app came back to
       // foreground after Android froze us — reconnect immediately).
       final wake = _wake = Completer<void>();
-      await Future.any(
-          [Future<void>.delayed(backoff), wake.future]);
+      await Future.any([Future<void>.delayed(backoff), wake.future]);
       _wake = null;
       backoff *= 2;
       if (backoff > const Duration(seconds: 30)) {
@@ -148,7 +265,12 @@ class RhrBridge {
     }
   }
 
-  Future<void> _openChannel(IOWebSocketChannel ws, int channel, Uri vm) async {
+  Future<void> _openChannel(
+    IOWebSocketChannel ws,
+    int channel,
+    Uri vm,
+    Future<void> Function(Uint8List frame) sendFrame,
+  ) async {
     try {
       final sock = await Socket.connect(vm.host, vm.port);
       final buffered = _pending.remove(channel);
@@ -163,7 +285,7 @@ class RhrBridge {
       late final StreamSubscription<Uint8List> sub;
       sub = sock.listen(
         (data) {
-          ws.sink.add(encodeFrame(opData, channel, data));
+          unawaited(sendFrame(encodeFrame(opData, channel, data)));
           if (_flow.sent(channel, data.length)) {
             sub.pause();
             _flow.onWindowOpen(channel, sub.resume);
@@ -173,33 +295,44 @@ class RhrBridge {
           _subs.remove(channel);
           _flow.forget(channel);
           if (_sockets.remove(channel) != null) {
-            ws.sink.add(encodeFrame(opClose, channel));
+            unawaited(sendFrame(encodeFrame(opClose, channel)));
           }
         },
         onError: (_) {
           _subs.remove(channel);
           _flow.forget(channel);
           if (_sockets.remove(channel) != null) {
-            ws.sink.add(encodeFrame(opClose, channel));
+            unawaited(sendFrame(encodeFrame(opClose, channel)));
           }
         },
       );
       _subs[channel] = sub;
     } catch (e) {
       _log('channel $channel: VM service connect failed: $e');
-      ws.sink.add(encodeFrame(opClose, channel));
+      unawaited(sendFrame(encodeFrame(opClose, channel)));
     }
   }
 
   /// Skips any pending reconnect backoff. Call on app resume.
   void kick() {
-    if (!(_wake?.isCompleted ?? true)) _wake!.complete();
+    final wake = _wake;
+    if (wake != null && !wake.isCompleted) wake.complete();
   }
 
   void stop() {
     _stopped = true;
     _ws?.sink.close();
+    if (identical(_instance, this)) _instance = null;
   }
 
   void _log(String m) => print('[rhr_bridge] $m');
+
+  static bool _isHello(String message) {
+    try {
+      final decoded = jsonDecode(message);
+      return decoded is Map<String, dynamic> && decoded['t'] == 'hello';
+    } on FormatException {
+      return false;
+    }
+  }
 }

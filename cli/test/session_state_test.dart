@@ -38,13 +38,13 @@ Future<Process> _spawn(
   required String workDir,
   required List<String> lines,
 }) async {
-  final p = await Process.start(
-    Platform.resolvedExecutable,
-    ['run', ...args],
-    workingDirectory: workDir,
-  );
+  final p = await Process.start(Platform.resolvedExecutable, [
+    'run',
+    ...args,
+  ], workingDirectory: workDir);
   void drain(Stream<List<int>> s) {
-    s.transform(SystemEncoding().decoder)
+    s
+        .transform(SystemEncoding().decoder)
         .transform(const LineSplitter())
         .listen(lines.add);
   }
@@ -77,131 +77,244 @@ void main() {
   setUp(() async {
     port = await _freePort();
     relayLines = [];
-    relay = await _spawn(['bin/relay.dart', '$port'],
-        workDir: '$_repo/relay', lines: relayLines);
+    relay = await _spawn(
+      ['bin/relay.dart', '$port'],
+      workDir: '$_repo/relay',
+      lines: relayLines,
+    );
     await _waitFor(relayLines, RegExp('listening'), 'relay up');
   });
 
   tearDown(() async {
     relay.kill();
-    await relay.exitCode.timeout(const Duration(seconds: 10)).catchError((_) => 0);
-  });
-
-  test('dev-first pairing: device arrives, tunnel opens', () async {
-    final code = 'state-${DateTime.now().millisecondsSinceEpoch}';
-    final cliLines = <String>[];
-    final cli = await _spawn([
-      'bin/rhr.dart', 'attach', '--no-flutter',
-      '--relay', 'ws://127.0.0.1:$port', '--code', code,
-    ], workDir: '$_repo/cli', lines: cliLines);
-    addTearDown(() => cli.kill());
-
-    await _waitFor(cliLines, RegExp('connected to relay'), 'cli connected');
-    await _waitFor(cliLines, RegExp('waiting for device bridge'),
-        'cli waiting for device');
-
-    final deviceLines = <String>[];
-    final device = await _spawn([
-      '--enable-vm-service=0', 'example/fake_device.dart',
-      'ws://127.0.0.1:$port', code,
-    ], workDir: '$_repo/bridge', lines: deviceLines);
-    addTearDown(() => device.kill());
-
-    await _waitFor(cliLines, RegExp('device VM service:'),
-        'cli learned the device VM URI');
-    await _waitFor(cliLines, RegExp('tunneled VM service:'),
-        'cli exposed the tunneled VM URI');
-  }, timeout: const Timeout(Duration(seconds: 240)));
-
-  test('no peer: cli waits honestly instead of failing or hanging silently',
-      () async {
-    final code = 'nope-${DateTime.now().millisecondsSinceEpoch}';
-    final cliLines = <String>[];
-    final cli = await _spawn([
-      'bin/rhr.dart', 'attach', '--no-flutter',
-      '--relay', 'ws://127.0.0.1:$port', '--code', code,
-    ], workDir: '$_repo/cli', lines: cliLines);
-    addTearDown(() => cli.kill());
-
-    await _waitFor(cliLines, RegExp('waiting for device bridge'),
-        'cli waiting for device');
-    await Future<void>.delayed(const Duration(seconds: 5));
-    expect(cliLines.any(RegExp('device VM service').hasMatch), isFalse,
-        reason: 'no device must not pair');
-    expect(cliLines.any(RegExp('reconnecting').hasMatch), isFalse,
-        reason: 'no relay failure must not trigger reconnect churn');
-  }, timeout: const Timeout(Duration(seconds: 240)));
-
-  test('relay drop mid-session: CLI recovery loop re-pairs', () async {
-    final code = 'drop-${DateTime.now().millisecondsSinceEpoch}';
-    final cliLines = <String>[];
-    final cli = await _spawn([
-      'bin/rhr.dart', 'attach', '--no-flutter',
-      '--relay', 'ws://127.0.0.1:$port', '--code', code,
-    ], workDir: '$_repo/cli', lines: cliLines);
-    addTearDown(() => cli.kill());
-
-    final deviceLines = <String>[];
-    final device = await _spawn([
-      '--enable-vm-service=0', 'example/fake_device.dart',
-      'ws://127.0.0.1:$port', code,
-    ], workDir: '$_repo/bridge', lines: deviceLines);
-    addTearDown(() => device.kill());
-
-    await _waitFor(cliLines, RegExp('tunneled VM service:'),
-        'initial pair');
-
-    // Drop the relay mid-session.
-    relay.kill();
-    await relay.exitCode.timeout(const Duration(seconds: 10)).catchError((_) => 0);
-    await _waitFor(cliLines, RegExp('relay connection closed|reconnecting'),
-        'cli noticed the drop');
-
-    // Bring the relay back on the same port; both ends re-dial.
-    relay = await _spawn(['bin/relay.dart', '$port'],
-        workDir: '$_repo/relay', lines: relayLines);
-    await _waitFor(relayLines, RegExp('listening'), 'relay back up');
-
-    await _waitFor(cliLines, RegExp('connected to relay'),
-        'cli reconnected to relay');
-    await _waitFor(cliLines, RegExp('device VM service:'),
-        'cli re-paired with the device after relay recovery');
-  }, timeout: const Timeout(Duration(seconds: 240)));
-
-  test('device death: relay drops the dev so the CLI recovery loop wakes',
-      () async {
-    final code = 'devdeath-${DateTime.now().millisecondsSinceEpoch}';
-    final cliLines = <String>[];
-    final cli = await _spawn([
-      'bin/rhr.dart', 'attach', '--no-flutter',
-      '--relay', 'ws://127.0.0.1:$port', '--code', code,
-    ], workDir: '$_repo/cli', lines: cliLines);
-    addTearDown(() => cli.kill());
-
-    Future<Process> startDevice() => _spawn([
-          '--enable-vm-service=0', 'example/fake_device.dart',
-          'ws://127.0.0.1:$port', code,
-        ], workDir: '$_repo/bridge', lines: []);
-
-    final device = await startDevice();
-    addTearDown(() => device.kill());
-    await _waitFor(cliLines, RegExp('tunneled VM service:'), 'initial pair');
-
-    // Kill the phone stand-in. A session without a device is dead — the
-    // relay must close the dev connection or flutter attach hangs forever.
-    device.kill();
-    await device.exitCode
+    await relay.exitCode
         .timeout(const Duration(seconds: 10))
         .catchError((_) => 0);
-    await _waitFor(cliLines, RegExp('relay connection closed'),
-        'cli woke up when its device died');
+  });
 
-    // Device comes back; the CLI recovery loop re-pairs.
-    final device2 = await startDevice();
-    addTearDown(() => device2.kill());
-    await _waitFor(cliLines, RegExp('connected to relay'),
-        'cli reconnected to relay');
-    await _waitFor(cliLines, RegExp('device VM service:'),
-        'cli re-paired after device death');
-  }, timeout: const Timeout(Duration(seconds: 240)));
+  test(
+    'dev-first pairing: device arrives, tunnel opens',
+    () async {
+      final code = 'state-${DateTime.now().millisecondsSinceEpoch}';
+      final cliLines = <String>[];
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      addTearDown(() => cli.kill());
+
+      await _waitFor(cliLines, RegExp('connected to relay'), 'cli connected');
+      await _waitFor(
+        cliLines,
+        RegExp('waiting for device bridge'),
+        'cli waiting for device',
+      );
+
+      final deviceLines = <String>[];
+      final device = await _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+        ],
+        workDir: '$_repo/bridge',
+        lines: deviceLines,
+      );
+      addTearDown(() => device.kill());
+
+      await _waitFor(
+        cliLines,
+        RegExp('device VM service:'),
+        'cli learned the device VM URI',
+      );
+      await _waitFor(
+        cliLines,
+        RegExp('tunneled VM service:'),
+        'cli exposed the tunneled VM URI',
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
+
+  test(
+    'no peer: cli waits honestly instead of failing or hanging silently',
+    () async {
+      final code = 'nope-${DateTime.now().millisecondsSinceEpoch}';
+      final cliLines = <String>[];
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      addTearDown(() => cli.kill());
+
+      await _waitFor(
+        cliLines,
+        RegExp('waiting for device bridge'),
+        'cli waiting for device',
+      );
+      await Future<void>.delayed(const Duration(seconds: 5));
+      expect(
+        cliLines.any(RegExp('device VM service').hasMatch),
+        isFalse,
+        reason: 'no device must not pair',
+      );
+      expect(
+        cliLines.any(RegExp('reconnecting').hasMatch),
+        isFalse,
+        reason: 'no relay failure must not trigger reconnect churn',
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
+
+  test(
+    'relay drop mid-session: CLI recovery loop re-pairs',
+    () async {
+      final code = 'drop-${DateTime.now().millisecondsSinceEpoch}';
+      final cliLines = <String>[];
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      addTearDown(() => cli.kill());
+
+      final deviceLines = <String>[];
+      final device = await _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+        ],
+        workDir: '$_repo/bridge',
+        lines: deviceLines,
+      );
+      addTearDown(() => device.kill());
+
+      await _waitFor(cliLines, RegExp('tunneled VM service:'), 'initial pair');
+
+      // Drop the relay mid-session.
+      relay.kill();
+      await relay.exitCode
+          .timeout(const Duration(seconds: 10))
+          .catchError((_) => 0);
+      await _waitFor(
+        cliLines,
+        RegExp('relay connection closed|reconnecting'),
+        'cli noticed the drop',
+      );
+
+      // Bring the relay back on the same port; both ends re-dial.
+      relay = await _spawn(
+        ['bin/relay.dart', '$port'],
+        workDir: '$_repo/relay',
+        lines: relayLines,
+      );
+      await _waitFor(relayLines, RegExp('listening'), 'relay back up');
+
+      await _waitFor(
+        cliLines,
+        RegExp('connected to relay'),
+        'cli reconnected to relay',
+      );
+      await _waitFor(
+        cliLines,
+        RegExp('device VM service:'),
+        'cli re-paired with the device after relay recovery',
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
+
+  test(
+    'device death: relay drops the dev so the CLI recovery loop wakes',
+    () async {
+      final code = 'devdeath-${DateTime.now().millisecondsSinceEpoch}';
+      final cliLines = <String>[];
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      addTearDown(() => cli.kill());
+
+      Future<Process> startDevice() => _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+        ],
+        workDir: '$_repo/bridge',
+        lines: [],
+      );
+
+      final device = await startDevice();
+      addTearDown(() => device.kill());
+      await _waitFor(cliLines, RegExp('tunneled VM service:'), 'initial pair');
+
+      // Kill the phone stand-in. A session without a device is dead — the
+      // relay must close the dev connection or flutter attach hangs forever.
+      device.kill();
+      await device.exitCode
+          .timeout(const Duration(seconds: 10))
+          .catchError((_) => 0);
+      await _waitFor(
+        cliLines,
+        RegExp('relay connection closed'),
+        'cli woke up when its device died',
+      );
+
+      // Device comes back; the CLI recovery loop re-pairs.
+      final device2 = await startDevice();
+      addTearDown(() => device2.kill());
+      await _waitFor(
+        cliLines,
+        RegExp('connected to relay'),
+        'cli reconnected to relay',
+      );
+      await _waitFor(
+        cliLines,
+        RegExp('device VM service:'),
+        'cli re-paired after device death',
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
 }

@@ -46,26 +46,44 @@ jobs:
           RELAY: ${{ github.event.inputs.relay_url }}
         run: |
           flutter pub get
+          VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' ../cli/pubspec.yaml)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           if [ -n "$RELAY" ]; then
             echo "Baking relay: $RELAY"
-            flutter build apk --debug --dart-define=RHR_RELAY="$RELAY"
+            flutter build apk --debug --target-platform android-arm64 --dart-define=RHR_RELAY="$RELAY"
           else
-            flutter build apk --debug
+            flutter build apk --debug --target-platform android-arm64
           fi
-          cp build/app/outputs/flutter-apk/app-debug.apk rhr-player.apk
+          mkdir -p release
+          APK="rhr-player-${VERSION}-android-arm64.apk"
+          cp build/app/outputs/flutter-apk/app-debug.apk "release/$APK"
+          sha256sum "release/$APK" > release/SHA256SUMS
+          flutter --version --machine | jq 'del(.flutterRoot)' > release/FLUTTER_VERSION.json
+          cat > release/RELEASE_MANIFEST.txt <<EOF
+          rhr Player ${VERSION}
+          Android ABI: arm64-v8a
+          Build mode: debug (Dart VM Service required for hot reload)
+          Flutter identity: release/FLUTTER_VERSION.json
+          Cellular/strict-NAT direct transport: not certified; relay fallback is the supported path
+          EOF
+          dart run tool/check_16kb.dart "build/app/outputs/flutter-apk/app-debug.apk"
 
       - name: Upload artifact (for manual runs)
         uses: actions/upload-artifact@v4
         with:
           name: rhr-player-apk
-          path: player/rhr-player.apk
+          path: player/release
 
       - name: Attach APK to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
-          files: player/rhr-player.apk
+          files: |
+            player/release/*.apk
+            player/release/SHA256SUMS
+            player/release/FLUTTER_VERSION.json
+            player/release/RELEASE_MANIFEST.txt
           body: |
             **rhr player** — the generic Flutter shell. Sideload on the tester's phone.
 

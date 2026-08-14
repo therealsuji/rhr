@@ -79,7 +79,7 @@ export class RelaySession implements DurableObject {
 				`[rhr] dev replay check: deviceLive=${deviceLive} hasInfo=${info !== undefined} fresh=${fresh}`,
 			);
 			if (deviceLive && fresh) {
-				pair[1].send(info as string);
+				pair[1].send(info);
 				console.log("[rhr] dev replayed cached info");
 			}
 		}

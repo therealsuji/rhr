@@ -20,14 +20,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:rhr_bridge/session_code.dart';
+import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _relayUrl = String.fromEnvironment(
   'RHR_RELAY',
-  defaultValue: 'wss://rhr-relay.codeforge007.workers.dev',
+  defaultValue: defaultPublicRelay,
 );
+// Native WebRTC payloads are opt-in while the cellular/strict-NAT matrix is
+// still being validated. Build the debug player with
+// `--dart-define=RHR_DIRECT=true` to enable the direct path.
+const _preferDirect = bool.fromEnvironment('RHR_DIRECT', defaultValue: false);
 
 const _session = MethodChannel('rhr/session');
+const _violetColor = Color(0xFF7C4DFF);
+const _hintColor = Color(0xFF5A4E80);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,7 +51,7 @@ class PlayerApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF7C4DFF),
+          seedColor: _violetColor,
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
@@ -77,7 +84,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   int _debugTaps = 0;
 
   // Design tokens matching the native DevOverlay.
-  static const _violet = Color(0xFF7C4DFF);
+  static const _violet = _violetColor;
   static const _ink = Color(0xFFF3F1FA);
   static const _inkDim = Color(0xFFA79FC4);
   static const _surface = Color(0xFF1A1330);
@@ -205,7 +212,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     // Prefer the structured payload; tolerate a bare code string too.
     try {
       final m = jsonDecode(result) as Map<String, dynamic>;
-      if (m['code'] is String) code = m['code'] as String;
+      final encodedCode = m['code'];
+      if (encodedCode is String) code = encodedCode;
       final encodedRelays = m['relays'];
       if (encodedRelays is List) {
         final parsed = encodedRelays.whereType<String>().toList();
@@ -213,8 +221,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           relay = parsed.first;
           fallbackRelays = parsed.skip(1).toList(growable: false);
         }
-      } else if (m['relay'] is String) {
-        relay = m['relay'] as String;
+      } else if (m['relay'] case final String encodedRelay) {
+        relay = encodedRelay;
         fallbackRelays = const [];
       }
     } catch (_) {
@@ -278,18 +286,19 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       'relayUrls': [_relay, ..._fallbackRelays],
       'code': code,
       'vmUri': (vm ?? Uri.parse('http://127.0.0.1:0/')).toString(),
+      'preferDirect': _preferDirect,
     });
-    setState(() => _active = true);
-    setState(
-      () => _status = auto
+    setState(() {
+      _active = true;
+      _status = auto
           ? 'Session restored — waiting for developer.\n'
                 'Start rhr run on your machine and it will reconnect.'
           : 'Session service running — "$code". Waiting for developer.\n'
                 'On your machine:\n'
                 'rhr attach --sync-assets --relay $_relay --code $code\n'
                 'then press R (hot restart) to boot your app here.\n'
-                'The tunnel survives hot restarts and backgrounding.',
-    );
+                'The tunnel survives hot restarts and backgrounding.';
+    });
   }
 
   @override
@@ -379,7 +388,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                                 child: const Text(
                                   'rhr player · debug build',
                                   style: TextStyle(
-                                    color: Color(0xFF5A4E80),
+                                    color: _hintColor,
                                     fontSize: 11,
                                   ),
                                 ),
@@ -387,7 +396,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                               const Text(
                                 ' · ',
                                 style: TextStyle(
-                                  color: Color(0xFF5A4E80),
+                                  color: _hintColor,
                                   fontSize: 11,
                                 ),
                               ),
@@ -396,7 +405,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                                 child: const Text(
                                   'Licenses',
                                   style: TextStyle(
-                                    color: Color(0xFF5A4E80),
+                                    color: _hintColor,
                                     fontSize: 11,
                                     decoration: TextDecoration.underline,
                                   ),
@@ -476,7 +485,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           style: const TextStyle(color: _ink, fontSize: 14),
           decoration: InputDecoration(
             hintText: 'rhr-xxxx-xxxx-xxxx',
-            hintStyle: const TextStyle(color: Color(0xFF5A4E80)),
+            hintStyle: const TextStyle(color: _hintColor),
             prefixIcon: const Icon(Icons.tag, color: _inkDim, size: 18),
             filled: true,
             fillColor: _surface,
@@ -757,7 +766,7 @@ class _ScannerScreenState extends State<_ScannerScreen> {
             width: 240,
             height: 240,
             decoration: BoxDecoration(
-              border: Border.all(color: const Color(0xFF7C4DFF), width: 3),
+              border: Border.all(color: _violetColor, width: 3),
               borderRadius: BorderRadius.circular(16),
             ),
           ),

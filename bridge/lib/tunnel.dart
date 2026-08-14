@@ -33,8 +33,12 @@ Uint8List encodeAck(int channel, int bytes) {
   return b;
 }
 
-int decodeAckCount(Uint8List payload) =>
-    ByteData.view(payload.buffer, payload.offsetInBytes).getUint32(0);
+int decodeAckCount(Uint8List payload) {
+  if (payload.length < 4) {
+    throw FormatException('ack payload too short: ${payload.length}');
+  }
+  return ByteData.view(payload.buffer, payload.offsetInBytes).getUint32(0);
+}
 
 /// Per-channel unacked-byte accounting shared by both tunnel ends.
 class FlowControl {
@@ -52,8 +56,9 @@ class FlowControl {
   /// the window has drained below half.
   void acked(int channel, int n) {
     final u = (_unacked[channel] ?? 0) - n;
-    _unacked[channel] = u < 0 ? 0 : u;
-    if ((_unacked[channel] ?? 0) < windowBytes ~/ 2) {
+    final remaining = u < 0 ? 0 : u;
+    _unacked[channel] = remaining;
+    if (remaining < windowBytes ~/ 2) {
       _paused.remove(channel)?.call();
     }
   }
@@ -83,7 +88,8 @@ Uint8List encodeFrame(int op, int channel, [List<int> payload = const []]) {
 
 ({int op, int channel, Uint8List payload}) decodeFrame(List<int> raw) {
   final b = raw is Uint8List ? raw : Uint8List.fromList(raw);
-  if (b.length < 5) throw FormatException('tunnel frame too short: ${b.length}');
+  if (b.length < 5)
+    throw FormatException('tunnel frame too short: ${b.length}');
   return (
     op: b[0],
     channel: ByteData.view(b.buffer, b.offsetInBytes).getUint32(1),
