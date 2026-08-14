@@ -25,7 +25,7 @@ jobs:
         run: |
           dart pub get
           dart analyze
-          # WebRTC loopback tests share native state; keep package tests serial.
+          # WebRTC loopback tests skip cleanly on CI, where host UDP is absent.
           dart test --concurrency=1
 
   relay-worker:
