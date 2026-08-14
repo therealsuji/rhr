@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:rhr_bridge/direct_signaling.dart';
@@ -7,16 +6,6 @@ import 'package:rhr_bridge/direct_webrtc.dart';
 import 'package:test/test.dart';
 
 void main() {
-  if (Platform.environment['CI'] == 'true') {
-    test(
-      'direct WebRTC loopback',
-      () {},
-      skip:
-          'requires a host network interface; covered by the local smoke pass',
-    );
-    return;
-  }
-
   test(
     'two peers exchange a reliable binary frame without a relay payload path',
     () async {
