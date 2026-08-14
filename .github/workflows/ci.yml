@@ -25,7 +25,8 @@ jobs:
         run: |
           dart pub get
           dart analyze
-          dart test
+          # WebRTC loopback tests share native state; keep package tests serial.
+          dart test --concurrency=1
 
   relay-worker:
     runs-on: ubuntu-latest
