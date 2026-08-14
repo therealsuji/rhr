@@ -65,9 +65,6 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
-      - name: Compile Android Player
-        working-directory: player/android
-        run: ./gradlew :app:compileDebugKotlin --no-daemon
       - name: Build and check Android alignment
         working-directory: player
         run: |
