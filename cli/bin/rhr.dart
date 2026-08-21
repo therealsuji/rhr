@@ -494,10 +494,13 @@ Future<int?> _runSession({
             exit(78);
           }
           assetStoreId = announcedAssetStoreId;
-          final differences = compatibility.differencesFrom(raw);
-          if (differences.isNotEmpty) {
+          final report = compatibility.differencesFrom(raw);
+          for (final warning in report.warnings) {
+            stderr.writeln('[rhr] note: $warning');
+          }
+          if (report.blockers.isNotEmpty) {
             stderr.writeln('[rhr] COMPATIBILITY_BLOCKED:');
-            for (final difference in differences) {
+            for (final difference in report.blockers) {
               stderr.writeln('  - $difference');
             }
             stderr.writeln(

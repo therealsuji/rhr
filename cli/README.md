@@ -13,7 +13,7 @@ From the repository's tagged release:
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.3
+  --git-ref v0.1.0-beta.4
 ```
 
 Then run `rhr doctor` from a shell where the Dart global executable directory

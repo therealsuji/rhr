@@ -23,6 +23,11 @@ val flutterIdentity = JsonSlurper().parse(flutterVersionFile) as Map<String, Any
 fun flutterIdentityField(name: String): String =
     flutterIdentity[name]?.toString()
         ?: error("$name is missing from $flutterVersionFile")
+
+// The release channel is optional metadata (custom SDK builds may omit it);
+// an empty value keeps the dev-side compatibility gate conservative.
+fun flutterIdentityFieldOrNull(name: String): String? =
+    flutterIdentity[name]?.toString()
 fun quotedBuildConfig(value: String): String =
     "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
@@ -93,6 +98,11 @@ android {
             "String",
             "RHR_DART_SDK_VERSION",
             quotedBuildConfig(flutterIdentityField("dartSdkVersion")),
+        )
+        buildConfigField(
+            "String",
+            "RHR_FLUTTER_CHANNEL",
+            quotedBuildConfig(flutterIdentityFieldOrNull("channel") ?: ""),
         )
         buildConfigField(
             "String",

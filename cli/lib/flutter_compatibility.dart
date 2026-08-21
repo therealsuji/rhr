@@ -7,6 +7,7 @@ final class FlutterCompatibility {
     required this.frameworkRevision,
     required this.engineRevision,
     required this.dartSdkVersion,
+    this.channel,
   });
 
   factory FlutterCompatibility.fromJson(Map<String, dynamic> json) {
@@ -18,11 +19,15 @@ final class FlutterCompatibility {
       return value;
     }
 
+    final channel = json['channel'];
     return FlutterCompatibility(
       frameworkVersion: field('frameworkVersion'),
       frameworkRevision: field('frameworkRevision'),
       engineRevision: field('engineRevision'),
       dartSdkVersion: field('dartSdkVersion'),
+      // Players predating channel reporting stay on the conservative
+      // exact-identity gate below rather than failing to parse.
+      channel: channel is String && channel.isNotEmpty ? channel : null,
     );
   }
 
@@ -31,19 +36,83 @@ final class FlutterCompatibility {
   final String engineRevision;
   final String dartSdkVersion;
 
-  List<String> differencesFrom(FlutterCompatibility player) {
-    final differences = <String>[];
+  /// Release channel ("stable", "beta", …) or null when unreported.
+  final String? channel;
+
+  /// Patch-level skew inside one stable series is supported: the kernel
+  /// format and VM service protocol only move across minors, and Flutter's
+  /// release branches routinely re-pin Dart patches mid-series (the release
+  /// manifest shows e.g. 3.44.0 pins Dart 3.12.0 while 3.44.2 pins 3.12.2).
+  /// Pairs we cannot prove are tagged stable builds of the same series —
+  /// missing channels, beta/main, forks, cross-minor — fall back to exact
+  /// identity matching.
+  CompatibilityReport differencesFrom(FlutterCompatibility player) {
+    if (_sameStableSeries(player)) {
+      final skewed =
+          frameworkVersion != player.frameworkVersion ||
+          dartSdkVersion != player.dartSdkVersion ||
+          frameworkRevision != player.frameworkRevision ||
+          engineRevision != player.engineRevision;
+      final warnings = <String>[
+        if (skewed)
+          'version skew: local Flutter $frameworkVersion '
+              '(Dart $dartSdkVersion), player Flutter '
+              '${player.frameworkVersion} (Dart ${player.dartSdkVersion}) — '
+              'same stable series, supported',
+      ];
+      return CompatibilityReport(const [], warnings);
+    }
+
+    final blockers = <String>[];
     void compare(String label, String local, String installed) {
       if (local != installed) {
-        differences.add('$label: local $local, player $installed');
+        blockers.add('$label: local $local, player $installed');
       }
     }
 
+    compare('Flutter version', frameworkVersion, player.frameworkVersion);
     compare('Flutter revision', frameworkRevision, player.frameworkRevision);
     compare('engine revision', engineRevision, player.engineRevision);
     compare('Dart SDK', dartSdkVersion, player.dartSdkVersion);
-    return differences;
+    return CompatibilityReport(List.unmodifiable(blockers), const []);
   }
+
+  bool _sameStableSeries(FlutterCompatibility player) {
+    if (channel != 'stable' || player.channel != 'stable') return false;
+    return _isSameMinor(frameworkVersion, player.frameworkVersion) &&
+        _isSameMinor(dartSdkVersion, player.dartSdkVersion);
+  }
+}
+
+/// Blockers stop the session; warnings are printed but allowed through.
+final class CompatibilityReport {
+  const CompatibilityReport(this.blockers, this.warnings);
+
+  final List<String> blockers;
+  final List<String> warnings;
+
+  bool get isCompatible => blockers.isEmpty;
+}
+
+bool _isSameMinor(String a, String b) {
+  final left = _sdkVersionParts(a);
+  final right = _sdkVersionParts(b);
+  if (left == null || right == null) return a == b;
+  return left.$1 == right.$1 && left.$2 == right.$2;
+}
+
+/// Leading numeric semver of an SDK version string; tolerates suffixes like
+/// "3.10.0 (build 3.10.0-290.4.beta)" and two-part "3.9" forms.
+(int, int, int)? _sdkVersionParts(String version) {
+  final match = RegExp(
+    r'^v?(\d+)\.(\d+)(?:\.(\d+))?',
+  ).firstMatch(version.trim());
+  if (match == null) return null;
+  return (
+    int.parse(match.group(1)!),
+    int.parse(match.group(2)!),
+    int.parse(match.group(3) ?? '0'),
+  );
 }
 
 /// The compatibility inputs captured from one Flutter project. Both CLI
@@ -61,24 +130,28 @@ final class ProjectCompatibilityProfile {
   final Set<String> androidPermissions;
   final List<String> unsupportedAndroidInputs;
 
-  List<String> differencesFrom(Map<String, dynamic> player) {
-    final differences = flutter.differencesFrom(
+  CompatibilityReport differencesFrom(Map<String, dynamic> player) {
+    final report = flutter.differencesFrom(
       FlutterCompatibility.fromJson(player),
     );
-    differences.addAll(
+    final blockers = [...report.blockers];
+    blockers.addAll(
       androidPluginDifferences(
         required: androidPlugins,
         available: parseAndroidPluginProfile(player['androidPlugins']),
       ),
     );
-    differences.addAll(
+    blockers.addAll(
       androidPermissionDifferences(
         required: androidPermissions,
         available: parseAndroidPermissionProfile(player['androidPermissions']),
       ),
     );
-    differences.addAll(unsupportedAndroidInputs);
-    return differences;
+    blockers.addAll(unsupportedAndroidInputs);
+    return CompatibilityReport(
+      List.unmodifiable(blockers),
+      report.warnings,
+    );
   }
 }
 

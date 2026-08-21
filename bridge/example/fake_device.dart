@@ -34,6 +34,7 @@ Map<String, dynamic> _localCompatibility() {
     'frameworkRevision': json['frameworkRevision'],
     'engineRevision': json['engineRevision'],
     'dartSdkVersion': json['dartSdkVersion'],
+    'channel': json['channel'],
     'androidPlugins': <String, dynamic>{},
     'androidPermissions': <String>[],
   };

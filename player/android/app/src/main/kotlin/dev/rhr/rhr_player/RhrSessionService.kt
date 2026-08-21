@@ -391,6 +391,7 @@ class RhrSessionService : Service() {
 				.put("frameworkRevision", BuildConfig.RHR_FRAMEWORK_REVISION)
 				.put("engineRevision", BuildConfig.RHR_ENGINE_REVISION)
 				.put("dartSdkVersion", BuildConfig.RHR_DART_SDK_VERSION)
+				.put("channel", BuildConfig.RHR_FLUTTER_CHANNEL)
 				.put(
 					"androidPlugins",
 					JSONObject(BuildConfig.RHR_ANDROID_PLUGINS_JSON))

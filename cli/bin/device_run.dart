@@ -218,10 +218,13 @@ Future<bool> _serve(String relay, String code) async {
             );
             exit(78);
           }
-          final differences = compatibility.differencesFrom(rawCompatibility);
-          if (differences.isNotEmpty) {
+          final report = compatibility.differencesFrom(rawCompatibility);
+          for (final warning in report.warnings) {
+            stderr.writeln('[rhr] note: $warning');
+          }
+          if (report.blockers.isNotEmpty) {
             stderr.writeln('[rhr] COMPATIBILITY_BLOCKED:');
-            for (final difference in differences) {
+            for (final difference in report.blockers) {
               stderr.writeln('  - $difference');
             }
             stderr.writeln(
