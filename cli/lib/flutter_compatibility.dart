@@ -157,11 +157,74 @@ final class ProjectCompatibilityProfile {
 
 ProjectCompatibilityProfile readProjectCompatibilityProfile(String project) {
   return ProjectCompatibilityProfile(
-    flutter: readLocalFlutterCompatibility(),
+    flutter: readProjectFlutterCompatibility(project),
     androidPlugins: readAndroidPluginProfile(project),
     androidPermissions: readAndroidPermissionProfile(project),
     unsupportedAndroidInputs: readUnsupportedAndroidInputs(project),
   );
+}
+
+/// The Flutter SDK root a project is pinned to via fvm, or null when the
+/// project has no pin. The `.fvm/flutter_sdk` symlink (created by `fvm use`)
+/// is authoritative; a bare `.fvmrc` falls back to fvm's version cache.
+String? projectPinnedFlutterSdk(String project) {
+  final link = Link('$project/.fvm/flutter_sdk');
+  if (link.existsSync()) {
+    try {
+      return link.resolveSymbolicLinksSync();
+    } on FileSystemException {
+      // Dangling symlink (SDK removed): fall through to .fvmrc.
+    }
+  }
+  final fvmrc = File('$project/.fvmrc');
+  if (!fvmrc.existsSync()) return null;
+  try {
+    final decoded = jsonDecode(fvmrc.readAsStringSync());
+    final version = decoded is Map<String, dynamic> ? decoded['flutter'] : null;
+    if (version is! String || version.isEmpty) return null;
+    final home = Platform.environment['HOME'] ?? '';
+    for (final root in [
+      Platform.environment['FVM_CACHE_PATH'],
+      '$home/fvm/versions',
+      '$home/.fvm/versions',
+    ]) {
+      if (root == null) continue;
+      final sdk = Directory('$root/$version');
+      if (sdk.existsSync()) return sdk.path;
+    }
+  } on FormatException {
+    // Malformed .fvmrc: behave as unpinned.
+  }
+  return null;
+}
+
+/// The `flutter` command that matches [readProjectFlutterCompatibility] for
+/// this project: the fvm-pinned SDK's binary when there is a pin, otherwise
+/// whatever `flutter` resolves to on PATH.
+String projectFlutterExecutable(String project) {
+  final sdk = projectPinnedFlutterSdk(project);
+  return sdk == null ? 'flutter' : '$sdk/bin/flutter';
+}
+
+/// The Flutter identity streaming into this project's player must match: the
+/// project's fvm-pinned SDK when present, else the SDK that launched the CLI.
+/// Keying off the pin matters — `flutter attach` and the kernel compiler run
+/// with the project's SDK, not the CLI's.
+FlutterCompatibility readProjectFlutterCompatibility(String project) {
+  final sdk = projectPinnedFlutterSdk(project);
+  if (sdk == null) return readLocalFlutterCompatibility();
+  final versionFile = File('$sdk/bin/cache/flutter.version.json');
+  if (!versionFile.existsSync()) {
+    throw StateError(
+      'the fvm-pinned Flutter SDK at $sdk has no bin/cache/'
+      'flutter.version.json — run a flutter command with it once',
+    );
+  }
+  final json = jsonDecode(versionFile.readAsStringSync());
+  if (json is! Map<String, dynamic>) {
+    throw const FormatException('invalid Flutter version metadata');
+  }
+  return FlutterCompatibility.fromJson(json);
 }
 
 final class AndroidPluginSource {

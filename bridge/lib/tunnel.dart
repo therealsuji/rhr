@@ -16,6 +16,16 @@ const opOpen = 0;
 const opData = 1;
 const opClose = 2;
 
+/// Player update transfer: [op][4B transfer id][APK chunk]. The dev streams a
+/// replacement player APK to the device (announced by a {"t":"update_begin"}
+/// text message, sealed by {"t":"update_commit"}). Transfer ids set bit 30 so
+/// they can never collide with tunnel channel ids (which count up from 1),
+/// letting both ends reuse the opAck flow-control machinery unchanged. Bit 31
+/// deliberately stays clear: the id also travels through JSON and Kotlin's
+/// signed 32-bit ints, where a high-bit id turns negative and breaks matching.
+const opUpdateData = 4;
+const updateTransferIdBase = 0x40000000;
+
 /// Flow control: receiver acks consumed bytes (payload = 4-byte big-endian
 /// count). A sender pauses its TCP source once [windowBytes] are unacked —
 /// without this, a fast dev machine pumping into a slow phone builds up

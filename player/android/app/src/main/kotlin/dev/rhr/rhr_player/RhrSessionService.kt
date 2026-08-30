@@ -49,6 +49,7 @@ class RhrSessionService : Service() {
 		private const val OP_DATA = 1
 		private const val OP_CLOSE = 2
 		private const val OP_ACK = 3
+		private const val OP_UPDATE_DATA = 4
 		private const val WINDOW_BYTES = 512 * 1024
 		private const val LOW_WATER = WINDOW_BYTES / 2
 
@@ -195,6 +196,10 @@ class RhrSessionService : Service() {
 	// engine, so hot restart cannot destroy the peer connection.
 	private var directTransport: RhrDirectTransport? = null
 	private var preferDirect = false
+	// Over-the-wire player update receiver. Created on demand; must live in
+	// this service (not the Dart world) because the install kills the process
+	// and the transfer must survive guest hot-restarts.
+	private var updater: RhrPlayerUpdater? = null
 	// Last time we heard from the developer (any dev→device message, or a
 	// relay dev_present). Drives the presence lease expiry.
 	@Volatile private var lastDevActivity = 0L
@@ -470,6 +475,30 @@ class RhrSessionService : Service() {
 							directTransport?.handleSignal(text)
 							return
 						}
+						// Over-the-wire update control messages. The handler is
+						// host-provided; without one (plain wrapped app) the
+						// frames are ignored and the dev side surfaces the
+						// "did not acknowledge" timeout.
+						if (text.contains("\"update_begin\"") ||
+							text.contains("\"update_commit\"")) {
+							try {
+								val o = JSONObject(text)
+								val u = updater ?: RhrPlayerUpdater(
+									this@RhrSessionService,
+									sendText = { m ->
+										synchronized(vmUriLock) { ws?.send(m) }
+									},
+									sendBinary = { f -> sendBinaryFrame(f) },
+								).also { updater = it }
+								when (o.optString("t")) {
+									"update_begin" -> u.handleBegin(o)
+									"update_commit" -> u.handleCommit(o)
+								}
+							} catch (e: Exception) {
+								Log.w(TAG, "update message failed: $e")
+							}
+							return
+						}
 						// The CLI's farewell on clean quit: leave "Connected" and
 						// clear progress it owned.
 						if (text.contains("\"dev_gone\"")) {
@@ -691,6 +720,7 @@ class RhrSessionService : Service() {
 				}
 			}
 			OP_CLOSE -> closeChannel(channel, notifyPeer = false)
+			OP_UPDATE_DATA -> updater?.handleData(frame)
 		}
 	}
 
@@ -868,6 +898,8 @@ class RhrSessionService : Service() {
 	 * files, verified the hard way). Delete links as links, never descend.
 	 */
 	private fun deleteWithoutFollowingSymlinks(f: File) {
+		// Os.lstat (API 21+) instead of java.nio.file.Files so the library
+		// carries no desugaring requirement for host apps.
 		val isLink = try {
 			java.nio.file.Files.isSymbolicLink(f.toPath())
 		} catch (_: Exception) { false }

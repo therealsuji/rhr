@@ -16,6 +16,9 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
     <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
+    <!-- Over-the-wire player self-update: the CLI streams a replacement APK
+         and the player installs it via PackageInstaller. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
         android:label="RHR Player"
@@ -50,6 +53,10 @@
             android:name=".RhrSessionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- PackageInstaller commit callback for the player self-update. -->
+        <receiver
+            android:name=".UpdateResultReceiver"
+            android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

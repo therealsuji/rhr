@@ -614,6 +614,17 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 				cardPct.text = "${pct / 10}%"
 				cardPct.visibility = View.VISIBLE
 			}
+			"updating" -> {
+				showCard()
+				bar.isIndeterminate = false
+				// done/total are APK byte counts — multiply as Long or an
+				// ~80 MB transfer overflows Int.
+				val pct = if (total > 0) (done.toLong() * 1000 / total).toInt() else 0
+				bar.progress = pct
+				cardLabel.text = "Updating player"
+				cardPct.text = "${pct / 10}%"
+				cardPct.visibility = View.VISIBLE
+			}
 			"syncing" -> {
 				showCard()
 				bar.isIndeterminate = true

@@ -27,6 +27,7 @@ import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/player_builder.dart';
+import 'package:rhr_cli/player_update.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/restart_tracker.dart';
@@ -51,6 +52,8 @@ run options:
   --code <session>      reuse a specific pairing code (default: generate one)
   --direct              attempt a direct WebRTC/STUN payload path, then fall back
   --resync              ignore the local asset manifest and re-push all assets
+  --update-player       on version skew, rebuild and update the player without asking
+  --no-update-player    on version skew, hard-block instead of offering an update
 
 The player must already be installed. Flutter's normal terminal commands work:
   r to hot reload · R to hot restart · q to quit
@@ -146,9 +149,7 @@ Future<void> main(List<String> args) async {
     }
     final projectDirectory = Directory(project).absolute;
     output ??= '${projectDirectory.path}/build/rhr-player-debug.apk';
-    template ??= File.fromUri(
-      Platform.script,
-    ).parent.parent.parent.uri.resolve('player').toFilePath();
+    template ??= await resolvePlayerTemplate();
     try {
       final apk = await buildProjectPlayer(
         project: projectDirectory.path,
@@ -166,12 +167,12 @@ Future<void> main(List<String> args) async {
 
   // Terminal-first product flow: build for Android, attach to the relayed VM,
   // sync assets, and automatically launch the guest app.
-  if (args[0] == 'run') {
-    String project = '.';
+  if (args[0] == 'run') {    String project = '.';
     String? relay;
     String? code;
     var resync = false;
     var direct = false;
+    var updatePolicy = PlayerUpdatePolicy.prompt;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
         case '--project':
@@ -184,6 +185,10 @@ Future<void> main(List<String> args) async {
           direct = true;
         case '--resync':
           resync = true;
+        case '--update-player':
+          updatePolicy = PlayerUpdatePolicy.always;
+        case '--no-update-player':
+          updatePolicy = PlayerUpdatePolicy.never;
         default:
           stderr.writeln('unknown arg: ${args[i]}');
           exit(64);
@@ -196,6 +201,7 @@ Future<void> main(List<String> args) async {
         code: code,
         preferDirect: direct,
         resync: resync,
+        updatePolicy: updatePolicy,
       ),
     );
   }
@@ -237,6 +243,7 @@ Future<void> main(List<String> args) async {
   var syncAssets = false;
   var resync = false;
   var direct = false;
+  var updatePolicy = PlayerUpdatePolicy.prompt;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
       case 'attach':
@@ -259,6 +266,10 @@ Future<void> main(List<String> args) async {
         resync = true;
       case '--direct':
         direct = true;
+      case '--update-player':
+        updatePolicy = PlayerUpdatePolicy.always;
+      case '--no-update-player':
+        updatePolicy = PlayerUpdatePolicy.never;
       default:
         stderr.writeln('unknown arg: ${args[i]}');
         exit(64);
@@ -284,7 +295,7 @@ Future<void> main(List<String> args) async {
   // during it, killing the session before attach even starts.
   if (syncAssets) {
     stderr.writeln('[rhr] building asset bundle...');
-    final build = await Process.run('flutter', [
+    final build = await Process.run(projectFlutterExecutable(project), [
       'build',
       'bundle',
       '--debug',
@@ -317,6 +328,7 @@ Future<void> main(List<String> args) async {
         runFlutter: runFlutter,
         syncAssets: syncAssets,
         preferDirect: direct,
+        updatePolicy: updatePolicy,
       );
       // Clean flutter exit (user pressed q) => done. A nonzero exit is a
       // failed attach (e.g. the flaky first-connect DDS race) => reconnect.
@@ -437,6 +449,11 @@ Map<String, String> _loadConfig(String project) {
   return out;
 }
 
+/// How `rhr` reacts when the compatibility gate blocks: offer an
+/// over-the-wire player update, apply it without asking, or keep the
+/// original hard block.
+enum PlayerUpdatePolicy { prompt, always, never }
+
 /// One relay session: tunnel + optional flutter attach + optional asset sync.
 /// Returns flutter's exit code when it ends on its own, or null when the
 /// relay connection dropped and the caller should reconnect.
@@ -448,6 +465,7 @@ Future<int?> _runSession({
   required bool runFlutter,
   required bool syncAssets,
   bool preferDirect = false,
+  PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.never,
 }) async {
   final compatibility = readProjectCompatibilityProfile(project);
   String? assetStoreId;
@@ -476,11 +494,17 @@ Future<int?> _runSession({
   final wsDied = Completer<void>();
   final sockets = <int, Socket>{};
   final flow = FlowControl();
+  final bridgeDeadline = _DeadlineHolder(
+    DateTime.now().add(const Duration(minutes: 5)),
+  );
+  PlayerUpdateSender? updateSender;
+  var updateAttempted = false;
 
   transport.stream.listen(
     (msg) {
       if (msg is String) {
         final m = jsonDecode(msg) as Map<String, dynamic>;
+        if (updateSender?.handleMessage(m) ?? false) return;
         if (m['t'] == 'info' && !vmReady.isCompleted) {
           final announcedAssetStoreId = m['assetStoreId'];
           final raw = m['compatibility'];
@@ -499,14 +523,35 @@ Future<int?> _runSession({
             stderr.writeln('[rhr] note: $warning');
           }
           if (report.blockers.isNotEmpty) {
+            if (updateSender != null) return; // transfer already in flight
             stderr.writeln('[rhr] COMPATIBILITY_BLOCKED:');
             for (final difference in report.blockers) {
               stderr.writeln('  - $difference');
             }
-            stderr.writeln(
-              '[rhr] Rebuild/reinstall a compatible player before streaming.',
+            if (updatePolicy == PlayerUpdatePolicy.never || updateAttempted) {
+              stderr.writeln(
+                updateAttempted
+                    ? '[rhr] the player is still incompatible after the update.'
+                    : '[rhr] Rebuild/reinstall a compatible player before '
+                          'streaming.',
+              );
+              exit(78);
+            }
+            updateAttempted = true;
+            unawaited(
+              _updatePlayerOverTheWire(
+                transport: transport,
+                project: project,
+                local: compatibility.flutter,
+                policy: updatePolicy,
+                deadline: bridgeDeadline,
+                attach: (sender) => updateSender = sender,
+              ).then((updated) {
+                updateSender = null;
+                if (!updated) exit(78);
+              }),
             );
-            exit(78);
+            return;
           }
           final vmValue = m['vm'];
           if (vmValue is! String || vmValue.isEmpty) {
@@ -525,7 +570,11 @@ Future<int?> _runSession({
           sockets[f.channel]?.add(f.payload);
           transport.send(encodeAck(f.channel, f.payload.length));
         case opAck:
-          flow.acked(f.channel, decodeAckCount(f.payload));
+          if (PlayerUpdateSender.isUpdateAck(f.channel)) {
+            updateSender?.handleAck(f.channel, decodeAckCount(f.payload));
+          } else {
+            flow.acked(f.channel, decodeAckCount(f.payload));
+          }
         case opClose:
           flow.forget(f.channel);
           sockets.remove(f.channel)?.destroy();
@@ -567,7 +616,7 @@ Future<int?> _runSession({
   stderr.writeln('[rhr] waiting for device bridge...');
   Uri? vm;
   try {
-    vm = await _waitForDeviceBridge(vmReady, wsDied, code);
+    vm = await _waitForDeviceBridge(vmReady, wsDied, code, bridgeDeadline);
   } on _WaitTimedOut {
     keepalive.cancel();
     await transport.close();
@@ -655,7 +704,7 @@ Future<int?> _runSession({
   }
 
   final proc = await Process.start(
-    'flutter',
+    projectFlutterExecutable(project),
     [
       'attach',
       '-d',
@@ -751,6 +800,14 @@ final class _WaitTimedOut {
   const _WaitTimedOut();
 }
 
+/// Mutable deadline shared between the bridge wait and the player-update
+/// flow: a build plus an on-device install takes far longer than the normal
+/// five-minute join budget, so the updater pushes the deadline out.
+final class _DeadlineHolder {
+  _DeadlineHolder(this.value);
+  DateTime value;
+}
+
 /// Waits for the device's info announcement. Unlike an indefinite hang, a slow
 /// tester is gently reminded instead of looping "session dropped", and a dead
 /// relay connection (wsDied) still ends the wait so the caller can reconnect.
@@ -759,10 +816,10 @@ Future<Uri?> _waitForDeviceBridge(
   Completer<Uri> vmReady,
   Completer<void> wsDied,
   String code,
+  _DeadlineHolder deadline,
 ) async {
-  final deadline = DateTime.now().add(const Duration(minutes: 5));
   while (true) {
-    final remaining = deadline.difference(DateTime.now());
+    final remaining = deadline.value.difference(DateTime.now());
     var wait = const Duration(seconds: 30);
     if (remaining.compareTo(wait) < 0) wait = remaining;
     final result = await Future.any<Object>([
@@ -774,11 +831,101 @@ Future<Uri?> _waitForDeviceBridge(
     ]);
     if (result is Uri) return result;
     if (result is _RelayEnded) return null;
-    if (DateTime.now().isAfter(deadline)) throw const _WaitTimedOut();
+    if (DateTime.now().isAfter(deadline.value)) throw const _WaitTimedOut();
     stderr.writeln(
       '[rhr] still waiting for the player on code "$code" — '
       'make sure it is connected (scan the QR or enter this code).',
     );
+  }
+}
+
+/// The gate blocked and policy allows an update: confirm with the user,
+/// build a player carrying the project's plugins and permissions with the
+/// project's SDK, stream it over [transport], and hand it to the on-device
+/// installer. Returns false when the user declined or the update failed
+/// (the caller keeps the hard block).
+Future<bool> _updatePlayerOverTheWire({
+  required SessionTransport transport,
+  required String project,
+  required FlutterCompatibility local,
+  required PlayerUpdatePolicy policy,
+  required _DeadlineHolder deadline,
+  required void Function(PlayerUpdateSender) attach,
+}) async {
+  if (policy == PlayerUpdatePolicy.prompt) {
+    if (!stdin.hasTerminal) {
+      stderr.writeln(
+        '[rhr] no terminal to confirm a player update '
+        '(pass --update-player to update without asking).',
+      );
+      return false;
+    }
+    stderr.write(
+      '[rhr] update the player over the wire to Flutter '
+      '${local.frameworkVersion}? [Y/n] ',
+    );
+    final answer = (await stdin
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .first
+            .catchError((_) => 'n'))
+        .trim()
+        .toLowerCase();
+    if (answer.isNotEmpty && answer != 'y' && answer != 'yes') return false;
+  }
+
+  final template = await resolvePlayerTemplate();
+  final sender = PlayerUpdateSender(transport);
+  attach(sender);
+  try {
+    // Building can take minutes and the install needs the tester to reopen
+    // the player; keep the bridge wait from expiring under either.
+    deadline.value = DateTime.now().add(const Duration(minutes: 20));
+    final apk = await buildUpdatePlayerApk(
+      project: project,
+      template: template,
+      frameworkRevision: local.frameworkRevision,
+      flutterExecutable: projectFlutterExecutable(project),
+    );
+    stderr.writeln(
+      '[rhr] streaming player update '
+      '(${(apk.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB)…',
+    );
+    var lastReported = 0;
+    final outcome = await sender.send(
+      apk,
+      onProgress: (sent, total) {
+        // Throttle the on-device overlay updates to every 256 KB.
+        if (sent - lastReported < 256 * 1024 && sent != total) return;
+        lastReported = sent;
+        transport.send(
+          jsonEncode({
+            't': 'progress',
+            'phase': 'updating',
+            'done': sent,
+            'total': total,
+          }),
+        );
+      },
+    );
+    deadline.value = DateTime.now().add(const Duration(minutes: 10));
+    stderr.writeln(switch (outcome) {
+      PlayerUpdateOutcome.committed =>
+        '[rhr] update installing — reopen the rhr player on the device; '
+            'the session resumes automatically.',
+      PlayerUpdateOutcome.pendingUser =>
+        '[rhr] confirm the install on the device, then reopen the rhr '
+            'player; the session resumes automatically.',
+    });
+    return true;
+  } on PlayerUpdateFailure catch (failure) {
+    stderr.writeln('[rhr] $failure');
+    return false;
+  } catch (error) {
+    stderr.writeln('[rhr] player update failed: $error');
+    return false;
+  } finally {
+    sender.close();
   }
 }
 
@@ -854,6 +1001,7 @@ Future<int> _runAttachProductFlow({
   String? code,
   bool preferDirect = false,
   bool resync = false,
+  PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.prompt,
 }) async {
   final sessionCode = code ?? mintRhrSessionCode();
   final config = _loadConfig(project);
@@ -892,7 +1040,7 @@ Future<int> _runAttachProductFlow({
 
   try {
     stderr.writeln('[rhr] building Android asset bundle…');
-    final build = await Process.run('flutter', [
+    final build = await Process.run(projectFlutterExecutable(project), [
       'build',
       'bundle',
       '--debug',
@@ -919,6 +1067,7 @@ Future<int> _runAttachProductFlow({
           runFlutter: true,
           syncAssets: true,
           preferDirect: preferDirect,
+          updatePolicy: updatePolicy,
         );
         if (result == 0) return 0;
         if (result == _noDeviceExitCode) return result!;
