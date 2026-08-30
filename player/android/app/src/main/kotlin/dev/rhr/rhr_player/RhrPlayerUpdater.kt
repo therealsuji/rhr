@@ -20,13 +20,22 @@ import org.json.JSONObject
  * hot-restarts, and the install itself kills the whole process.
  *
  * Protocol (mirror of cli/lib/player_update.dart):
- *   {"t":"update_begin","id":N,"size":S,"sha256":H}  -> answer "ready"
+ *   {"t":"update_begin","id":N,"size":S,"sha256":H,
+ *    "kind":"player"|"app","target":"<pkg>"}        -> answer "ready"
  *   binary [op=4][4B id][chunk]                      -> append, ack (op 3)
  *   {"t":"update_commit","id":N}                     -> no more data is
  *       coming; verify once every byte has landed (the direct WebRTC path
  *       carries binary out-of-band from relay text, so commit may overtake
  *       the tail of the stream), then install and answer "committed" or
- *       "pending_user" / "failure".
+ *       "pending_user" / "installed" / "failure".
+ *
+ *   kind="player" (default): the APK replaces THIS app; a silent apply
+ *       kills the process, so "committed" is sent before commit() and
+ *       STATUS_SUCCESS is normally unreachable.
+ *   kind="app": the APK is a FOREIGN package (the tier-2 wrapped app,
+ *       delivered through the player). This process survives the install,
+ *       so the result receiver reports the terminal "installed" (or
+ *       "failure") after the user confirms the system sheet.
  */
 class RhrPlayerUpdater(
 	private val context: Context,
@@ -48,6 +57,8 @@ class RhrPlayerUpdater(
 	private var transferId = 0
 	private var expectedSize = 0L
 	private var expectedSha256 = ""
+	private var installKind = "player"
+	private var installTarget = ""
 	private var file: File? = null
 	private var output: FileOutputStream? = null
 	private var digest: MessageDigest? = null
@@ -69,6 +80,8 @@ class RhrPlayerUpdater(
 			transferId = id
 			expectedSize = size
 			expectedSha256 = sha
+			installKind = message.optString("kind", "player")
+			installTarget = message.optString("target", "")
 			received = 0
 			commitRequested = false
 			finished = false
@@ -159,16 +172,25 @@ class RhrPlayerUpdater(
 
 	private fun install(apk: File) {
 		try {
+			val foreign = installKind == "app" && installTarget.isNotEmpty()
 			val installer = context.packageManager.packageInstaller
 			val params = PackageInstaller.SessionParams(
 				PackageInstaller.SessionParams.MODE_FULL_INSTALL
 			).apply {
-				setAppPackageName(context.packageName)
+				// kind=app delivers a FOREIGN package (the tier-2 wrapped
+				// app): the target comes from the wire and this process
+				// survives the install. kind=player is the self-update.
+				if (installTarget.isNotEmpty()) {
+					setAppPackageName(installTarget)
+				} else {
+					setAppPackageName(context.packageName)
+				}
 				setSize(apk.length())
 				if (Build.VERSION.SDK_INT >= 31) {
-					// Self-update by the installer of record applies with no
-					// user interaction; otherwise Android falls back to the
-					// confirmation sheet (surfaced as pending_user below).
+					// Installer-of-record self-updates apply with no user
+					// interaction; everything else (including foreign
+					// packages) falls back to the confirmation sheet,
+					// surfaced as pending_user -> installed / failure.
 					setRequireUserAction(
 						PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
 				}
@@ -183,7 +205,7 @@ class RhrPlayerUpdater(
 				// the "committed" status must be on the wire first. The relay
 				// socket send is async — give OkHttp a beat to flush.
 				status(transferId, "committed")
-				Thread.sleep(500)
+				if (foreign) Thread.sleep(500)
 				val intent = Intent(context, UpdateResultReceiver::class.java)
 					.setAction(UpdateResultReceiver.ACTION)
 				val pending = PendingIntent.getBroadcast(
@@ -204,6 +226,12 @@ class RhrPlayerUpdater(
 
 	fun onPendingUser() {
 		status(transferId, "pending_user")
+	}
+
+	fun onInstalled() {
+		finished = true
+		status(transferId, "installed")
+		Log.i(TAG, "foreign package install confirmed")
 	}
 
 	fun onInstallFailed(message: String) {
@@ -264,7 +292,10 @@ class UpdateResultReceiver : BroadcastReceiver() {
 				}
 			}
 			PackageInstaller.STATUS_SUCCESS -> {
-				// Normally unreachable: the update replaced this process.
+				// Unreachable for self-updates (the process dies first), but
+				// THE terminal state for foreign packages (kind=app): the
+				// wrapped app installed successfully.
+				RhrPlayerUpdater.active?.onInstalled()
 			}
 			else -> {
 				val message = intent.getStringExtra(

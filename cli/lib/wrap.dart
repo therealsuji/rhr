@@ -20,10 +20,13 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:rhr_bridge/session_code.dart';
+import 'package:rhr_bridge/tunnel.dart';
+
+import 'player_update.dart';
+import 'relay_race.dart';
 
 import 'flutter_compatibility.dart';
 import 'player_builder.dart';
-import 'player_update.dart' show resolvePlayerTemplate;
 import 'version.dart';
 
 /// Test seam: redirects every ~/.rhr path when set (wrap writes nothing to
@@ -41,6 +44,7 @@ class WrapOptions {
     this.code,
     this.verbatimId = false,
     this.install = true,
+    this.deliver = false,
   });
 
   final String project;
@@ -51,6 +55,10 @@ class WrapOptions {
   /// suffix. Replaces the production install on the device.
   final bool verbatimId;
   final bool install;
+
+  /// Deliver the wrapped APK to the rhr player over the relay instead of
+  /// adb (cable-free install; the player shows the system confirm sheet).
+  final bool deliver;
 }
 
 class WrapResult {
@@ -134,7 +142,15 @@ Future<WrapResult> wrapApp(
   final applicationId = _verifyApk(apk, project, suffix, log);
 
   var installed = false;
-  if (options.install) {
+  if (options.deliver) {
+    await deliverViaRelay(
+      apk: apk,
+      applicationId: applicationId,
+      relay: relay,
+      onLog: log,
+    );
+    installed = true;
+  } else if (options.install) {
     installed = await _installAndLaunch(apk, applicationId, log);
   }
 
@@ -145,6 +161,71 @@ Future<WrapResult> wrapApp(
     relay: relay,
     installed: installed,
   );
+}
+
+/// Cable-free install: streams the wrapped APK to the rhr player over
+/// [relay] (kind: app — the player survives the install and reports the
+/// system sheet's result). The tester joins [deliveryCode] from the
+/// player's connect screen; the sheet needs one tap.
+Future<void> deliverViaRelay({
+  required File apk,
+  required String applicationId,
+  required String relay,
+  void Function(String)? onLog,
+}) async {
+  final void Function(String) log = onLog ?? stderr.writeln;
+  final deliveryCode = mintRhrSessionCode();
+  log('[rhr] open the rhr player on the phone and enter code: $deliveryCode');
+  final transport = await RelayRace.connect(relays: [relay], code: deliveryCode);
+  try {
+    // The transport stream is single-subscription: one listener routes the
+    // player hello AND the update statuses/acks for the whole delivery.
+    final hello = Completer<void>();
+    PlayerUpdateSender? sender;
+    var lastPct = -10;
+    final sub = transport.stream.listen((msg) {
+      if (msg is String) {
+        if (!hello.isCompleted && msg.contains('"t":"info"')) {
+          hello.complete();
+          return;
+        }
+        sender?.handleMessage(jsonDecode(msg) as Map<String, dynamic>);
+      } else {
+        final f = decodeFrame(msg as List<int>);
+        if (f.op == opAck && PlayerUpdateSender.isUpdateAck(f.channel)) {
+          sender?.handleAck(f.channel, decodeAckCount(f.payload));
+        }
+      }
+    });
+    await hello.future.timeout(
+      const Duration(minutes: 5),
+      onTimeout: () => throw WrapFailure(
+        'no player joined the delivery session within 5 minutes',
+      ),
+    );
+    log('[rhr] player connected — streaming '
+        '${(apk.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB…');
+    sender = PlayerUpdateSender(
+      transport,
+      kind: UpdateKind.app,
+      target: applicationId,
+    );
+    try {
+      final outcome = await sender.send(apk, onProgress: (sent, total) {
+        final pct = (sent * 100 ~/ total);
+        if (pct >= lastPct + 10) {
+          lastPct = pct;
+          log('[rhr] delivered $pct%');
+        }
+      });
+      log('[rhr] delivery outcome: $outcome — confirm the sheet on the '
+          'phone if it is still showing');
+    } finally {
+      await sub.cancel();
+    }
+  } finally {
+    await transport.close();
+  }
 }
 
 // ---- resolution ----------------------------------------------------------

@@ -47,6 +47,8 @@ Usage:
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
   rhr wrap [options]          embed the tunnel into the app's own debug build
+  (--deliver streams the APK to the rhr player over the relay: cable-free
+   install — the player shows the system confirm sheet, one tap)
 
 run options:
   --project <dir>       Flutter project dir (default: current dir)
@@ -175,6 +177,7 @@ Future<void> main(List<String> args) async {
     String? code;
     var verbatimId = false;
     var noInstall = false;
+    var deliver = false;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
         case '--project':
@@ -193,6 +196,8 @@ Future<void> main(List<String> args) async {
           }
         case '--no-install':
           noInstall = true;
+        case '--deliver':
+          deliver = true;
         default:
           stderr.writeln('unknown arg: ${args[i]}');
           exit(64);
@@ -205,7 +210,8 @@ Future<void> main(List<String> args) async {
           relay: relay,
           code: code,
           verbatimId: verbatimId,
-          install: !noInstall,
+          install: !noInstall && !deliver,
+          deliver: deliver,
         ),
       );
       stderr.writeln('[rhr] wrapped ✓ — open the app; it dials ${result.relay}');
@@ -987,6 +993,9 @@ Future<bool> _updatePlayerOverTheWire({
       PlayerUpdateOutcome.pendingUser =>
         '[rhr] confirm the install on the device, then reopen the rhr '
             'player; the session resumes automatically.',
+      PlayerUpdateOutcome.installed =>
+        '[rhr] wrapped app installed — open it on the device; it dials the '
+            'relay with its baked code.',
     });
     return true;
   } on PlayerUpdateFailure catch (failure) {

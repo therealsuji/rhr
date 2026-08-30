@@ -106,18 +106,36 @@ enum PlayerUpdateOutcome {
 
   /// Android is showing the install confirmation sheet on the device.
   pendingUser,
+
+  /// A foreign package (kind: app) finished installing; the player
+  /// reported STATUS_SUCCESS from the result broadcast.
+  installed,
 }
+
+/// Who receives the APK: `player` (the default — a self-update that may
+/// kill the device process) or `app` (a foreign package — the tier-2
+/// wrapped app — where the player survives and the system sheet's result
+/// is reported back as the terminal `installed` state).
+enum UpdateKind { player, app }
 
 /// Streams one APK over the session transport. Construct it before sending,
 /// route every incoming `update_status` message into [handleMessage] (the
 /// transport stream has a single listener, owned by the caller), then await
 /// [send].
 final class PlayerUpdateSender {
-  PlayerUpdateSender(this._transport, {int chunkBytes = 64 * 1024})
-    : _chunkBytes = chunkBytes,
-      _transferId = updateTransferIdBase | 1;
+  PlayerUpdateSender(
+    this._transport, {
+    int chunkBytes = 64 * 1024,
+    this.kind = UpdateKind.player,
+    this.target = '',
+  }) : _chunkBytes = chunkBytes,
+       _transferId = updateTransferIdBase | 1;
 
   final SessionTransport _transport;
+  final UpdateKind kind;
+
+  /// Package name for kind: app (validated on-device against the APK).
+  final String target;
   final int _chunkBytes;
   final int _transferId;
   final _flow = FlowControl();
@@ -161,6 +179,8 @@ final class PlayerUpdateSender {
         'id': _transferId,
         'size': size,
         'sha256': digest.toString(),
+        'kind': kind.name,
+        if (target.isNotEmpty) 'target': target,
       }),
     );
     await _awaitState(
@@ -195,6 +215,17 @@ final class PlayerUpdateSender {
     }
 
     _transport.send(jsonEncode({'t': 'update_commit', 'id': _transferId}));
+    if (kind == UpdateKind.app) {
+      // Foreign package: the player process survives, the system sheet
+      // waits for a user tap, and the result broadcast carries the
+      // terminal state. Wait generously — the tester may be away.
+      await _awaitState(
+        {'installed'},
+        timeout: const Duration(minutes: 10),
+        onTimeout: 'the wrapped app install was not confirmed on the device',
+      );
+      return PlayerUpdateOutcome.installed;
+    }
     final state = await _awaitState(
       {'committed', 'pending_user'},
       timeout: const Duration(minutes: 2),
