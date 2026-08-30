@@ -32,7 +32,7 @@ class RhrPlayerUpdater(
 	private val context: Context,
 	private val sendText: (String) -> Unit,
 	private val sendBinary: (ByteArray) -> Unit,
-) {
+) : RhrUpdateHandler {
 	companion object {
 		private const val TAG = "rhr_updater"
 		private const val OP_ACK = 3

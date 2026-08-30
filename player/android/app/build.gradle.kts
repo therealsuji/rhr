@@ -109,6 +109,18 @@ android {
             "RHR_ANDROID_PLUGINS_JSON",
             quotedBuildConfig(JsonOutput.toJson(androidPluginProfile)),
         )
+        // Mirror the identity into resources for the bridge-android library:
+        // RhrConfig reads these (resource-based, so wrapped apps can bake the
+        // same keys at build time with zero code).
+        resValue("string", "rhr_flutter_version", flutterIdentityField("frameworkVersion"))
+        resValue("string", "rhr_framework_revision", flutterIdentityField("frameworkRevision"))
+        resValue("string", "rhr_engine_revision", flutterIdentityField("engineRevision"))
+        resValue("string", "rhr_dart_sdk_version", flutterIdentityField("dartSdkVersion"))
+        resValue("string", "rhr_channel", flutterIdentityFieldOrNull("channel") ?: "")
+        resValue("string", "rhr_android_plugins_json", JsonOutput.toJson(androidPluginProfile))
+        resValue("string", "rhr_host", "player")
+        // No rhr_relay_url / rhr_session_code: the player's lobby drives
+        // sessions, so RhrBridgeInit auto-start no-ops here.
     }
 
     buildTypes {
@@ -131,11 +143,9 @@ flutter {
 }
 
 dependencies {
-    // Native tunnel bridge (RhrSessionService)
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    // Native WebRTC data channel for the opt-in direct payload path. The
-    // relay remains the signaling and fallback transport.
-    implementation("io.github.webrtc-sdk:android:144.7559.12")
+    // Embeddable tunnel core (RhrSessionService + RhrDirectTransport live in
+    // the library now; the app provides the update handler and UI).
+    implementation(project(":bridge-android"))
     // Spring physics for the dev overlay animations
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
     // Core library desugaring (see compileOptions above)

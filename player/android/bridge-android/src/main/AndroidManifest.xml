@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Library manifest: merged into host apps. Brings the session service and
+     the auto-start provider; the host adds nothing by hand.
+     The provider no-ops unless the host bakes rhr_relay_url + rhr_session_code
+     resources (the wrapped-app path — the player drives sessions itself). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <application>
+        <!-- Native session service: the tunnel bridge must live outside the
+             Dart world so hot restarts can't kill it. -->
+        <service
+            android:name="dev.rhr.rhr_player.RhrSessionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Zero-code entry point for wrapped apps: runs at process start,
+             starts the session service from baked resources. The player does
+             not bake those resources, so this no-ops there. -->
+        <provider
+            android:name="dev.rhr.rhr_player.RhrBridgeInit"
+            android:authorities="${applicationId}.rhrinit"
+            android:exported="false"
+            android:initOrder="100" />
+    </application>
+</manifest>

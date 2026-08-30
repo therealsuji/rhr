@@ -120,6 +120,15 @@ class RhrSessionService : Service() {
 		@Volatile var currentVm: String = ""
 			private set
 
+		// Host-provided factory for over-the-wire APK updates (the player's
+		// RhrPlayerUpdater does PackageInstaller self-updates). The factory
+		// receives the live socket's send functions; invoked lazily when the
+		// dev side starts an update transfer. Null => update frames are
+		// ignored (wrapped apps without an update hook).
+		@Volatile var updateHandlerFactory:
+			((ctx: Context, sendText: (String) -> Unit, sendBinary: (ByteArray) -> Unit)
+				-> RhrUpdateHandler)? = null
+
 		// Latest transfer/lifecycle progress, pushed by the dev over the tunnel
 		// ({"t":"progress",...}) or set locally (e.g. "restarting"). The native
 		// overlay in MainActivity renders this above the Flutter surface — it
@@ -196,10 +205,12 @@ class RhrSessionService : Service() {
 	// engine, so hot restart cannot destroy the peer connection.
 	private var directTransport: RhrDirectTransport? = null
 	private var preferDirect = false
-	// Over-the-wire player update receiver. Created on demand; must live in
-	// this service (not the Dart world) because the install kills the process
-	// and the transfer must survive guest hot-restarts.
-	private var updater: RhrPlayerUpdater? = null
+	// Over-the-wire APK-update receiver, provided by the HOST app (the
+	// player installs its own replacement; wrapped apps may ship none).
+	// Created on demand; must live in this service (not the Dart world)
+	// because the install kills the process and the transfer must survive
+	// guest hot-restarts.
+	private var updater: RhrUpdateHandler? = null
 	// Last time we heard from the developer (any dev→device message, or a
 	// relay dev_present). Drives the presence lease expiry.
 	@Volatile private var lastDevActivity = 0L
@@ -389,17 +400,22 @@ class RhrSessionService : Service() {
 		// {"t":"ready"} frame has already been consumed.
 		.put("ready", readySent)
 		.put("assetStoreId", assetStoreId)
+		// "player" | "app" — a wrapped app's identity is baked from the same
+		// SDK the CLI builds with, so the gate is exact-match by construction;
+		// the dev side also uses this to route update offers (never offered
+		// to a wrapped host).
+		.put("host", RhrConfig.hostKind(this))
 		.put(
 			"compatibility",
 			JSONObject()
-				.put("frameworkVersion", BuildConfig.RHR_FLUTTER_VERSION)
-				.put("frameworkRevision", BuildConfig.RHR_FRAMEWORK_REVISION)
-				.put("engineRevision", BuildConfig.RHR_ENGINE_REVISION)
-				.put("dartSdkVersion", BuildConfig.RHR_DART_SDK_VERSION)
-				.put("channel", BuildConfig.RHR_FLUTTER_CHANNEL)
+				.put("frameworkVersion", RhrConfig.flutterVersion(this))
+				.put("frameworkRevision", RhrConfig.frameworkRevision(this))
+				.put("engineRevision", RhrConfig.engineRevision(this))
+				.put("dartSdkVersion", RhrConfig.dartSdkVersion(this))
+				.put("channel", RhrConfig.channel(this))
 				.put(
 					"androidPlugins",
-					JSONObject(BuildConfig.RHR_ANDROID_PLUGINS_JSON))
+					JSONObject(RhrConfig.androidPluginsJson(this).ifBlank { "{}" }))
 				.put("androidPermissions", androidPermissions()))
 		.toString()
 
@@ -483,16 +499,17 @@ class RhrSessionService : Service() {
 							text.contains("\"update_commit\"")) {
 							try {
 								val o = JSONObject(text)
-								val u = updater ?: RhrPlayerUpdater(
+								val factory = updateHandlerFactory
+								val u = updater ?: factory?.invoke(
 									this@RhrSessionService,
-									sendText = { m ->
+									{ m ->
 										synchronized(vmUriLock) { ws?.send(m) }
 									},
-									sendBinary = { f -> sendBinaryFrame(f) },
-								).also { updater = it }
+									{ f -> sendBinaryFrame(f) },
+								)?.also { updater = it }
 								when (o.optString("t")) {
-									"update_begin" -> u.handleBegin(o)
-									"update_commit" -> u.handleCommit(o)
+									"update_begin" -> u?.handleBegin(o)
+									"update_commit" -> u?.handleCommit(o)
 								}
 							} catch (e: Exception) {
 								Log.w(TAG, "update message failed: $e")
@@ -901,8 +918,10 @@ class RhrSessionService : Service() {
 		// Os.lstat (API 21+) instead of java.nio.file.Files so the library
 		// carries no desugaring requirement for host apps.
 		val isLink = try {
-			java.nio.file.Files.isSymbolicLink(f.toPath())
-		} catch (_: Exception) { false }
+			(Os.lstat(f.absolutePath).st_mode and android.system.OsConstants.S_IFLNK) != 0
+		} catch (_: Exception) {
+			false
+		}
 		if (!isLink && f.isDirectory) {
 			f.listFiles()?.forEach { deleteWithoutFollowingSymlinks(it) }
 		}
