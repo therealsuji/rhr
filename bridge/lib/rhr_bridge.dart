@@ -25,6 +25,7 @@ class RhrBridge {
     this.assetStoreId,
     this.compatibility,
     this.preferDirect,
+    [this.externalVmUri, this.host]
   );
 
   final String relayUrl;
@@ -32,6 +33,15 @@ class RhrBridge {
   final String? assetStoreId;
   final Map<String, dynamic>? compatibility;
   final bool preferDirect;
+
+  /// Top-level kind announced in the hello: "player" | "app" | "connector"
+  /// (the dev-side gate routes on this).
+  final String? host;
+
+  /// When set, this bridge tunnels a DIFFERENT app's VM service (the M3
+  /// connector mode: the target app's debug door was discovered out of
+  /// band, e.g. via mDNS) instead of this isolate's own Service.getInfo().
+  final Uri? externalVmUri;
   final _sockets = <int, Socket>{};
   final _subs = <int, StreamSubscription<Uint8List>>{};
   final _flow = FlowControl();
@@ -84,11 +94,39 @@ class RhrBridge {
     return b;
   }
 
+  /// Connector mode: tunnel a DIFFERENT app's VM service (discovered out of
+  /// band — the target app contains no rhr code at all). [vmUri] points at
+  /// the target's debug door, e.g. http://127.0.0.1:42595/<auth>/.
+  static RhrBridge startExternal({
+    required String relayUrl,
+    required String sessionCode,
+    required Uri vmUri,
+    String? assetStoreId,
+    Map<String, dynamic>? compatibility,
+    bool preferDirect = false,
+    String host = 'connector',
+  }) {
+    final existing = _instance;
+    if (existing != null && !existing._stopped) return existing;
+    final b = RhrBridge._(
+      relayUrl,
+      sessionCode,
+      assetStoreId,
+      compatibility,
+      preferDirect,
+      vmUri,
+      host,
+    );
+    _instance = b;
+    unawaited(b._run());
+    return b;
+  }
+
   Future<void> _run() async {
     // The VM service can take a moment to come up in a freshly launched app.
     Uri? vm;
     while (vm == null) {
-      vm = (await Service.getInfo()).serverUri;
+      vm = externalVmUri ?? (await Service.getInfo()).serverUri;
       if (vm == null) {
         await Future<void>.delayed(const Duration(milliseconds: 300));
       }
@@ -158,6 +196,7 @@ class RhrBridge {
           jsonEncode({
             't': 'info',
             'vm': vmUri.toString(),
+            'host': host,
             if (assetStoreId != null) 'assetStoreId': assetStoreId,
             if (compatibility != null) 'compatibility': compatibility,
           }),

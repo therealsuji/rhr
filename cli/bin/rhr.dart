@@ -567,6 +567,29 @@ Future<int?> _runSession({
         if (updateSender?.handleMessage(m) ?? false) return;
         if (m['t'] == 'info' && !vmReady.isCompleted) {
           final announcedAssetStoreId = m['assetStoreId'];
+          final announcedHost = m['host'] ??
+              (m['compatibility'] is Map<String, dynamic>
+                  ? (m['compatibility'] as Map<String, dynamic>)['host']
+                  : null);
+          final hostKind =
+              announcedHost is String ? announcedHost : 'player';
+          if (hostKind == 'connector') {
+            // M3: the connector tunnels a THIRD-party app's VM service —
+            // the target contains no rhr code, so there is no identity to
+            // gate on and no player to update. The dev pushes its own
+            // kernel, making the SDK question moot.
+            final connectorVm = m['vm'];
+            if (connectorVm is! String || connectorVm.isEmpty) {
+              stderr.writeln(
+                  '[rhr] connector announced no VM service — is the target '
+                  'app a debug build?');
+              exit(78);
+            }
+            assetStoreId =
+                announcedAssetStoreId is String ? announcedAssetStoreId : '';
+            vmReady.complete(Uri.parse(connectorVm));
+            return;
+          }
           final raw = m['compatibility'];
           if (announcedAssetStoreId is! String ||
               announcedAssetStoreId.isEmpty ||
@@ -578,8 +601,7 @@ Future<int?> _runSession({
             exit(78);
           }
           assetStoreId = announcedAssetStoreId;
-          final hostKind = m['host'];
-          final isWrappedApp = hostKind is String && hostKind == 'app';
+          final isWrappedApp = hostKind == 'app';
           final report = compatibility.differencesFrom(raw);
           for (final warning in report.warnings) {
             stderr.writeln('[rhr] note: $warning');
