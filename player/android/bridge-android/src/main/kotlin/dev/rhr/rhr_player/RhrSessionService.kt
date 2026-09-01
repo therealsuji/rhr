@@ -182,6 +182,9 @@ class RhrSessionService : Service() {
 	@Volatile private var activeRelayUrl = ""
 	private var sessionCode = ""
 	private var vmUri = ""
+	// Connector mode: the vmUri was handed to us (target app's door) —
+	// never override it from our own process log.
+	@Volatile private var watchOwnVm = true
 	private var projectHint: String? = null
 	private val sockets = ConcurrentHashMap<Int, Socket>()
 	private val readers = ConcurrentHashMap<Int, Thread>()
@@ -245,6 +248,11 @@ class RhrSessionService : Service() {
 					intent.getStringExtra("code") ?: return START_NOT_STICKY
 				val requestedVm =
 					intent.getStringExtra("vmUri") ?: return START_NOT_STICKY
+				// watchVm=false: the vmUri IS the door (connector mode — the
+				// target app is a different process, so our own logcat can
+				// never see its engine lines). Default true: the player
+				// hosts its own engine and tracks guest kernel swaps.
+				watchOwnVm = intent.getBooleanExtra("watchVm", true)
 				val requestedDirect = intent.getBooleanExtra("preferDirect", false)
 				val sameLiveSession = reconnectThread?.isAlive == true &&
 					!stopped.get() && sessionCode == requestedCode
@@ -275,9 +283,8 @@ class RhrSessionService : Service() {
 					readySent = false // re-arm sync-ready for a genuinely new session
 					stopped.set(false)
 					sweepOrphanedDevfsDirs()
-					watchForDevfsDirs()
-					startVmUriWatch()
-					startPresenceWatch()
+					if (watchOwnVm) watchForDevfsDirs()
+					if (watchOwnVm) startVmUriWatch() else startPresenceWatch()
 					startReconnectLoop(sessionGeneration)
 				}
 				onUpdate?.invoke()
