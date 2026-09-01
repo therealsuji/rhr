@@ -2,10 +2,11 @@
 // VM service to the dev's Mac over the relay — the target app contains no
 // rhr code and is never rebuilt.
 //
-// Discovery: Shizuku shell powers (granted once via the wireless-debugging
-// pairing) let the connector read the target's log, where the engine prints
-// its VM service door. mDNS proved unreliable across networks, so shell is
-// the primary — and only — discovery path (see notes/PHASE2_BUILD_PLAN.md).
+// Discovery: an embedded wireless-debugging ADB client (vendored from
+// Shizuku, Apache-2.0 — see android/.../moe/shizuku/manager/adb/). Paired
+// once with the phone's own adbd (loopback, any network), the connector
+// reads the target's log as shell for the engine's VM door line, and the
+// native RhrSessionService (bridge-android) tunnels it through the relay.
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -43,12 +44,16 @@ class ConnectorHome extends StatefulWidget {
 class _ConnectorHomeState extends State<ConnectorHome> {
   final _relayController = TextEditingController();
   final _codeController = TextEditingController();
+  final _pairCodeController = TextEditingController();
+  final _pairPortController = TextEditingController();
   bool _loadingPrefs = true;
-  Map<String, bool>? _shizuku; // managerInstalled / serverRunning / permission
-  List<Map<String, String>> _apps = const [];
+  bool _paired = false;
+  bool _connected = false;
+  bool _discoveringPort = false;
+  bool _pairing = false;
   bool _connecting = false;
   String _status = 'idle';
-  Timer? _poll;
+  List<Map<String, String>> _apps = const [];
 
   @override
   void initState() {
@@ -56,8 +61,6 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'progress') {
         setState(() => _status = call.arguments as String? ?? _status);
-      } else if (call.method == 'setupChanged') {
-        await _refreshShizuku();
       }
     });
     _loadPrefs();
@@ -70,54 +73,36 @@ class _ConnectorHomeState extends State<ConnectorHome> {
       _codeController.text = prefs.getString('code') ?? '';
       _loadingPrefs = false;
     });
-    await _refreshShizuku();
+    await _refresh();
   }
 
-  Future<void> _refreshShizuku() async {
-    if (_connecting) return;
+  Future<void> _refresh() async {
     try {
       final state =
           await _channel.invokeMapMethod<String, bool>('setupState');
       if (!mounted) return;
-      setState(() => _shizuku = state);
-      final ready = state != null &&
-          state['managerInstalled'] == true &&
-          state['serverRunning'] == true &&
-          state['permission'] == true;
-      if (ready && _apps.isEmpty && !_connecting) await _loadApps();
+      setState(() {
+        _paired = state?['paired'] == true;
+        _connected = state?['connected'] == true;
+      });
+      if (_connected && _apps.isEmpty && !_connecting) await _loadApps();
     } on PlatformException {
-      // Keep the wizard showing; the user can retry.
+      // The wizard stays; the user can retry.
     }
   }
 
-  Future<void> _loadApps() async {
-    final apps = await _channel.invokeListMethod<Map<Object?, Object?>>(
-        'listApps');
-    setState(() {
-      _apps = (apps
-              ?.map((e) => e.map((k, v) => MapEntry(k.toString(), v.toString())))
-              .toList() ??
-              const [])
-          .where((app) => app['debuggable'] == 'true')
-          .toList();
-      _status = _apps.isEmpty
-          ? 'no third-party apps found'
-          : 'pick the app to tunnel';
-    });
-  }
-
-  /// Drives the wizard: polls setupState while the user completes the
-  /// Shizuku step they're on.
-  void _pollShizuku() {
-    _poll?.cancel();
+  /// Polls setupState while the user completes a Shizuku-free setup step.
+  void _poll() {
     var ticks = 0;
-    _poll = Timer.periodic(const Duration(milliseconds: 1500), (timer) async {
+    Timer.periodic(const Duration(milliseconds: 1200), (timer) {
       ticks++;
-      await _refreshShizuku();
-      final ready = _shizuku?['managerInstalled'] == true &&
-          _shizuku?['serverRunning'] == true &&
-          _shizuku?['permission'] == true;
-      if (ready || ticks > 40) timer.cancel();
+      if (ticks > 40 || !mounted) {
+        timer.cancel();
+        return;
+      }
+      _refresh().then((_) {
+        if (_paired && _connected && timer.isActive) timer.cancel();
+      });
     });
   }
 
@@ -125,6 +110,81 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('relay', _relayController.text.trim());
     await prefs.setString('code', _codeController.text.trim());
+  }
+
+  Future<void> _discoverPairingPort() async {
+    setState(() => _discoveringPort = true);
+    try {
+      final port = await _channel.invokeMethod<int>('discoverPairingPort');
+      setState(() {
+        _status = port != null && port > 0
+            ? 'pairing port found: $port — tap Pair'
+            : 'pairing port not found — type it from the pairing dialog';
+      });
+      if (port != null && port > 0) {
+        _pairPortController.text = port.toString();
+      }
+    } finally {
+      if (mounted) setState(() => _discoveringPort = false);
+    }
+  }
+
+  Future<void> _pair() async {
+    final code = _pairCodeController.text.trim();
+    final portText = _pairPortController.text.trim();
+    final port = portText.isNotEmpty ? int.tryParse(portText) ?? -1 : (-1);
+    if (code.length < 6 || port <= 0) {
+      setState(() {
+        _status = code.length < 6
+            ? 'enter the 6-digit pairing code'
+            : 'pairing port unknown — tap "find pairing port"';
+      });
+      return;
+    }
+    setState(() => _pairing = true);
+    try {
+      final ok = await _channel.invokeMethod<bool>(
+        'pair',
+        {'host': '127.0.0.1', 'port': port, 'code': code},
+      );
+      setState(() {
+        _paired = ok == true;
+        _status = ok == true ? 'paired ✓' : 'pairing failed — check the code';
+      });
+      await _refresh();
+    } on PlatformException catch (e) {
+      setState(() => _status = 'pairing failed: ${e.message}');
+    } finally {
+      if (mounted) setState(() => _pairing = false);
+    }
+  }
+
+  Future<void> _connectAdb() async {
+    setState(() => _status = 'connecting to this phone (ADB)');
+    try {
+      final ok = await _channel.invokeMethod<bool>('connectAdb');
+      setState(() {
+        _connected = ok == true;
+        _status = ok == true ? 'connected ✓' : 'connect failed — retry';
+      });
+      if (_connected) await _loadApps();
+    } on PlatformException catch (e) {
+      setState(() => _status = 'connect failed: ${e.message}');
+    }
+  }
+
+  Future<void> _loadApps() async {
+    final apps = await _channel.invokeListMethod<Map<Object?, Object?>>(
+        'listApps');
+    setState(() {
+      _apps = apps
+          ?.map((e) => e.map((k, v) => MapEntry(k.toString(), v.toString())))
+          .toList() ??
+          const [];
+      _status = _apps.isEmpty
+          ? 'no third-party apps found'
+          : 'pick the app to tunnel';
+    });
   }
 
   Future<void> _connect(String pkg, String label) async {
@@ -153,19 +213,20 @@ class _ConnectorHomeState extends State<ConnectorHome> {
         _status = 'tunneling $label — the developer can hot reload with '
             'code $code';
       });
-    } catch (e) {
+    } on PlatformException catch (e) {
       setState(() {
         _connecting = false;
-        _status = 'failed: $e';
+        _status = 'failed: ${e.message}';
       });
     }
   }
 
   @override
   void dispose() {
-    _poll?.cancel();
     _relayController.dispose();
     _codeController.dispose();
+    _pairCodeController.dispose();
+    _pairPortController.dispose();
     super.dispose();
   }
 
@@ -174,12 +235,19 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     if (_loadingPrefs) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    final shizuku = _shizuku ?? const {};
     return Scaffold(
       appBar: AppBar(title: const Text('rhr connector')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(_status,
+                  style: Theme.of(context).textTheme.bodyMedium),
+            ),
+          ),
+          const SizedBox(height: 12),
           TextField(
             controller: _relayController,
             decoration: const InputDecoration(
@@ -194,61 +262,99 @@ class _ConnectorHomeState extends State<ConnectorHome> {
               helperText: 'the developer attaches with this code'),
           ),
           const SizedBox(height: 20),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(_status,
-                  style: Theme.of(context).textTheme.bodyMedium),
-            ),
-          ),
-          const SizedBox(height: 12),
-          ..._shizukuWizard(shizuku),
-          if (_shizuku?['permission'] == true) ..._appPicker(),
+          if (!_paired) ..._pairWizard(),
+          if (_paired && !_connected) ..._connectCard(),
+          if (_connected && !_connecting) ..._appPicker(),
           const SizedBox(height: 16),
         ],
       ),
     );
   }
 
-  List<Widget> _shizukuWizard(Map<String, bool> state) {
-    final cards = <Widget>[];
-    if (state['managerInstalled'] != true) {
-      cards.add(_wizardCard(
-        icon: Icons.download,
-        title: '1. Install Shizuku',
-        body: 'One-time. Bundled in this app — the system shows an install '
-            'sheet you confirm.',
-        action: 'Install Shizuku',
-        onAction: () {
-          _channel.invokeMethod('installShizuku');
-          _pollShizuku();
-        },
-      ));
-    } else if (state['serverRunning'] != true) {
-      cards.add(_wizardCard(
-        icon: Icons.play_circle,
-        title: '2. Start Shizuku',
-        body: 'Open Shizuku and tap Start. If it asks to pair, follow its '
-            'wizard (Wireless debugging → pairing code) — one time only.',
-        action: 'Open Shizuku',
-        onAction: () {
-          _channel.invokeMethod('openShizuku');
-          _pollShizuku();
-        },
-      ));
-    } else if (state['permission'] != true) {
-      cards.add(_wizardCard(
-        icon: Icons.verified_user,
-        title: '3. Allow the connector',
-        body: 'One permission dialog so the connector can read debug logs.',
-        action: 'Grant permission',
-        onAction: () {
-          _channel.invokeMethod('requestPermission');
-          _pollShizuku();
-        },
-      ));
-    }
-    return cards;
+  List<Widget> _pairWizard() {
+    return [
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('1. Pair with this phone',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              const Text(
+                  '1. Tap "Open Wireless Debugging" below\n'
+                  '2. Tap "Pair device with pairing code"\n'
+                  '3. A dialog shows a 6-digit code — STAY on that screen\n'
+                  '4. Use the RECENTS button (not back) to switch back here\n'
+                  '5. Type the code below and tap Pair'),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () => _channel.invokeMethod('openWirelessDebugging'),
+                icon: const Icon(Icons.settings),
+                label: const Text('Open Wireless Debugging'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _discoveringPort ? null : _discoverPairingPort,
+                icon: const Icon(Icons.search),
+                label: Text(_discoveringPort
+                    ? 'Finding pairing port…'
+                    : 'Find pairing port'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _pairCodeController,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                decoration: const InputDecoration(
+                  labelText: '6-digit pairing code'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _pairPortController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Pairing port',
+                  hintText: 'from the pairing dialog (e.g. 39525)',
+                  helperText: 'shown below the code in the pairing dialog'),
+              ),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: _pairing ? null : _pair,
+                icon: const Icon(Icons.key),
+                label: Text(_pairing ? 'Pairing…' : 'Pair'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _connectCard() {
+    return [
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('2. Connect',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              const Text('Open an ADB connection to this phone.'),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _connectAdb,
+                icon: const Icon(Icons.link),
+                label: const Text('Connect'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
   }
 
   List<Widget> _appPicker() {
@@ -263,7 +369,7 @@ class _ConnectorHomeState extends State<ConnectorHome> {
       ];
     }
     return [
-      Text('Pick the Flutter app to tunnel',
+      Text('3. Pick the Flutter app to tunnel',
           style: Theme.of(context).textTheme.titleMedium),
       const SizedBox(height: 8),
       for (final app in _apps)
@@ -278,38 +384,5 @@ class _ConnectorHomeState extends State<ConnectorHome> {
           ),
         ),
     ];
-  }
-
-  Widget _wizardCard({
-    required IconData icon,
-    required String title,
-    required String body,
-    required String action,
-    required VoidCallback onAction,
-  }) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Icon(icon),
-              const SizedBox(width: 8),
-              Expanded(child: Text(title,
-                  style: Theme.of(context).textTheme.titleMedium)),
-            ]),
-            const SizedBox(height: 8),
-            Text(body),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: onAction,
-              icon: const Icon(Icons.arrow_forward),
-              label: Text(action),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

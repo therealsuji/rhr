@@ -19,7 +19,7 @@ android {
         applicationId = "dev.rhr.rhr_connector"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 30
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -69,9 +69,10 @@ repositories {
 }
 
 dependencies {
-    // Shizuku: shell powers via the phone's own wireless-debugging pairing.
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    // Embedded ADB client + pairing (vendored from Shizuku, Apache-2.0):
+    // pairs with this phone's own Wireless Debugging and streams shell
+    // commands — no Shizuku manager app needed.
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     // The player's native tunnel layer as a library: RhrSessionService
     // dials the relay, tunnels the target app's VM door, survives
     // backgrounding (foreground service).

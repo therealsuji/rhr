@@ -1,19 +1,24 @@
 package dev.rhr.rhr_connector
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import android.util.Log
 import dev.rhr.rhr_player.RhrSessionService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import rikka.shizuku.Shizuku
+import moe.shizuku.manager.adb.AdbClient
+import moe.shizuku.manager.adb.AdbMdns
 
 class MainActivity : FlutterActivity() {
 	private val main = Handler(Looper.getMainLooper())
 	private lateinit var channel: MethodChannel
+	private var adbClient: AdbClient? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
@@ -21,25 +26,44 @@ class MainActivity : FlutterActivity() {
 			flutterEngine.dartExecutor.binaryMessenger, "rhr/connector")
 		channel.setMethodCallHandler { call, result ->
 			when (call.method) {
-				"setupState" -> result.success(shizukuState())
-				"installShizuku" -> {
-					ShizukuGate.installFromAssets(this)
+				"setupState" -> result.success(setupState())
+				"openWirelessDebugging" -> {
+					// Deep-link to the exact screen: Developer options →
+					// Wireless debugging (where pairing + the port live).
+					startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 					result.success(null)
 				}
-				"openShizuku" -> {
-					ShizukuGate.openManager(this)
-					result.success(null)
+				"discoverPairingPort" -> {
+					AdbConnection.discoverPairingPort(this, 8000) { port ->
+						main.post { result.success(port) }
+					}
 				}
-				"requestPermission" -> {
-					ShizukuGate.requestPermission(this)
-					result.success(null)
+				"pair" -> {
+					val host = call.argument<String>("host") ?: "127.0.0.1"
+					val port = call.argument<Int>("port") ?: -1
+					val code = call.argument<String>("code") ?: ""
+					Thread {
+						val ok = try {
+							AdbConnection.pair(this, host, port, code)
+						} catch (e: Exception) {
+							Log.w(AdbConnection.TAG, "pairing failed: $e")
+							false
+						}
+						main.post { result.success(ok) }
+					}.start()
+				}
+				"connectAdb" -> {
+					Thread {
+						val ok = try {
+							AdbConnection.ensureConnected(this)
+						} catch (e: Exception) {
+							Log.w(AdbConnection.TAG, "adb connect failed: $e")
+							false
+						}
+						main.post { result.success(ok) }
+					}.start()
 				}
 				"listApps" -> result.success(listConnectableApps())
-				"launchApp" -> {
-					val pkg = call.argument<String>("package")
-					val ok = pkg != null && ShellVm.launch(pkg, applicationContext)
-					result.success(ok)
-				}
 				"connectTarget" -> {
 					val pkg = call.argument<String>("package")
 					val relay = call.argument<String>("relay")
@@ -47,35 +71,38 @@ class MainActivity : FlutterActivity() {
 					if (pkg == null || relay == null || code == null) {
 						result.error("args", "missing package/relay/code", null)
 					} else {
-						// Foreground priority FIRST: launching the target
-						// pushes the connector to the background, and Samsung
-						// kills backgrounded processes mid-discovery.
+						// Foreground priority first: launching the target
+						// pushes the connector to the background, and OEMs
+						// kill backgrounded processes mid-discovery.
 						startForegroundService(
 							android.content.Intent(this, TunnelKeeperService::class.java))
-						// Discovery can take up to ~30 s (cold start + log
-						// tail): run it off-main, deliver on main. The tunnel
-						// itself then runs in the NATIVE RhrSessionService
-						// (bridge-android) — it survives the connector being
-						// backgrounded, exactly like the player's.
 						Thread {
-							val uri = ShellVm.discoverVmUriBlocking(
-								pkg, applicationContext, 30_000
-							) { msg -> main.post { channel.invokeMethod("progress", msg) } }
+							val vmUri = runCatching {
+								ShellVm.discoverVmUriBlocking(
+									pkg, applicationContext, 30_000
+								) { msg -> main.post { channel.invokeMethod("progress", msg) } }
+							}.getOrElse {
+								main.post {
+									result.error("no_vm", "discovery failed: $it", null)
+								}
+								return@Thread
+							}
 							main.post {
-								if (uri == null) {
+								if (vmUri == null) {
 									result.error(
 										"no_vm",
 										"no VM service line found for $pkg — is it a debug build?",
 										null)
-									return@post
+								} else {
+									startForegroundService(
+										android.content.Intent(this, RhrSessionService::class.java)
+											.putExtra("cmd", "start")
+											.putExtra("relayUrl", relay)
+											.putExtra("code", code)
+											.putExtra("vmUri", vmUri)
+											.putExtra("watchVm", false))
+									result.success(vmUri)
 								}
-								startForegroundService(
-									android.content.Intent(this, RhrSessionService::class.java)
-										.putExtra("cmd", "start")
-										.putExtra("relayUrl", relay)
-										.putExtra("code", code)
-										.putExtra("vmUri", uri))
-								result.success(uri)
 							}
 						}.start()
 					}
@@ -83,16 +110,11 @@ class MainActivity : FlutterActivity() {
 				else -> result.notImplemented()
 			}
 		}
-		// Keep the permission result fresh for Dart's setupState polling.
-		Shizuku.addRequestPermissionResultListener { _, _ ->
-			main.post { channel.invokeMethod("setupChanged", null) }
-		}
 	}
 
-	private fun shizukuState(): Map<String, Boolean> = mapOf(
-		"managerInstalled" to ShizukuGate.isManagerInstalled(this),
-		"serverRunning" to ShizukuGate.isServerRunning(),
-		"permission" to ShizukuGate.hasPermission(),
+	private fun setupState(): Map<String, Boolean> = mapOf(
+		"paired" to AdbConnection.paired(this),
+		"connected" to AdbConnection.connected(this),
 	)
 
 	/** Third-party launcher apps, minus our own family — the target picker. */
@@ -117,5 +139,4 @@ class MainActivity : FlutterActivity() {
 			}
 			.sortedBy { it["label"]?.lowercase() ?: "" }
 	}
-
 }

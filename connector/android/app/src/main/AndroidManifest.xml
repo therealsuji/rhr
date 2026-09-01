@@ -46,15 +46,6 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- Shizuku client plumbing: required by the Shizuku API to receive
-             the server binder. -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <meta-data
             android:name="flutterEmbedding"
