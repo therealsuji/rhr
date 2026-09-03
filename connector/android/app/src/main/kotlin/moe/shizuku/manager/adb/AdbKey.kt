@@ -250,7 +250,11 @@ class AdbKey(private val adbKeyStore: AdbKeyStore, name: String) {
 
     @delegate:RequiresApi(Build.VERSION_CODES.R)
     val sslContext: SSLContext by lazy {
-        val sslContext = SSLContext.getInstance("TLSv1.3")
+        // The bundled open-source Conscrypt, NOT the platform provider:
+        // Android 16's platform Conscrypt dropped exportKeyingMaterial,
+        // which the pairing protocol needs to derive the SPAKE2 password.
+        val sslContext = SSLContext.getInstance("TLSv1.3",
+                org.conscrypt.Conscrypt.newProvider())
         sslContext.init(arrayOf(keyManager), arrayOf(trustManager), SecureRandom())
         sslContext
     }

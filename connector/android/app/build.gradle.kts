@@ -73,6 +73,11 @@ dependencies {
     // pairs with this phone's own Wireless Debugging and streams shell
     // commands — no Shizuku manager app needed.
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    // The pairing handshake derives the SPAKE2 password from the TLS
+    // keying-material export. Android 16's PLATFORM Conscrypt removed
+    // that API entirely (NoSuchMethodError mid-pairing), so bundle the
+    // open-source Conscrypt and build the pairing TLS context from it.
+    implementation("org.conscrypt:conscrypt-android:2.5.2")
     // The player's native tunnel layer as a library: RhrSessionService
     // dials the relay, tunnels the target app's VM door, survives
     // backgrounding (foreground service).
