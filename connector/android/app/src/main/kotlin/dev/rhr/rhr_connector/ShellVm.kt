@@ -11,9 +11,12 @@ import dev.rhr.rhr_connector.AdbConnection
  * "Dart VM Service is listening on http://127.0.0.1:<port>/<auth>/" to its
  * own log — shell can read it for ANY app.
  *
- * Two stages: the existing log buffer first, then force-stop + relaunch
- * the target (a fresh engine always prints the line) when the buffer has
- * rotated past it.
+ * Launch discipline (the old loop killed the target every ~2s):
+ *   - `logcat -G` clears the buffer, so a RUNNING app's startup line is
+ *     usually unrecoverable → restart it ONCE for a fresh line.
+ *   - After that, never force-stop on a timing hunch: the engine prints
+ *     the door line when it's ready — poll the buffer for it until the
+ *     deadline, relaunching only if the process actually died.
  */
 object ShellVm {
 	private const val TAG = "rhr_connector"
@@ -36,51 +39,85 @@ object ShellVm {
 		onProgress: (String) -> Unit = {},
 	): String? {
 		try {
-			// The stock ring buffer rotates the VM line within seconds on
-			// busy phones — enlarge it before reading.
 			onProgress("enlarging the log buffer")
+			// NOTE: changing the buffer size CLEARS it — any VM line the
+			// running app already printed is gone after this.
 			shell(ctx, "logcat -G 16M")
 
-			var pid: Int? = null
+			fun pidOf(): Int? = shell(ctx, "pidof $pkg")
+				.split(Regex("\\s+"))
+				.firstOrNull { it.isNotBlank() }?.toIntOrNull()
+
+			fun vmLine(pid: Int): String? =
+				vmLineRegex.find(shell(ctx, "logcat -d -v brief --pid=$pid"))
+					?.groupValues?.get(1)
+
+			fun waitPid(pkg: String, ctx: Context, onProgress: (String) -> Unit): Int? {
+				val launchDeadline = System.currentTimeMillis() + 15_000
+				while (System.currentTimeMillis() < launchDeadline) {
+					pidOf()?.let { return it }
+					Thread.sleep(1000)
+				}
+				return null
+			}
+
 			val deadline = System.currentTimeMillis() + timeoutMs
-			while (System.currentTimeMillis() < deadline) {
-				if (pid == null) {
-					val pidText = shell(ctx, "pidof $pkg")
-					pid = pidText.split(Regex("\\s+"))
-						.firstOrNull { it.isNotBlank() }?.toIntOrNull()
-					if (pid == null) {
-						onProgress("target not running — launching $pkg")
-						launch(pkg, ctx)
-						val launchDeadline = System.currentTimeMillis() + 15_000
-						while (pid == null && System.currentTimeMillis() < launchDeadline) {
-							Thread.sleep(1000)
-							val t = shell(ctx, "pidof $pkg")
-							pid = t.split(Regex("\\s+"))
-								.firstOrNull { it.isNotBlank() }?.toIntOrNull()
-						}
-						if (pid == null) {
-							onProgress("target never started")
-							return null
-						}
-					}
-					onProgress("target pid $pid — reading its log")
-				}
+			var pid = pidOf()
 
-				val dump = shell(ctx, "logcat -d -v brief --pid=$pid")
-				vmLineRegex.find(dump)?.let {
+			if (pid != null) {
+				// Already running — one look in case the line survived the
+				// buffer wipe; otherwise restart ONCE for a fresh print.
+				vmLine(pid)?.let {
 					onProgress("VM door found")
-					return it.groupValues[1]
+					return it
+				}
+				onProgress("target already running — restarting it for a fresh VM door")
+				shell(ctx, "am force-stop $pkg")
+				Thread.sleep(800)
+				pid = null
+			}
+
+			if (pid == null) {
+				onProgress("launching $pkg")
+				if (!launch(pkg, ctx)) {
+					onProgress("cannot launch $pkg — no launcher entry")
+					return null
+				}
+				pid = waitPid(pkg, ctx, onProgress)
+				if (pid == null) {
+					onProgress("target never started")
+					return null
+				}
+			}
+
+			onProgress("target pid $pid — waiting for its VM door")
+			while (System.currentTimeMillis() < deadline) {
+				// The process may die on its own (crash, OEM killer) —
+				// relaunch it; do NOT force-stop a healthy app for being
+				// slow to boot.
+				val current = pidOf()
+				if (current == null) {
+					onProgress("target died — relaunching")
+					if (!launch(pkg, ctx)) {
+						onProgress("cannot relaunch $pkg")
+						return null
+					}
+					pid = waitPid(pkg, ctx, onProgress)
+					if (pid == null) {
+						onProgress("target never restarted")
+						return null
+					}
+					onProgress("target pid $pid — waiting for its VM door")
+				} else if (current != pid) {
+					pid = current
+					onProgress("target pid $pid — waiting for its VM door")
 				}
 
-				// The buffer rotated past the engine's startup line (the
-				// target has been running for a while): restart it — a
-				// fresh engine prints the door line immediately, and the
-				// dev's kernel push replaces its Dart code right after.
-				onProgress("no VM line in the buffer — restarting the target app")
-				shell(ctx, "am force-stop $pkg")
-				Thread.sleep(1000)
-				launch(pkg, ctx)
-				pid = null
+				vmLine(pid)?.let {
+					onProgress("VM door found")
+					return it
+				}
+				Thread.sleep(800)
 			}
 			onProgress("no VM service line within the timeout — is $pkg a debug build?")
 			return null
