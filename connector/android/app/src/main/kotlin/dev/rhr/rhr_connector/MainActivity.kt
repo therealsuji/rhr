@@ -12,13 +12,10 @@ import dev.rhr.rhr_player.RhrSessionService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import moe.shizuku.manager.adb.AdbClient
-import moe.shizuku.manager.adb.AdbMdns
 
 class MainActivity : FlutterActivity() {
 	private val main = Handler(Looper.getMainLooper())
 	private lateinit var channel: MethodChannel
-	private var adbClient: AdbClient? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
@@ -26,31 +23,19 @@ class MainActivity : FlutterActivity() {
 			flutterEngine.dartExecutor.binaryMessenger, "rhr/connector")
 		channel.setMethodCallHandler { call, result ->
 			when (call.method) {
-				"setupState" -> result.success(setupState())
+				"setupState" -> {
+					// `connected` pings the live ADB connection — keep the
+					// socket I/O off the platform main thread.
+					Thread {
+						val state = setupState()
+						main.post { result.success(state) }
+					}.start()
+				}
 				"openWirelessDebugging" -> {
 					// Deep-link to the exact screen: Developer options →
 					// Wireless debugging (where pairing + the port live).
 					startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 					result.success(null)
-				}
-				"discoverPairingPort" -> {
-					AdbConnection.discoverPairingPort(this, 8000) { port ->
-						main.post { result.success(port) }
-					}
-				}
-				"pair" -> {
-					val host = call.argument<String>("host") ?: "127.0.0.1"
-					val port = call.argument<Int>("port") ?: -1
-					val code = call.argument<String>("code") ?: ""
-					Thread {
-						val ok = try {
-							AdbConnection.pair(this, host, port, code)
-						} catch (e: Exception) {
-							Log.w(AdbConnection.TAG, "pairing failed: $e")
-							false
-						}
-						main.post { result.success(ok) }
-					}.start()
 				}
 				"connectAdb" -> {
 					Thread {
@@ -74,8 +59,14 @@ class MainActivity : FlutterActivity() {
 						// Foreground priority first: launching the target
 						// pushes the connector to the background, and OEMs
 						// kill backgrounded processes mid-discovery.
-						startForegroundService(
-							android.content.Intent(this, TunnelKeeperService::class.java))
+						try {
+							startForegroundService(
+								android.content.Intent(this, TunnelKeeperService::class.java)
+									.putExtra("code", code)
+									.putExtra("label", pkg))
+						} catch (e: Exception) {
+							Log.w(AdbConnection.TAG, "FGS deferred: $e")
+						}
 						Thread {
 							val vmUri = runCatching {
 								ShellVm.discoverVmUriBlocking(
@@ -94,18 +85,37 @@ class MainActivity : FlutterActivity() {
 										"no VM service line found for $pkg — is it a debug build?",
 										null)
 								} else {
-									startForegroundService(
-										android.content.Intent(this, RhrSessionService::class.java)
-											.putExtra("cmd", "start")
-											.putExtra("relayUrl", relay)
-											.putExtra("code", code)
-											.putExtra("vmUri", vmUri)
-											.putExtra("watchVm", false))
+									try {
+										startForegroundService(
+											android.content.Intent(this, RhrSessionService::class.java)
+												.putExtra("cmd", "start")
+												.putExtra("relayUrl", relay)
+												.putExtra("code", code)
+												.putExtra("vmUri", vmUri)
+												.putExtra("watchVm", false))
+									} catch (e: Exception) {
+										Log.w(AdbConnection.TAG, "FGS deferred: $e")
+									}
 									result.success(vmUri)
 								}
 							}
 						}.start()
 					}
+				}
+				"startPairing" -> {
+					// ONE-TIME pairing: the notification service runs the
+					// flow; the result arrives later as 'pairingDone'.
+					PairingNotificationService.onResult = { ok ->
+						main.post { channel.invokeMethod("pairingDone", ok) }
+					}
+					try {
+						startForegroundService(
+							android.content.Intent(this, PairingNotificationService::class.java))
+					} catch (e: Exception) {
+						PairingNotificationService.onResult = null
+						Log.w(AdbConnection.TAG, "pairing service start deferred: $e")
+					}
+					result.success(null)
 				}
 				else -> result.notImplemented()
 			}

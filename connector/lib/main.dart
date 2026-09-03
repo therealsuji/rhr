@@ -4,9 +4,13 @@
 //
 // Discovery: an embedded wireless-debugging ADB client (vendored from
 // Shizuku, Apache-2.0 — see android/.../moe/shizuku/manager/adb/). Paired
-// once with the phone's own adbd (loopback, any network), the connector
+// ONCE with the phone's own adbd (loopback, any network), the connector
 // reads the target's log as shell for the engine's VM door line, and the
 // native RhrSessionService (bridge-android) tunnels it through the relay.
+//
+// Pairing is a ONE-TIME setup step: the ADB key trust it creates is
+// permanent (reboots, network changes, wireless-debugging toggles). Every
+// launch after it reconnects silently — the wizard never asks again.
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -41,33 +45,51 @@ class ConnectorHome extends StatefulWidget {
   State<ConnectorHome> createState() => _ConnectorHomeState();
 }
 
-class _ConnectorHomeState extends State<ConnectorHome> {
+class _ConnectorHomeState extends State<ConnectorHome>
+    with WidgetsBindingObserver {
   final _relayController = TextEditingController();
   final _codeController = TextEditingController();
-  final _pairCodeController = TextEditingController();
-  final _pairPortController = TextEditingController();
   bool _loadingPrefs = true;
   bool _paired = false;
   bool _connected = false;
-  bool _discoveringPort = false;
-  bool _pairing = false;
-  bool _connecting = false;
+  bool _pairing = false; // one-time pairing wizard in flight
+  bool _adbConnecting = false; // silent ADB (re)connect in flight
+  bool _connecting = false; // tunnel start in flight
   String _status = 'idle';
   List<Map<String, String>> _apps = const [];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'progress') {
         setState(() => _status = call.arguments as String? ?? _status);
+      } else if (call.method == 'pairingDone') {
+        await _onPairingDone(call.arguments == true);
       }
     });
     _loadPrefs();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from the settings screen (or anywhere) re-reads the
+    // native state — the pairing may have completed while backgrounded.
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _relayController.dispose();
+    _codeController.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _relayController.text = prefs.getString('relay') ?? _defaultRelay;
       _codeController.text = prefs.getString('code') ?? '';
@@ -76,6 +98,11 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     await _refresh();
   }
 
+  /// Reads the native state and drives the flow:
+  ///   paired + connected → app picker;
+  ///   paired, not connected → silent reconnect (the normal path on
+  ///     every launch after the one-time pairing);
+  ///   unpaired → the one-time pairing card.
   Future<void> _refresh() async {
     try {
       final state =
@@ -85,25 +112,26 @@ class _ConnectorHomeState extends State<ConnectorHome> {
         _paired = state?['paired'] == true;
         _connected = state?['connected'] == true;
       });
-      if (_connected && _apps.isEmpty && !_connecting) await _loadApps();
+      if (_paired && !_connected && !_adbConnecting && !_connecting) {
+        await _connectAdb();
+      } else if (_connected && _apps.isEmpty && !_connecting) {
+        await _loadApps();
+      }
     } on PlatformException {
       // The wizard stays; the user can retry.
     }
   }
 
-  /// Polls setupState while the user completes a Shizuku-free setup step.
-  void _poll() {
-    var ticks = 0;
-    Timer.periodic(const Duration(milliseconds: 1200), (timer) {
-      ticks++;
-      if (ticks > 40 || !mounted) {
-        timer.cancel();
-        return;
-      }
-      _refresh().then((_) {
-        if (_paired && _connected && timer.isActive) timer.cancel();
-      });
+  Future<void> _onPairingDone(bool ok) async {
+    if (!mounted) return;
+    setState(() {
+      _pairing = false;
+      _paired = _paired || ok;
+      _status = ok
+          ? 'paired ✓ — one-time setup complete'
+          : "pairing didn't complete — pull down the notification and try again";
     });
+    if (ok) await _connectAdb();
   }
 
   Future<void> _persist() async {
@@ -112,79 +140,52 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     await prefs.setString('code', _codeController.text.trim());
   }
 
-  Future<void> _discoverPairingPort() async {
-    setState(() => _discoveringPort = true);
-    try {
-      final port = await _channel.invokeMethod<int>('discoverPairingPort');
-      setState(() {
-        _status = port != null && port > 0
-            ? 'pairing port found: $port — tap Pair'
-            : 'pairing port not found — type it from the pairing dialog';
-      });
-      if (port != null && port > 0) {
-        _pairPortController.text = port.toString();
-      }
-    } finally {
-      if (mounted) setState(() => _discoveringPort = false);
-    }
-  }
-
-  Future<void> _pair() async {
-    final code = _pairCodeController.text.trim();
-    final portText = _pairPortController.text.trim();
-    final port = portText.isNotEmpty ? int.tryParse(portText) ?? -1 : (-1);
-    if (code.length < 6 || port <= 0) {
-      setState(() {
-        _status = code.length < 6
-            ? 'enter the 6-digit pairing code'
-            : 'pairing port unknown — tap "find pairing port"';
-      });
-      return;
-    }
-    setState(() => _pairing = true);
-    try {
-      final ok = await _channel.invokeMethod<bool>(
-        'pair',
-        {'host': '127.0.0.1', 'port': port, 'code': code},
-      );
-      setState(() {
-        _paired = ok == true;
-        _status = ok == true ? 'paired ✓' : 'pairing failed — check the code';
-      });
-      await _refresh();
-    } on PlatformException catch (e) {
-      setState(() => _status = 'pairing failed: ${e.message}');
-    } finally {
-      if (mounted) setState(() => _pairing = false);
-    }
-  }
-
+  /// Connects to this phone's own adbd. NO pairing involved — this
+  /// reuses the key trust from the one-time pairing, silently.
   Future<void> _connectAdb() async {
-    setState(() => _status = 'connecting to this phone (ADB)');
+    if (_adbConnecting) return;
+    setState(() {
+      _adbConnecting = true;
+      _status = 'connecting to this phone…';
+    });
     try {
       final ok = await _channel.invokeMethod<bool>('connectAdb');
+      if (!mounted) return;
       setState(() {
+        _adbConnecting = false;
         _connected = ok == true;
-        _status = ok == true ? 'connected ✓' : 'connect failed — retry';
+        _status = ok == true
+            ? 'connected ✓'
+            : 'connection failed — is Wireless debugging switched on?';
       });
       if (_connected) await _loadApps();
     } on PlatformException catch (e) {
-      setState(() => _status = 'connect failed: ${e.message}');
+      if (!mounted) return;
+      setState(() {
+        _adbConnecting = false;
+        _status = 'connect failed: ${e.message}';
+      });
     }
   }
 
   Future<void> _loadApps() async {
-    final apps = await _channel.invokeListMethod<Map<Object?, Object?>>(
-        'listApps');
-    setState(() {
-      _apps = apps
-          ?.map((e) => e.map((k, v) => MapEntry(k.toString(), v.toString())))
-          .toList() ??
-          const [];
-      _status = _apps.isEmpty
-          ? 'no third-party apps found'
-          : 'pick the app to tunnel';
-    });
+    try {
+      final apps = await _channel.invokeListMethod<Map<Object?, Object?>>(
+          'listApps');
+      if (!mounted) return;
+      setState(() {
+        _apps = apps
+            ?.map((e) => e.map((k, v) => MapEntry(k.toString(), v.toString())))
+            .toList() ??
+            const [];
+        _status = _apps.isEmpty
+            ? 'no third-party apps found'
+            : 'pick the app to tunnel';
+      });
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() => _status = 'listing apps failed: ${e.message}');
+    }
   }
 
   Future<void> _connect(String pkg, String label) async {
@@ -222,15 +223,6 @@ class _ConnectorHomeState extends State<ConnectorHome> {
   }
 
   @override
-  void dispose() {
-    _relayController.dispose();
-    _codeController.dispose();
-    _pairCodeController.dispose();
-    _pairPortController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     if (_loadingPrefs) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
@@ -251,18 +243,18 @@ class _ConnectorHomeState extends State<ConnectorHome> {
           TextField(
             controller: _relayController,
             decoration: const InputDecoration(
-              labelText: 'Relay URL', hintText: _defaultRelay),
+                labelText: 'Relay URL', hintText: _defaultRelay),
           ),
           const SizedBox(height: 12),
           TextField(
             controller: _codeController,
             decoration: const InputDecoration(
-              labelText: 'Session code',
-              hintText: 'rhr-xxxx-xxxx-xxxx',
-              helperText: 'the developer attaches with this code'),
+                labelText: 'Session code',
+                hintText: 'rhr-xxxx-xxxx-xxxx',
+                helperText: 'the developer attaches with this code'),
           ),
           const SizedBox(height: 20),
-          if (!_paired) ..._pairWizard(),
+          if (!_paired) ..._pairCard(),
           if (_paired && !_connected) ..._connectCard(),
           if (_connected && !_connecting) ..._appPicker(),
           const SizedBox(height: 16),
@@ -271,7 +263,9 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     );
   }
 
-  List<Widget> _pairWizard() {
+  /// ONE-TIME. Shown only until the first successful pairing; the key
+  /// trust makes this card disappear forever.
+  List<Widget> _pairCard() {
     return [
       Card(
         child: Padding(
@@ -279,51 +273,22 @@ class _ConnectorHomeState extends State<ConnectorHome> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('1. Pair with this phone',
+              Text('1. Pair with this phone (one-time)',
                   style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
               const Text(
-                  '1. Tap "Open Wireless Debugging" below\n'
-                  '2. Tap "Pair device with pairing code"\n'
-                  '3. A dialog shows a 6-digit code — STAY on that screen\n'
-                  '4. Use the RECENTS button (not back) to switch back here\n'
-                  '5. Type the code below and tap Pair'),
+                  'Tap Pair — the connector opens Wireless debugging and '
+                  'posts a notification. Open "Pair device with pairing '
+                  'code", pull down the notification, and type the '
+                  '6-digit code there.\n\n'
+                  'This authorization is permanent: after this you are '
+                  'never asked again — not for new networks, not after '
+                  'reboots.'),
               const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () => _channel.invokeMethod('openWirelessDebugging'),
-                icon: const Icon(Icons.settings),
-                label: const Text('Open Wireless Debugging'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _discoveringPort ? null : _discoverPairingPort,
-                icon: const Icon(Icons.search),
-                label: Text(_discoveringPort
-                    ? 'Finding pairing port…'
-                    : 'Find pairing port'),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _pairCodeController,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                decoration: const InputDecoration(
-                  labelText: '6-digit pairing code'),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _pairPortController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Pairing port',
-                  hintText: 'from the pairing dialog (e.g. 39525)',
-                  helperText: 'shown below the code in the pairing dialog'),
-              ),
-              const SizedBox(height: 8),
               FilledButton.icon(
-                onPressed: _pairing ? null : _pair,
+                onPressed: _pairing ? null : _startPairing,
                 icon: const Icon(Icons.key),
-                label: Text(_pairing ? 'Pairing…' : 'Pair'),
+                label: Text(_pairing ? 'Pairing…' : 'Pair this phone'),
               ),
             ],
           ),
@@ -332,6 +297,25 @@ class _ConnectorHomeState extends State<ConnectorHome> {
     ];
   }
 
+  Future<void> _startPairing() async {
+    setState(() => _pairing = true);
+    try {
+      await _channel.invokeMethod('startPairing');
+      // Returns immediately — the result arrives later as a native
+      // 'pairingDone' call, once the code entry over the settings
+      // screen has completed (or failed).
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _pairing = false;
+        _status = 'pairing failed to start: ${e.message}';
+      });
+    }
+  }
+
+  /// Paired but not connected: the automatic reconnect failed — almost
+  /// always because Wireless debugging is switched off. Never asks for
+  /// pairing again; a reconnect is all that's needed.
   List<Widget> _connectCard() {
     return [
       Card(
@@ -340,15 +324,35 @@ class _ConnectorHomeState extends State<ConnectorHome> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('2. Connect',
+              Text('Connect to this phone',
                   style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
-              const Text('Open an ADB connection to this phone.'),
+              const Text(
+                  'Pairing is already done — this is automatic and needs '
+                  'no setup. It only fails when Wireless debugging is '
+                  'switched off.'),
               const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _connectAdb,
-                icon: const Icon(Icons.link),
-                label: const Text('Connect'),
+              if (_adbConnecting)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 12),
+                  child: LinearProgressIndicator(),
+                ),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _adbConnecting ? null : _connectAdb,
+                    icon: const Icon(Icons.link),
+                    label: const Text('Retry connection'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        _channel.invokeMethod('openWirelessDebugging'),
+                    icon: const Icon(Icons.settings),
+                    label: const Text('Open Wireless debugging'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -369,7 +373,7 @@ class _ConnectorHomeState extends State<ConnectorHome> {
       ];
     }
     return [
-      Text('3. Pick the Flutter app to tunnel',
+      Text('Pick the Flutter app to tunnel',
           style: Theme.of(context).textTheme.titleMedium),
       const SizedBox(height: 8),
       for (final app in _apps)
