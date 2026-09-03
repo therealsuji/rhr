@@ -255,7 +255,16 @@ class RhrSessionService : Service() {
 				watchOwnVm = intent.getBooleanExtra("watchVm", true)
 				val requestedDirect = intent.getBooleanExtra("preferDirect", false)
 				val sameLiveSession = reconnectThread?.isAlive == true &&
-					!stopped.get() && sessionCode == requestedCode
+					!stopped.get() && sessionCode == requestedCode &&
+					// Connector mode: the vmUri is FRESHLY discovered from
+					// the target app on every connectTarget call. If it
+					// moved, the target restarted and the preserved door is
+					// a corpse (verified: every later session then dialed
+					// the dead port, and reloads silently landed on the
+					// wrong app). The player's auto-resume is unchanged —
+					// its own engine reports a stale URI on Activity
+					// recreate, where the live service knows better.
+					(watchOwnVm || requestedVm == vmUri)
 				if (sameLiveSession) {
 					// Reopening the Activity creates a new FlutterEngine whose
 					// Service.getInfo() may report a stale VM URI. The native service
