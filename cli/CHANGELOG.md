@@ -6,7 +6,9 @@
   cross-minor, non-stable, and unknown-channel pairs keep the exact gate.
 - Players report their release channel so the gate can prove series identity.
 - Direct mode keeps tunnel payloads off the relay and fails instead of silently
-  falling back. Use `--no-direct` for explicit relay-only sessions.
+  falling back. `--no-direct` remains only for legacy/private payload relays.
+- Cloudflare and self-hosted relays reject binary payloads and oversized
+  control messages.
 
 ## 0.1.0-beta.3
 

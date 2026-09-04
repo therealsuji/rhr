@@ -1,9 +1,10 @@
 // rhr relay on Cloudflare Workers.
 //
 // One Durable Object per session code. The DO holds two WebSockets — the
-// device bridge (dials out from the phone) and the dev CLI — and pipes frames
-// between them verbatim. Uses the WebSocket Hibernation API so idle sessions
-// cost nothing.
+// device bridge (dials out from the phone) and the dev CLI — and forwards text
+// control messages between them. Uses the WebSocket Hibernation API so idle
+// sessions cost nothing. Binary tunnel payloads are rejected: they belong on
+// the direct WebRTC data channel.
 //
 // Routes:
 //   GET /s/<code>/device  — device bridge end
@@ -29,6 +30,8 @@ type Role = "device" | "dev";
 // a close event, e.g. eviction).
 const MIN_CODE_LENGTH = 16;
 const INFO_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_CONTROL_MESSAGE_BYTES = 64 * 1024;
+const textEncoder = new TextEncoder();
 
 // Per-connection diagnostics, keyed off the socket via a serialized tag so it
 // survives hibernation restarts. Lets us attribute a drop to a close code /
@@ -88,20 +91,30 @@ export class RelaySession implements DurableObject {
 
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
 		const role = this.roleOf(ws);
+		if (typeof message !== "string") {
+			console.warn(
+				`[rhr] ${role} rejected binary payload (${message.byteLength} bytes)`,
+			);
+			ws.close(4002, "binary payload disabled");
+			return;
+		}
+		const messageBytes = textEncoder.encode(message).byteLength;
+		if (messageBytes > MAX_CONTROL_MESSAGE_BYTES) {
+			console.warn(
+				`[rhr] ${role} rejected oversized control message (${messageBytes} bytes)`,
+			);
+			ws.close(4003, "control message too large");
+			return;
+		}
 		const meta = this.metaOf(ws);
 		if (meta) {
 			meta.msgs++;
-			meta.bytes +=
-				typeof message === "string" ? message.length : message.byteLength;
+			meta.bytes += messageBytes;
 		}
 		// Cache ONLY the device's info announcement for late-dev replay. Pings
 		// and other control text must NOT overwrite it (they used to, clobbering
 		// the cached VM URI with "{"t":"ping"}").
-		if (
-			role === "device" &&
-			typeof message === "string" &&
-			message.includes('"info"')
-		) {
+		if (role === "device" && message.includes('"info"')) {
 			await this.ctx.storage.put({
 				deviceInfo: message,
 				deviceInfoAt: Date.now(),

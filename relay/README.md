@@ -5,6 +5,10 @@ active sessions in memory and intentionally has no database. Restarting it
 drops active WebSockets; both rhr ends reconnect and can pair again with the
 same code.
 
+The relay forwards text signaling and control messages only. Binary tunnel
+payloads are rejected because VM-service and asset traffic belongs on the
+direct WebRTC data channel.
+
 Build and run it with Docker:
 
 ```bash

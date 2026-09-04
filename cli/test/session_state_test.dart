@@ -37,11 +37,14 @@ Future<Process> _spawn(
   List<String> args, {
   required String workDir,
   required List<String> lines,
+  Map<String, String>? environment,
 }) async {
-  final p = await Process.start(Platform.resolvedExecutable, [
-    'run',
-    ...args,
-  ], workingDirectory: workDir);
+  final p = await Process.start(
+    Platform.resolvedExecutable,
+    ['run', ...args],
+    workingDirectory: workDir,
+    environment: environment,
+  );
   void drain(Stream<List<int>> s) {
     s
         .transform(SystemEncoding().decoder)
@@ -81,6 +84,7 @@ void main() {
       ['bin/relay.dart', '$port'],
       workDir: '$_repo/relay',
       lines: relayLines,
+      environment: const {'RHR_ALLOW_BINARY_PAYLOADS': '1'},
     );
     await _waitFor(relayLines, RegExp('listening'), 'relay up');
   });
@@ -240,6 +244,7 @@ void main() {
         ['bin/relay.dart', '$port'],
         workDir: '$_repo/relay',
         lines: relayLines,
+        environment: const {'RHR_ALLOW_BINARY_PAYLOADS': '1'},
       );
       await _waitFor(relayLines, RegExp('listening'), 'relay back up');
 

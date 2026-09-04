@@ -74,6 +74,24 @@ void main() {
     await dev.sink.close().catchError((_) {});
   });
 
+  test('rejects binary payloads', () async {
+    const code = 'rhr-test-text-only';
+    final device = IOWebSocketChannel.connect(
+      'ws://127.0.0.1:${server.port}/s/$code/device',
+    );
+    final dev = IOWebSocketChannel.connect(
+      'ws://127.0.0.1:${server.port}/s/$code/dev',
+    );
+    await Future.wait([device.ready, dev.ready]);
+
+    device.sink.add([1, 2, 3]);
+
+    await device.stream.drain<void>().timeout(const Duration(seconds: 2));
+    expect(device.closeCode, 4002);
+    expect(device.closeReason, 'binary payload disabled');
+    await dev.sink.close().catchError((_) {});
+  });
+
   test('rejects short codes and browser websocket origins', () async {
     final client = HttpClient();
     addTearDown(client.close);

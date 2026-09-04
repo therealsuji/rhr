@@ -1,5 +1,6 @@
 // rhr relay: pairs a device bridge and a dev CLI by session code and pipes
-// WebSocket frames between them verbatim.
+// text control messages between them. Binary tunnel payloads are rejected:
+// they belong on the direct WebRTC data channel.
 //
 // Endpoints:
 //   GET /s/<code>/device   — device bridge dials out here
@@ -11,6 +12,7 @@
 // service URI) is cached and replayed to a dev that connects later, so
 // connection order doesn't matter.
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:shelf/shelf.dart';
@@ -20,12 +22,13 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 final sessions = <String, Session>{};
 const minSessionCodeLength = 16;
+const maxControlMessageBytes = 64 * 1024;
 
 class Session {
-  Session({this.onEmpty, this.rejectBinaryPayloads = false});
+  Session({this.onEmpty, this.allowBinaryPayloads = false});
 
   final void Function()? onEmpty;
-  final bool rejectBinaryPayloads;
+  final bool allowBinaryPayloads;
   WebSocketChannel? device;
   WebSocketChannel? dev;
   String? lastDeviceInfo;
@@ -35,9 +38,16 @@ class Session {
     device = ch;
     ch.stream.listen(
       (msg) {
-        if (rejectBinaryPayloads && msg is! String) {
+        if (!allowBinaryPayloads && msg is! String) {
           stderr.writeln('[relay] rejected binary payload from device');
           ch.sink.close(4002, 'binary payload disabled');
+          return;
+        }
+        if (msg is String && utf8.encode(msg).length > maxControlMessageBytes) {
+          stderr.writeln(
+            '[relay] rejected oversized control message from device',
+          );
+          ch.sink.close(4003, 'control message too large');
           return;
         }
         if (_isInfoMessage(msg)) lastDeviceInfo = msg;
@@ -55,9 +65,14 @@ class Session {
     dev = ch;
     ch.stream.listen(
       (msg) {
-        if (rejectBinaryPayloads && msg is! String) {
+        if (!allowBinaryPayloads && msg is! String) {
           stderr.writeln('[relay] rejected binary payload from dev');
           ch.sink.close(4002, 'binary payload disabled');
+          return;
+        }
+        if (msg is String && utf8.encode(msg).length > maxControlMessageBytes) {
+          stderr.writeln('[relay] rejected oversized control message from dev');
+          ch.sink.close(4003, 'control message too large');
           return;
         }
         device?.sink.add(msg);
@@ -102,12 +117,12 @@ bool _isInfoMessage(Object message) {
   return message.contains('"t":"info"') || message.contains('"t": "info"');
 }
 
-Session _sessionFor(String code, {bool rejectBinaryPayloads = false}) {
+Session _sessionFor(String code, {bool allowBinaryPayloads = false}) {
   final existing = sessions[code];
   if (existing != null) return existing;
   late final Session created;
   created = Session(
-    rejectBinaryPayloads: rejectBinaryPayloads,
+    allowBinaryPayloads: allowBinaryPayloads,
     onEmpty: () {
       if (identical(sessions[code], created)) sessions.remove(code);
     },
@@ -118,7 +133,7 @@ Session _sessionFor(String code, {bool rejectBinaryPayloads = false}) {
 
 Future<HttpServer> startRelay(
   int port, {
-  bool rejectBinaryPayloads = false,
+  bool allowBinaryPayloads = false,
 }) async {
   final handler = (Request req) {
     final seg = req.url.pathSegments;
@@ -138,7 +153,7 @@ Future<HttpServer> startRelay(
         return Response.forbidden('browser clients not allowed');
       }
       return webSocketHandler((WebSocketChannel ws, _) {
-        final s = _sessionFor(code, rejectBinaryPayloads: rejectBinaryPayloads);
+        final s = _sessionFor(code, allowBinaryPayloads: allowBinaryPayloads);
         stderr.writeln('[relay] $role connected');
         role == 'device' ? s.pipeDevice(ws) : s.pipeDev(ws);
       })(req);
@@ -155,8 +170,8 @@ Future<void> main(List<String> args) async {
   );
   final server = await startRelay(
     port,
-    rejectBinaryPayloads:
-        Platform.environment['RHR_REJECT_BINARY_PAYLOADS'] == '1',
+    allowBinaryPayloads:
+        Platform.environment['RHR_ALLOW_BINARY_PAYLOADS'] == '1',
   );
   stderr.writeln('[relay] listening on :${server.port}');
 }
