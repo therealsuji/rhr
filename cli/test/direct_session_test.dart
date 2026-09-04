@@ -31,11 +31,12 @@ Future<Process> _spawn(
   List<String> args, {
   required String workDir,
   required List<String> lines,
+  Map<String, String>? environment,
 }) async {
   final process = await Process.start(Platform.resolvedExecutable, [
     'run',
     ...args,
-  ], workingDirectory: workDir);
+  ], workingDirectory: workDir, environment: environment);
   void drain(Stream<List<int>> stream) {
     stream
         .transform(SystemEncoding().decoder)
@@ -63,7 +64,7 @@ Future<void> _waitFor(
 
 void main() {
   test(
-    'opt-in direct transport negotiates and carries a VM request',
+    'default direct transport uses a relay that rejects binary payloads',
     () async {
       final port = await _freePort();
       final code = 'direct-${DateTime.now().millisecondsSinceEpoch}';
@@ -74,13 +75,13 @@ void main() {
         ['bin/relay.dart', '$port'],
         workDir: '$_repo/relay',
         lines: relayLines,
+        environment: const {'RHR_REJECT_BINARY_PAYLOADS': '1'},
       );
       final cli = await _spawn(
         [
           'bin/rhr.dart',
           'attach',
           '--no-flutter',
-          '--direct',
           '--relay',
           'ws://127.0.0.1:$port',
           '--code',
@@ -136,6 +137,82 @@ void main() {
         final body = await utf8.decoder.bind(response).join();
         expect(response.statusCode, HttpStatus.ok);
         expect(body, contains('jsonrpc'));
+        expect(
+          relayLines.where((line) => line.contains('rejected binary payload')),
+          isEmpty,
+        );
+      } finally {
+        client.close(force: true);
+      }
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
+
+  test(
+    '--no-direct keeps the relay-only transport working',
+    () async {
+      final port = await _freePort();
+      final code = 'relay-${DateTime.now().millisecondsSinceEpoch}';
+      final relayLines = <String>[];
+      final cliLines = <String>[];
+      final deviceLines = <String>[];
+      final relay = await _spawn(
+        ['bin/relay.dart', '$port'],
+        workDir: '$_repo/relay',
+        lines: relayLines,
+      );
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--no-direct',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      final device = await _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+        ],
+        workDir: '$_repo/bridge',
+        lines: deviceLines,
+      );
+
+      Future<void> stop(Process process) async {
+        process.kill();
+        await process.exitCode.timeout(const Duration(seconds: 10));
+      }
+
+      addTearDown(() async {
+        await stop(device);
+        await stop(cli);
+        await stop(relay);
+      });
+
+      await _waitFor(
+        cliLines,
+        RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
+        'relay-only tunnel',
+      );
+      final tunnelLine = cliLines.firstWhere(
+        (line) => line.contains('tunneled VM service:'),
+      );
+      final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
+      final client = HttpClient();
+      try {
+        final response = await client
+            .getUrl(uri.resolve('getVMInfo'))
+            .then((request) => request.close())
+            .timeout(const Duration(seconds: 10));
+        expect(response.statusCode, HttpStatus.ok);
       } finally {
         client.close(force: true);
       }

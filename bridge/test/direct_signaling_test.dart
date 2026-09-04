@@ -34,6 +34,14 @@ void main() {
     expect(candidate.sdpMLineIndex, 0);
   });
 
+  test('transport errors round-trip with their message', () {
+    const signal = DirectErrorSignal('ICE failed');
+    final decoded = DirectSignal.decode(signal.encode());
+
+    expect(decoded, isA<DirectErrorSignal>());
+    expect((decoded as DirectErrorSignal).message, 'ICE failed');
+  });
+
   test('rejects unknown versions and malformed fields', () {
     expect(
       () => DirectSignal.decode({'v': 2, 't': 'direct_end'}),

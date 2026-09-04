@@ -22,9 +22,10 @@ final sessions = <String, Session>{};
 const minSessionCodeLength = 16;
 
 class Session {
-  Session({this.onEmpty});
+  Session({this.onEmpty, this.rejectBinaryPayloads = false});
 
   final void Function()? onEmpty;
+  final bool rejectBinaryPayloads;
   WebSocketChannel? device;
   WebSocketChannel? dev;
   String? lastDeviceInfo;
@@ -34,6 +35,11 @@ class Session {
     device = ch;
     ch.stream.listen(
       (msg) {
+        if (rejectBinaryPayloads && msg is! String) {
+          stderr.writeln('[relay] rejected binary payload from device');
+          ch.sink.close(4002, 'binary payload disabled');
+          return;
+        }
         if (_isInfoMessage(msg)) lastDeviceInfo = msg;
         dev?.sink.add(msg);
       },
@@ -49,6 +55,11 @@ class Session {
     dev = ch;
     ch.stream.listen(
       (msg) {
+        if (rejectBinaryPayloads && msg is! String) {
+          stderr.writeln('[relay] rejected binary payload from dev');
+          ch.sink.close(4002, 'binary payload disabled');
+          return;
+        }
         device?.sink.add(msg);
       },
       onDone: () => _devClosed(ch),
@@ -91,11 +102,12 @@ bool _isInfoMessage(Object message) {
   return message.contains('"t":"info"') || message.contains('"t": "info"');
 }
 
-Session _sessionFor(String code) {
+Session _sessionFor(String code, {bool rejectBinaryPayloads = false}) {
   final existing = sessions[code];
   if (existing != null) return existing;
   late final Session created;
   created = Session(
+    rejectBinaryPayloads: rejectBinaryPayloads,
     onEmpty: () {
       if (identical(sessions[code], created)) sessions.remove(code);
     },
@@ -104,7 +116,10 @@ Session _sessionFor(String code) {
   return created;
 }
 
-Future<HttpServer> startRelay(int port) async {
+Future<HttpServer> startRelay(
+  int port, {
+  bool rejectBinaryPayloads = false,
+}) async {
   final handler = (Request req) {
     final seg = req.url.pathSegments;
     if (seg.length == 1 && seg[0] == 'healthz') return Response.ok('ok');
@@ -123,7 +138,7 @@ Future<HttpServer> startRelay(int port) async {
         return Response.forbidden('browser clients not allowed');
       }
       return webSocketHandler((WebSocketChannel ws, _) {
-        final s = _sessionFor(code);
+        final s = _sessionFor(code, rejectBinaryPayloads: rejectBinaryPayloads);
         stderr.writeln('[relay] $role connected');
         role == 'device' ? s.pipeDevice(ws) : s.pipeDev(ws);
       })(req);
@@ -138,6 +153,10 @@ Future<void> main(List<String> args) async {
   final port = int.parse(
     args.isNotEmpty ? args[0] : Platform.environment['PORT'] ?? '8123',
   );
-  final server = await startRelay(port);
+  final server = await startRelay(
+    port,
+    rejectBinaryPayloads:
+        Platform.environment['RHR_REJECT_BINARY_PAYLOADS'] == '1',
+  );
   stderr.writeln('[relay] listening on :${server.port}');
 }

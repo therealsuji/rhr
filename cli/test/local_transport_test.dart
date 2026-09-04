@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/relay_race.dart';
@@ -69,7 +70,7 @@ void main() {
     final received = device.stream.firstWhere(
       (message) => message is List<int>,
     );
-    race.send([4, 5, 6]);
+    await race.sendPayload(Uint8List.fromList([4, 5, 6]));
     expect(await received, [4, 5, 6]);
   });
 

@@ -84,6 +84,7 @@ void main() {
       expect(script, contains("resValue 'string', 'rhr_session_code', 'rhr-abcd-efgh-jkmn'"));
       expect(script, contains("resValue 'string', 'rhr_relay_url', 'wss://relay.example'"));
       expect(script, contains("resValue 'string', 'rhr_host', 'app'"));
+      expect(script, contains("resValue 'string', 'rhr_prefer_direct', 'true'"));
       expect(script, contains("resValue 'string', 'rhr_framework_revision', '559ffa3f75e7402d65a8def9c28389a9b2e6fe42'"));
       expect(script, contains("resValue 'string', 'rhr_android_plugins_json', '{\"squawk\":\"0.1.2\"}'"));
       expect(script, contains("add 'debugImplementation', 'dev.rhr:bridge-android:"));
@@ -98,9 +99,11 @@ void main() {
         suffix: '',
         identity: identity,
         pluginsJson: '{}',
+        preferDirect: false,
       );
       final script = File(path).readAsStringSync();
       expect(script, isNot(contains('applicationIdSuffix')));
+      expect(script, contains("resValue 'string', 'rhr_prefer_direct', 'false'"));
     });
   });
 

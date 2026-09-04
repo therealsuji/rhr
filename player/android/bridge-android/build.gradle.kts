@@ -39,8 +39,8 @@ kotlin {
 dependencies {
     // Native tunnel bridge (RhrSessionService)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    // Native WebRTC data channel for the opt-in direct payload path. The
-    // relay remains the signaling and fallback transport.
+    // Native WebRTC data channel for direct tunnel payloads. The relay carries
+    // signaling and control messages only unless relay-only mode is explicit.
     implementation("io.github.webrtc-sdk:android:144.7559.12")
 }
 

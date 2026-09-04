@@ -11,7 +11,7 @@ typedef DirectSignalSink = void Function(DirectSignal signal);
 ///
 /// This class owns only the peer connection. Signaling still travels over the
 /// existing session relay via [onSignal], so callers can choose whether the
-/// direct path is attempted and fall back to the WebSocket tunnel if it fails.
+/// direct path is attempted.
 /// One data-channel message carries one already-framed RHR tunnel packet.
 final class DirectWebRtcPeer {
   static const _dataChannelMid = '0';
@@ -146,7 +146,7 @@ final class DirectWebRtcPeer {
     // ConcurrentModificationError used to take down the whole CLI isolate.
     // Keep the send future alive until the channel drains and contain any
     // late package error in this peer's state stream so the transport can
-    // fall back to the relay instead of crashing the session.
+    // terminate the session instead of crashing the isolate.
     final completion = Completer<void>();
     runZonedGuarded(
       () => unawaited(_sendAndDrain(channel, frame, completion)),
@@ -244,8 +244,8 @@ final class DirectWebRtcPeer {
         );
       } else if (state == DataChannelState.closed && !_closed) {
         // A data channel can close while the ICE peer still reports
-        // connected. Surface it as a transport failure so callers switch to
-        // the relay instead of waiting for SCTP's retransmission timer.
+        // connected. Surface it as a transport failure instead of waiting for
+        // SCTP's retransmission timer.
         _state.add(PeerConnectionState.failed);
       }
     });

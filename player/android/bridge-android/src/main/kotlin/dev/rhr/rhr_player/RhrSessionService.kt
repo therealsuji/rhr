@@ -36,7 +36,8 @@ import org.json.JSONObject
  *
  * Protocol (mirror of bridge/lib/tunnel.dart):
  *   TEXT frames   = JSON control ({"t":"info","vm":<uri>} announced device->dev)
- *   BINARY frames = [1B op][4B channel BE][payload]; op 0=open 1=data 2=close
+ *   BINARY frames = [1B op][4B channel BE][payload], carried by WebRTC unless
+ *                   relay-only mode was explicit; op 0=open 1=data 2=close
  *                   3=ack (payload = 4B consumed-byte count, flow control,
  *                   512KB window per channel)
  */
@@ -50,6 +51,7 @@ class RhrSessionService : Service() {
 		private const val OP_CLOSE = 2
 		private const val OP_ACK = 3
 		private const val OP_UPDATE_DATA = 4
+		private const val DIRECT_SIGNAL_VERSION = 1
 		private const val WINDOW_BYTES = 512 * 1024
 		private const val LOW_WATER = WINDOW_BYTES / 2
 
@@ -208,6 +210,7 @@ class RhrSessionService : Service() {
 	// engine, so hot restart cannot destroy the peer connection.
 	private var directTransport: RhrDirectTransport? = null
 	private var preferDirect = false
+	@Volatile private var directFailureReported = false
 	// Over-the-wire APK-update receiver, provided by the HOST app (the
 	// player installs its own replacement; wrapped apps may ship none).
 	// Created on demand; must live in this service (not the Dart world)
@@ -253,7 +256,7 @@ class RhrSessionService : Service() {
 				// never see its engine lines). Default true: the player
 				// hosts its own engine and tracks guest kernel swaps.
 				watchOwnVm = intent.getBooleanExtra("watchVm", true)
-				val requestedDirect = intent.getBooleanExtra("preferDirect", false)
+				val requestedDirect = intent.getBooleanExtra("preferDirect", true)
 				val sameLiveSession = reconnectThread?.isAlive == true &&
 					!stopped.get() && sessionCode == requestedCode &&
 					// Connector mode: the vmUri is FRESHLY discovered from
@@ -447,8 +450,29 @@ class RhrSessionService : Service() {
 					Log.i(TAG, "[$sessionCode] direct WebRTC payload path ready")
 				}
 			},
+			onFailure = { reason -> failDirectSession(webSocket, reason) },
 		)
 		directTransport?.startOffer()
+	}
+
+	private fun failDirectSession(
+		webSocket: WebSocket,
+		reason: String,
+		notifyPeer: Boolean = true,
+	) {
+		if (!preferDirect || directFailureReported) return
+		directFailureReported = true
+		Log.w(TAG, "[$sessionCode] direct WebRTC session failed: $reason")
+		status = "retrying"
+		if (notifyPeer) {
+			webSocket.send(
+				JSONObject()
+					.put("v", DIRECT_SIGNAL_VERSION)
+					.put("t", "direct_error")
+					.put("message", reason)
+					.toString())
+		}
+		webSocket.close(1011, "direct WebRTC failed")
 	}
 
 	private fun androidPermissions(): org.json.JSONArray {
@@ -484,6 +508,7 @@ class RhrSessionService : Service() {
 					override fun onOpen(webSocket: WebSocket, response: Response) {
 						if (generation != sessionGeneration) return
 						connected.set(true)
+						directFailureReported = false
 						activeRelayUrl = relayUrl
 						failuresThisRound = 0
 						// Assume no developer until we actually hear one — the
@@ -504,6 +529,14 @@ class RhrSessionService : Service() {
 						Log.i(TAG, "[$sessionCode] RX text: ${text.take(60)}")
 						lastDevActivity = System.currentTimeMillis()
 						if (text.contains("\"t\":\"direct_") || text.contains("\"t\": \"direct_")) {
+							val directMessage = try { JSONObject(text) } catch (_: Exception) { null }
+							if (directMessage?.optString("t") == "direct_error") {
+								failDirectSession(
+									webSocket,
+									directMessage.optString("message", "developer direct transport failed"),
+									notifyPeer = false)
+								return
+							}
 							directTransport?.handleSignal(text)
 							return
 						}
@@ -586,6 +619,12 @@ class RhrSessionService : Service() {
 
 					override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
 						if (generation != sessionGeneration) return
+						if (preferDirect) {
+							failDirectSession(
+								webSocket,
+								"relay sent binary payload in direct-only mode")
+							return
+						}
 						lastDevActivity = System.currentTimeMillis()
 						if (status != "connected") status = "connected"
 						handleFrame(bytes.toByteArray())
@@ -718,8 +757,14 @@ class RhrSessionService : Service() {
 	// ---- tunnel frames ----------------------------------------------------
 
 	private fun sendBinaryFrame(frame: ByteArray): Boolean {
-		val direct = directTransport
-		if (direct != null && direct.send(frame)) return true
+		if (preferDirect) {
+			val direct = directTransport
+			if (direct != null && direct.send(frame)) return true
+			ws?.let {
+				failDirectSession(it, "tunnel payload produced before WebRTC was ready")
+			}
+			return false
+		}
 		return ws?.send(frame.toByteString()) == true
 	}
 

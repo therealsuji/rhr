@@ -27,10 +27,9 @@ const _relayUrl = String.fromEnvironment(
   'RHR_RELAY',
   defaultValue: defaultPublicRelay,
 );
-// Native WebRTC payloads are opt-in while the cellular/strict-NAT matrix is
-// still being validated. Build the debug player with
-// `--dart-define=RHR_DIRECT=true` to enable the direct path.
-const _preferDirect = bool.fromEnvironment('RHR_DIRECT', defaultValue: false);
+// In direct mode, the relay carries control messages only. Set RHR_DIRECT=false
+// only when using an explicitly private or local relay for payload transport.
+const _preferDirect = bool.fromEnvironment('RHR_DIRECT', defaultValue: true);
 
 const _session = MethodChannel('rhr/session');
 const _violetColor = Color(0xFF7C4DFF);

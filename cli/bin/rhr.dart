@@ -54,9 +54,8 @@ run options:
   --project <dir>       Flutter project dir (default: current dir)
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      reuse a specific pairing code (default: generate one)
-  --no-direct           skip the direct WebRTC/STUN payload path (relay only;
-                        direct is attempted by default and falls back to the
-                        relay automatically)
+  --no-direct           use the relay for tunnel payloads (legacy/private mode;
+                        direct WebRTC is strict and enabled by default)
   --resync              ignore the local asset manifest and re-push all assets
   --update-player       on version skew, rebuild and update the player without asking
   --no-update-player    on version skew, hard-block instead of offering an update
@@ -77,14 +76,13 @@ attach options:
                         generic player (its APK has no per-project assets)
   --resync              forget the pushed-asset manifest and re-push all
   --no-flutter          just print the tunneled VM URI; don't run flutter attach
-  --no-direct           skip the direct WebRTC/STUN payload path (relay only;
-                        direct is attempted by default and falls back to the
-                        relay automatically)
+  --no-direct           use the relay for tunnel payloads (legacy/private mode;
+                        direct WebRTC is strict and enabled by default)
   --pid-file <path>     write the flutter process pid here
   -h, --help            show this help
 
 Config: values in ./.rhr.yaml (keys `relay:`, `code:`, and optional
-`direct: true`) are used as
+`direct: true|false`) are used as
 defaults, so you can run just `rhr attach --sync-assets`. Command-line
 flags override the file.
 ''';
@@ -93,6 +91,7 @@ flags override the file.
 // Retrying forever turns a typo into a silent background loop; callers can
 // correct the code and start a fresh attach instead.
 const _noDeviceExitCode = 75;
+const _directFailureExitCode = 69;
 
 Future<void> main(List<String> args) async {
   if (args.length == 1 &&
@@ -182,6 +181,7 @@ Future<void> main(List<String> args) async {
     var verbatimId = false;
     var noInstall = false;
     var deliver = false;
+    bool? direct;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
         case '--project':
@@ -202,6 +202,10 @@ Future<void> main(List<String> args) async {
           noInstall = true;
         case '--deliver':
           deliver = true;
+        case '--direct':
+          direct = true;
+        case '--no-direct':
+          direct = false;
         default:
           stderr.writeln('unknown arg: ${args[i]}');
           exit(64);
@@ -216,6 +220,7 @@ Future<void> main(List<String> args) async {
           verbatimId: verbatimId,
           install: !noInstall && !deliver,
           deliver: deliver,
+          preferDirect: direct,
         ),
       );
       stderr.writeln('[rhr] wrapped ✓ — open the app; it dials ${result.relay}');
@@ -235,7 +240,7 @@ Future<void> main(List<String> args) async {
     String? relay;
     String? code;
     var resync = false;
-    var direct = true;
+    bool? direct;
     var updatePolicy = PlayerUpdatePolicy.prompt;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
@@ -308,7 +313,7 @@ Future<void> main(List<String> args) async {
   var runFlutter = true;
   var syncAssets = false;
   var resync = false;
-  var direct = true;
+  bool? direct;
   var updatePolicy = PlayerUpdatePolicy.prompt;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -347,7 +352,7 @@ Future<void> main(List<String> args) async {
   final cfg = _loadConfig(project);
   relay ??= cfg['relay'];
   code ??= cfg['code'];
-  direct = direct || cfg['direct']?.toLowerCase() == 'true';
+  direct ??= cfg['direct']?.toLowerCase() != 'false';
 
   if (relay == null || code == null) {
     stderr.writeln(
@@ -408,6 +413,9 @@ Future<void> main(List<String> args) async {
       } else {
         failures = 0;
       }
+    } on DirectTransportFailure catch (failure) {
+      stderr.writeln('[rhr] direct connection failed: $failure');
+      exit(_directFailureExitCode);
     } on Exception catch (e) {
       failures++;
       stderr.writeln('[rhr] session error: $e');
@@ -562,11 +570,29 @@ Future<int?> _runSession({
   final wsDied = Completer<void>();
   final sockets = <int, Socket>{};
   final flow = FlowControl();
+  DirectTransportFailure? directFailure;
   final bridgeDeadline = _DeadlineHolder(
     DateTime.now().add(const Duration(minutes: 5)),
   );
   PlayerUpdateSender? updateSender;
   var updateAttempted = false;
+
+  void sendPayload(Uint8List payload) {
+    unawaited(
+      transport.sendPayload(payload).catchError((
+        Object error,
+        StackTrace stack,
+      ) {
+        if (error is DirectTransportFailure) {
+          directFailure ??= error;
+          if (!wsDied.isCompleted) wsDied.complete();
+        } else {
+          stderr.writeln('[rhr] tunnel payload send failed: $error');
+          if (!wsDied.isCompleted) wsDied.complete();
+        }
+      }),
+    );
+  }
 
   transport.stream.listen(
     (msg) {
@@ -675,7 +701,7 @@ Future<int?> _runSession({
       switch (f.op) {
         case opData:
           sockets[f.channel]?.add(f.payload);
-          transport.send(encodeAck(f.channel, f.payload.length));
+          sendPayload(encodeAck(f.channel, f.payload.length));
         case opAck:
           if (PlayerUpdateSender.isUpdateAck(f.channel)) {
             updateSender?.handleAck(f.channel, decodeAckCount(f.payload));
@@ -703,7 +729,11 @@ Future<int?> _runSession({
       if (!wsDied.isCompleted) wsDied.complete();
     },
     onError: (Object e) {
-      stderr.writeln('[rhr] relay error: $e');
+      if (e is DirectTransportFailure) {
+        directFailure ??= e;
+      } else {
+        stderr.writeln('[rhr] relay error: $e');
+      }
       if (!wsDied.isCompleted) wsDied.complete();
     },
   );
@@ -714,8 +744,8 @@ Future<int?> _runSession({
   // heartbeat: its watchdog expires if these stop for >45s.
   final keepalive = Timer.periodic(developerLeasePingInterval, (_) {
     try {
-      transport.send(jsonEncode({'t': 'ping'}));
-    } on StateError {
+      transport.sendControl(jsonEncode({'t': 'ping'}));
+    } catch (_) {
       // No relay has produced device info yet.
     }
   });
@@ -735,9 +765,22 @@ Future<int?> _runSession({
   }
   if (vm == null) {
     keepalive.cancel();
+    final failure = directFailure;
+    if (failure != null) {
+      await transport.close();
+      throw failure;
+    }
     return null; // relay died while waiting
   }
   stderr.writeln('[rhr] device VM service: $vm');
+
+  try {
+    await transport.payloadReady;
+  } on DirectTransportFailure catch (failure) {
+    keepalive.cancel();
+    await transport.close();
+    throw failure;
+  }
 
   var nextChannel = 1;
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -747,11 +790,11 @@ Future<int?> _runSession({
     // Socket write failures (peer reset mid-transfer) surface on `done`;
     // unhandled they crash the process.
     sock.done.catchError((_) {});
-    transport.send(encodeFrame(opOpen, channel));
+    sendPayload(encodeFrame(opOpen, channel));
     late final StreamSubscription<Uint8List> sub;
     sub = sock.listen(
       (data) {
-        transport.send(encodeFrame(opData, channel, data));
+        sendPayload(encodeFrame(opData, channel, data));
         // Pause the local reader once the window fills — this is what keeps
         // a fast dev machine from ballooning buffers inside the relay.
         if (flow.sent(channel, data.length)) {
@@ -762,13 +805,13 @@ Future<int?> _runSession({
       onDone: () {
         flow.forget(channel);
         if (sockets.remove(channel) != null) {
-          transport.send(encodeFrame(opClose, channel));
+          sendPayload(encodeFrame(opClose, channel));
         }
       },
       onError: (Object error) {
         flow.forget(channel);
         if (sockets.remove(channel) != null) {
-          transport.send(encodeFrame(opClose, channel));
+          sendPayload(encodeFrame(opClose, channel));
         }
       },
     );
@@ -787,7 +830,7 @@ Future<int?> _runSession({
     // Farewell so the phone leaves "Connected" immediately instead of waiting
     // out its watchdog. Harmless if the socket already died (relay drop).
     try {
-      transport.send(jsonEncode({'t': 'dev_gone'}));
+      transport.sendControl(jsonEncode({'t': 'dev_gone'}));
     } catch (_) {}
     await transport.close();
   }
@@ -795,6 +838,8 @@ Future<int?> _runSession({
   if (!runFlutter) {
     await wsDied.future; // keep tunneling until the relay drops
     await cleanup();
+    final failure = directFailure;
+    if (failure != null) throw failure;
     return null;
   }
 
@@ -845,7 +890,7 @@ Future<int?> _runSession({
         onProgress: (phase, done, total) {
           // Send real progress over the tunnel so the phone draws a live bar.
           // The relay forwards dev→device text as-is; the native player renders it.
-          transport.send(
+          transport.sendControl(
             jsonEncode({
               't': 'progress',
               'phase': phase,
@@ -858,7 +903,7 @@ Future<int?> _runSession({
         stderr.writeln('[rhr] asset sync failed: $e');
         // Clear the phone's progress card while the relay is still writable.
         // The native side also clears it when the connection itself fails.
-        transport.send(
+        transport.sendControl(
           jsonEncode({'t': 'progress', 'phase': '', 'done': 0, 'total': 0}),
         );
       }),
@@ -876,6 +921,8 @@ Future<int?> _runSession({
     proc.kill();
     await flutterExit; // reap
     await cleanup();
+    final failure = directFailure;
+    if (failure != null) throw failure;
     return null;
   }
   // flutter exited. But if the relay dropped at nearly the same moment (e.g.
@@ -889,10 +936,14 @@ Future<int?> _runSession({
     ]);
     if (relayAlsoDied) {
       await cleanup();
+      final failure = directFailure;
+      if (failure != null) throw failure;
       return null; // reconnect
     }
   }
   await cleanup();
+  final failure = directFailure;
+  if (failure != null) throw failure;
   if (ended is! int) {
     throw StateError('Flutter process completed without an exit code');
   }
@@ -1005,7 +1056,7 @@ Future<bool> _updatePlayerOverTheWire({
         // Throttle the on-device overlay updates to every 256 KB.
         if (sent - lastReported < 256 * 1024 && sent != total) return;
         lastReported = sent;
-        transport.send(
+        transport.sendControl(
           jsonEncode({
             't': 'progress',
             'phase': 'updating',
@@ -1109,14 +1160,14 @@ Future<int> _runAttachProductFlow({
   required String project,
   String? relay,
   String? code,
-  bool preferDirect = false,
+  bool? preferDirect,
   bool resync = false,
   PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.prompt,
 }) async {
   final sessionCode = code ?? mintRhrSessionCode();
   final config = _loadConfig(project);
   final configuredRelay = relay ?? config['relay'];
-  preferDirect = preferDirect || config['direct']?.toLowerCase() == 'true';
+  preferDirect ??= config['direct']?.toLowerCase() != 'false';
   final localRelay = await LocalRelay.start(sessionCode);
   final deviceRelays = relayCandidates(
     local: localRelay?.advertisedUrl,
@@ -1185,6 +1236,9 @@ Future<int> _runAttachProductFlow({
         stderr.writeln(
           '[rhr] Flutter attach ended${result == null ? '' : ' ($result)'}.',
         );
+      } on DirectTransportFailure catch (failure) {
+        stderr.writeln('[rhr] direct connection failed: $failure');
+        return _directFailureExitCode;
       } on Exception catch (error) {
         failures++;
         stderr.writeln('[rhr] session error: $error');

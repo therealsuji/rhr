@@ -14,18 +14,19 @@ import java.nio.ByteBuffer
 import java.util.regex.Pattern
 
 /**
- * Persistent Android end of the optional direct tunnel.
+ * Persistent Android end of the direct tunnel.
  *
  * The native session service owns this object, not the guest Flutter engine,
  * so a hot restart cannot tear down the data channel. Signaling is deliberately
- * kept on the existing session WebSocket; if this channel is unavailable the
- * caller continues sending tunnel frames over that WebSocket.
+ * kept on the existing session WebSocket. Tunnel payloads never use that
+ * WebSocket while direct mode is active.
  */
 internal class RhrDirectTransport(
 	context: Context,
 	private val sendSignal: (String) -> Unit,
 	private val onFrame: (ByteArray) -> Unit,
 	private val onState: (State) -> Unit,
+	private val onFailure: (String) -> Unit,
 ) {
 	enum class State { CONNECTING, OPEN, FAILED, CLOSED }
 
@@ -155,9 +156,14 @@ internal class RhrDirectTransport(
 	}
 
 	fun send(frame: ByteArray): Boolean {
-		if (!isOpen()) return false
+		if (!isOpen()) {
+			fail("payload send attempted before the data channel opened")
+			return false
+		}
 		return try {
-			channel?.send(DataChannel.Buffer(ByteBuffer.wrap(frame), true)) == true
+			val sent = channel?.send(DataChannel.Buffer(ByteBuffer.wrap(frame), true)) == true
+			if (!sent) fail("data channel rejected a payload")
+			sent
 		} catch (error: Throwable) {
 			fail("send: ${error.message ?: error.javaClass.simpleName}")
 			false
@@ -202,6 +208,7 @@ internal class RhrDirectTransport(
 				PeerConnection.IceConnectionState.CONNECTED,
 				PeerConnection.IceConnectionState.COMPLETED -> Log.i(TAG, "ICE connected")
 				PeerConnection.IceConnectionState.FAILED -> fail("ICE failed")
+				PeerConnection.IceConnectionState.DISCONNECTED -> fail("ICE disconnected")
 				else -> Unit
 			}
 		}
@@ -232,6 +239,10 @@ internal class RhrDirectTransport(
 				}
 			}
 			override fun onMessage(buffer: DataChannel.Buffer) {
+				if (!buffer.binary) {
+					fail("data channel returned a non-binary message")
+					return
+				}
 				val bytes = ByteArray(buffer.data.remaining())
 				buffer.data.get(bytes)
 				onFrame(bytes)
@@ -268,6 +279,7 @@ internal class RhrDirectTransport(
 		Log.w(TAG, reason)
 		state = State.FAILED
 		onState(State.FAILED)
+		onFailure(reason)
 	}
 
 	/**

@@ -171,9 +171,10 @@ final class PlayerUpdateSender {
     File apk, {
     void Function(int sentBytes, int totalBytes)? onProgress,
   }) async {
+    await _transport.payloadReady;
     final size = apk.lengthSync();
     final digest = await sha256.bind(apk.openRead()).first;
-    _transport.send(
+    _transport.sendControl(
       jsonEncode({
         't': 'update_begin',
         'id': _transferId,
@@ -197,7 +198,9 @@ final class PlayerUpdateSender {
       while (offset < bytes.length) {
         final end = (offset + _chunkBytes).clamp(0, bytes.length);
         final piece = Uint8List.sublistView(bytes, offset, end);
-        _transport.send(encodeFrame(opUpdateData, _transferId, piece));
+        await _transport.sendPayload(
+          encodeFrame(opUpdateData, _transferId, piece),
+        );
         sent += piece.length;
         onProgress?.call(sent, size);
         if (_flow.sent(_transferId, piece.length)) {
@@ -214,7 +217,9 @@ final class PlayerUpdateSender {
       }
     }
 
-    _transport.send(jsonEncode({'t': 'update_commit', 'id': _transferId}));
+    _transport.sendControl(
+      jsonEncode({'t': 'update_commit', 'id': _transferId}),
+    );
     if (kind == UpdateKind.app) {
       // Foreign package: the player process survives, the system sheet
       // waits for a user tap, and the result broadcast carries the

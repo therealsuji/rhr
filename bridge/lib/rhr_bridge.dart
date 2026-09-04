@@ -24,9 +24,10 @@ class RhrBridge {
     this.sessionCode,
     this.assetStoreId,
     this.compatibility,
-    this.preferDirect,
-    [this.externalVmUri, this.host]
-  );
+    this.preferDirect, [
+    this.externalVmUri,
+    this.host,
+  ]);
 
   final String relayUrl;
   final String sessionCode;
@@ -148,22 +149,38 @@ class RhrBridge {
         DirectWebRtcPeer? direct;
         var directReady = false;
         var directStarted = false;
+        var directFailed = false;
+        var sessionEnded = false;
+
+        void failDirect(String reason, {bool notifyPeer = true}) {
+          if (!preferDirect || directFailed || sessionEnded) return;
+          directFailed = true;
+          directReady = false;
+          _log('direct WebRTC session failed: $reason');
+          if (notifyPeer) {
+            try {
+              ws.sink.add(DirectErrorSignal(reason).encode());
+            } catch (_) {}
+          }
+          unawaited(ws.sink.close(1011, 'direct WebRTC failed'));
+        }
 
         Future<void> sendFrame(Uint8List frame) async {
+          if (!preferDirect) {
+            ws.sink.add(frame);
+            return;
+          }
           final peer = direct;
           if (!directReady || peer == null) {
-            ws.sink.add(frame);
+            const reason = 'tunnel payload produced before WebRTC was ready';
+            failDirect(reason);
             return;
           }
           try {
             await peer.send(frame);
-          } catch (_) {
-            directReady = false;
-            try {
-              ws.sink.add(frame);
-            } on StateError {
-              // The relay can be closing at the same time as the direct peer.
-            }
+          } catch (error) {
+            final reason = 'direct WebRTC payload send failed: $error';
+            failDirect(reason);
           }
         }
 
@@ -212,12 +229,17 @@ class RhrBridge {
               }
             },
           );
-          direct.messages.listen(handleFrame);
+          direct.messages.listen(
+            handleFrame,
+            onError: (Object error) {
+              failDirect('direct WebRTC receive failed: $error');
+            },
+          );
           direct.connectionStates.listen((state) {
             if (state == PeerConnectionState.failed ||
                 state == PeerConnectionState.disconnected ||
                 state == PeerConnectionState.closed) {
-              directReady = false;
+              failDirect('direct WebRTC connection ${state.name}');
             }
           });
         }
@@ -238,16 +260,15 @@ class RhrBridge {
                         await peer.waitUntilOpen(
                           timeout: const Duration(seconds: 20),
                         );
+                        if (directFailed || sessionEnded) return;
                         directReady = true;
                         _log('direct WebRTC/STUN path is ready');
                       } catch (error) {
-                        _log(
-                          'direct WebRTC path unavailable; using relay: $error',
-                        );
+                        failDirect('direct WebRTC path unavailable: $error');
                       }
                     })
                     .catchError((error) {
-                      _log('direct WebRTC offer failed; using relay: $error');
+                      failDirect('direct WebRTC offer failed: $error');
                     }),
               );
             }
@@ -258,12 +279,22 @@ class RhrBridge {
                 switch (signal) {
                   case DirectDescriptionSignal(:final type):
                     if (type == 'answer') {
-                      unawaited(peer.acceptAnswer(signal));
+                      unawaited(
+                        peer.acceptAnswer(signal).catchError((Object error) {
+                          failDirect('direct WebRTC answer failed: $error');
+                        }),
+                      );
                     }
                   case DirectCandidateSignal():
-                    unawaited(peer.addCandidate(signal));
+                    unawaited(
+                      peer.addCandidate(signal).catchError((Object error) {
+                        failDirect('direct ICE candidate failed: $error');
+                      }),
+                    );
                   case DirectEndSignal():
                     break;
+                  case DirectErrorSignal(:final message):
+                    failDirect(message, notifyPeer: false);
                 }
               } on FormatException {
                 // Other text is the normal application-level control channel.
@@ -271,8 +302,14 @@ class RhrBridge {
             }
             continue;
           }
+          if (preferDirect) {
+            const reason = 'relay sent binary payload in direct-only mode';
+            failDirect(reason);
+            throw StateError(reason);
+          }
           handleFrame(msg);
         }
+        sessionEnded = true;
         await direct?.close();
         direct = null;
         directReady = false;

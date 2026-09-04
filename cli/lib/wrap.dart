@@ -22,6 +22,7 @@ import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/tunnel.dart';
 
+import 'direct_session_transport.dart';
 import 'player_update.dart';
 import 'relay_race.dart';
 
@@ -45,6 +46,7 @@ class WrapOptions {
     this.verbatimId = false,
     this.install = true,
     this.deliver = false,
+    this.preferDirect,
   });
 
   final String project;
@@ -59,6 +61,7 @@ class WrapOptions {
   /// Deliver the wrapped APK to the rhr player over the relay instead of
   /// adb (cable-free install; the player shows the system confirm sheet).
   final bool deliver;
+  final bool? preferDirect;
 }
 
 class WrapResult {
@@ -115,9 +118,10 @@ Future<WrapResult> wrapApp(
     );
   }
 
-  final relay = options.relay ??
-      loadDotRhrYaml(project)['relay'] ??
-      defaultPublicRelay;
+  final config = loadDotRhrYaml(project);
+  final relay = options.relay ?? config['relay'] ?? defaultPublicRelay;
+  final preferDirect =
+      options.preferDirect ?? (config['direct']?.toLowerCase() != 'false');
   final code = resolveSessionCode(project, options.code);
   final identity = readProjectFlutterCompatibility(project);
   final suffix = options.verbatimId ? '' : '.rhr';
@@ -133,6 +137,7 @@ Future<WrapResult> wrapApp(
     suffix: suffix,
     identity: identity,
     pluginsJson: jsonEncode(profile.plugins),
+    preferDirect: preferDirect,
   );
 
   log('[rhr] building the wrapped app (its own debug build, '
@@ -147,6 +152,7 @@ Future<WrapResult> wrapApp(
       apk: apk,
       applicationId: applicationId,
       relay: relay,
+      preferDirect: preferDirect,
       onLog: log,
     );
     installed = true;
@@ -171,12 +177,19 @@ Future<void> deliverViaRelay({
   required File apk,
   required String applicationId,
   required String relay,
+  bool preferDirect = true,
   void Function(String)? onLog,
 }) async {
   final void Function(String) log = onLog ?? stderr.writeln;
   final deliveryCode = mintRhrSessionCode();
   log('[rhr] open the rhr player on the phone and enter code: $deliveryCode');
-  final transport = await RelayRace.connect(relays: [relay], code: deliveryCode);
+  final relayTransport = await RelayRace.connect(
+    relays: [relay],
+    code: deliveryCode,
+  );
+  final SessionTransport transport = preferDirect
+      ? DirectSessionTransport(relayTransport)
+      : relayTransport;
   try {
     // The transport stream is single-subscription: one listener routes the
     // player hello AND the update statuses/acks for the whole delivery.
@@ -195,6 +208,10 @@ Future<void> deliverViaRelay({
         if (f.op == opAck && PlayerUpdateSender.isUpdateAck(f.channel)) {
           sender?.handleAck(f.channel, decodeAckCount(f.payload));
         }
+      }
+    }, onError: (Object error, StackTrace stack) {
+      if (!hello.isCompleted) {
+        hello.completeError(error, stack);
       }
     });
     await hello.future.timeout(
@@ -223,6 +240,8 @@ Future<void> deliverViaRelay({
     } finally {
       await sub.cancel();
     }
+  } on DirectTransportFailure catch (failure) {
+    throw WrapFailure('direct connection failed: $failure');
   } finally {
     await transport.close();
   }
@@ -342,6 +361,7 @@ String writeInitScript({
   required String suffix,
   required FlutterCompatibility identity,
   required String pluginsJson,
+  bool preferDirect = true,
 }) {
   final hash = sha256.convert(utf8.encode(project)).toString().substring(0, 16);
   final dir = Directory('${rhrHome()}/wrap/projects/$hash')
@@ -396,6 +416,7 @@ allprojects { p ->
                 resValue 'string', 'rhr_session_code', '${_escapeGroovy(code)}'
                 resValue 'string', 'rhr_relay_url', '${_escapeGroovy(relay)}'
                 resValue 'string', 'rhr_host', 'app'
+                resValue 'string', 'rhr_prefer_direct', '${preferDirect ? 'true' : 'false'}'
                 resValue 'string', 'rhr_flutter_version', '${_escapeGroovy(identity.frameworkVersion)}'
                 resValue 'string', 'rhr_framework_revision', '${_escapeGroovy(identity.frameworkRevision)}'
                 resValue 'string', 'rhr_engine_revision', '${_escapeGroovy(identity.engineRevision)}'

@@ -124,5 +124,7 @@ Future<void> _deliver(DirectSignal signal, DirectWebRtcPeer receiver) async {
       await receiver.addCandidate(signal);
     case DirectEndSignal():
       break;
+    case DirectErrorSignal():
+      throw StateError('unexpected direct transport error');
   }
 }

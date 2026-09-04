@@ -1,22 +1,33 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
+
+abstract interface class RelayControlTransport {
+  Stream<String> get controlStream;
+  Future<String> get selectedRelay;
+  String? get closeReason;
+  void sendControl(String message);
+  Future<void> close();
+}
 
 abstract interface class SessionTransport {
   Stream<Object> get stream;
   Future<String> get selectedRelay;
+  Future<void> get payloadReady;
   String? get closeReason;
-  void send(Object message);
+  void sendControl(String message);
+  Future<void> sendPayload(Uint8List message);
   Future<void> close();
 }
 
 /// Connects the dev end to several relay candidates and selects the first one
 /// that produces a device `info` message.
 ///
-/// Callers see one stream and one send method; LAN/public fallback, loser
-/// cleanup, and pre-selection buffering stay inside this deep module.
-final class RelayRace implements SessionTransport {
+/// It forwards messages only from the candidate that first announces device
+/// info and closes the remaining candidates once that winner is selected.
+final class RelayRace implements RelayControlTransport, SessionTransport {
   RelayRace._();
 
   static const _hello = '{"t":"hello"}';
@@ -28,7 +39,14 @@ final class RelayRace implements SessionTransport {
   var _closed = false;
 
   Stream<Object> get stream => _events.stream;
+  Stream<String> get controlStream => _events.stream.map((message) {
+    if (message is String) return message;
+    throw const FormatException(
+      'relay sent binary payload during a direct-only session',
+    );
+  });
   Future<String> get selectedRelay => _selected.future;
+  Future<void> get payloadReady => Future.value();
   String? get closeReason => _winner?.channel.closeReason;
 
   static Future<RelayRace> connect({
@@ -117,7 +135,11 @@ final class RelayRace implements SessionTransport {
     }
   }
 
-  void send(Object message) {
+  void sendControl(String message) => _send(message);
+
+  Future<void> sendPayload(Uint8List message) async => _send(message);
+
+  void _send(Object message) {
     final winner = _winner;
     if (winner == null) {
       throw StateError('no relay transport has been selected yet');

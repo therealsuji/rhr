@@ -19,7 +19,7 @@ import android.content.Context
  *                       sessions itself (the player's lobby does), and
  *                       RhrBridgeInit no-ops.
  *   rhr_session_code  — pairing code for auto-start.
- *   rhr_prefer_direct — "true" to offer the WebRTC direct payload path.
+ *   rhr_prefer_direct — "false" only for explicit relay-only mode.
  *
  * Lookups are by name (getIdentifier) because these resources live in the
  * host app, not in the library's own R class.
@@ -47,5 +47,5 @@ object RhrConfig {
 	/** Non-blank turns RhrBridgeInit into an auto-start session bootstrap. */
 	fun autoRelayUrl(ctx: Context): String = res(ctx, "rhr_relay_url")
 	fun sessionCode(ctx: Context): String = res(ctx, "rhr_session_code")
-	fun preferDirect(ctx: Context): Boolean = res(ctx, "rhr_prefer_direct") == "true"
+	fun preferDirect(ctx: Context): Boolean = res(ctx, "rhr_prefer_direct").lowercase() != "false"
 }

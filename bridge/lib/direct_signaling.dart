@@ -5,7 +5,7 @@ import 'dart:convert';
 ///
 /// The relay does not interpret these messages; it only forwards them. Keeping
 /// the wire format here makes the signaling contract shared by the Dart bridge
-/// and the CLI, while leaving the relay transport available as a fallback.
+/// and the CLI without giving the relay access to tunnel payloads.
 sealed class DirectSignal {
   const DirectSignal();
 
@@ -29,6 +29,7 @@ sealed class DirectSignal {
       'direct_answer' => DirectDescriptionSignal._fromJson(value, 'answer'),
       'direct_candidate' => DirectCandidateSignal._fromJson(value),
       'direct_end' => const DirectEndSignal(),
+      'direct_error' => DirectErrorSignal._fromJson(value),
       _ => throw FormatException('unknown direct signal type: ${value['t']}'),
     };
   }
@@ -88,6 +89,22 @@ final class DirectEndSignal extends DirectSignal {
 
   @override
   Map<String, dynamic> toJson() => const {'v': 1, 't': 'direct_end'};
+}
+
+final class DirectErrorSignal extends DirectSignal {
+  const DirectErrorSignal(this.message);
+
+  DirectErrorSignal._fromJson(Map<String, dynamic> json)
+    : message = _requiredString(json, 'message');
+
+  final String message;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'v': 1,
+    't': 'direct_error',
+    'message': message,
+  };
 }
 
 String _requiredString(Map<String, dynamic> json, String key) {

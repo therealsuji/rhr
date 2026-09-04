@@ -9,21 +9,29 @@ import 'package:webrtc_dart/webrtc_dart.dart';
 
 import 'relay_race.dart';
 
-/// Upgrades the payload leg of a selected relay session to WebRTC when the
-/// device advertises it. The relay remains the signaling and fallback path.
-/// This keeps the rollout opt-in: callers that do not construct this wrapper
-/// retain the current WebSocket-only behavior.
+final class DirectTransportFailure implements Exception {
+  const DirectTransportFailure(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// Uses the relay for text control messages and WebRTC for tunnel payloads.
+/// Binary relay frames are protocol errors in this mode.
 final class DirectSessionTransport implements SessionTransport {
-  DirectSessionTransport(this._relay) {
-    // Keep the entire WebRTC peer and every callback in a guarded zone. The
-    // current webrtc_dart release can start SCTP work with unawaited futures;
-    // a late SACK can then raise an uncaught queue-reentrancy error outside the
-    // future returned by send(). Containing the package at this boundary lets
-    // the relay remain usable when the experimental direct path misbehaves.
+  DirectSessionTransport(
+    this._relay, {
+    this.offerTimeout = const Duration(seconds: 20),
+    this.connectionTimeout = const Duration(seconds: 20),
+    this.sendTimeout = const Duration(seconds: 4),
+  }) {
+    _payloadReady.future.ignore();
     _directZone = Zone.current.fork(
       specification: ZoneSpecification(
         handleUncaughtError: (self, parent, zone, error, stack) {
-          _handleDirectRuntimeError(error, stack);
+          _fail('direct WebRTC runtime failure: $error', stack);
         },
       ),
     );
@@ -31,176 +39,222 @@ final class DirectSessionTransport implements SessionTransport {
       _peer = DirectWebRtcPeer(
         onSignal: (signal) {
           try {
-            _relay.send(signal.encode());
-          } on StateError {
-            // The device cannot advertise a direct offer before the relay has
-            // selected a candidate, but late ICE candidates can race shutdown.
+            _relay.sendControl(signal.encode());
+          } on Object catch (error, stack) {
+            _fail('direct signaling failed: $error', stack);
           }
         },
       );
       _peer.messages.listen(
         (frame) {
+          if (!_directReady) {
+            _fail('direct payload arrived before WebRTC became ready');
+            return;
+          }
           if (!_events.isClosed) _events.add(frame);
         },
         onError: (Object error, StackTrace stack) {
-          if (!_events.isClosed) _events.addError(error, stack);
-          _directReady = false;
+          _fail('direct WebRTC receive failed: $error', stack);
         },
       );
       _peer.connectionStates.listen((state) {
+        if (_closed || _failure != null) return;
         if (state == PeerConnectionState.failed ||
             state == PeerConnectionState.disconnected ||
             state == PeerConnectionState.closed) {
-          _directReady = false;
-          unawaited(_peer.close());
+          _fail('direct WebRTC connection ${state.name}');
         }
       });
-      _relaySubscription = _relay.stream.listen(
-        _onRelayMessage,
+      _relaySubscription = _relay.controlStream.listen(
+        _onRelayControl,
         onDone: _relayClosed,
         onError: (Object error, StackTrace stack) {
-          if (!_events.isClosed) _events.addError(error, stack);
+          _fail('direct-only relay protocol failed: $error', stack);
         },
       );
     });
   }
 
-  final RelayRace _relay;
+  final RelayControlTransport _relay;
+  final Duration offerTimeout;
+  final Duration connectionTimeout;
+  final Duration sendTimeout;
   final _events = StreamController<Object>();
+  final _payloadReady = Completer<void>();
   late final Zone _directZone;
   late final DirectWebRtcPeer _peer;
-  late final StreamSubscription<Object> _relaySubscription;
+  late final StreamSubscription<String> _relaySubscription;
+  Timer? _offerTimer;
   var _directReady = false;
   var _closed = false;
-  var _directRuntimeErrorReported = false;
-  var _directFallbackReported = false;
+  DirectTransportFailure? _failure;
 
+  @override
   Stream<Object> get stream => _events.stream;
+
+  @override
   Future<String> get selectedRelay => _relay.selectedRelay;
+
+  @override
+  Future<void> get payloadReady => _payloadReady.future;
+
+  @override
   String? get closeReason => _relay.closeReason;
 
-  void send(Object message) {
+  @override
+  void sendControl(String message) {
+    final failure = _failure;
+    if (failure != null) throw failure;
     if (_closed) throw StateError('direct session transport is closed');
-    if (message is List<int> && _directReady) {
-      final frame = Uint8List.fromList(message);
-      // The vendored SCTP implementation serializes its transmit loop. Keep
-      // the transport itself concurrent so one slow buffered frame cannot
-      // hold every later VM-service request behind it.
-      unawaited(_sendDirect(frame));
-      return;
-    }
-    _relay.send(message);
+    _relay.sendControl(message);
   }
 
+  @override
+  Future<void> sendPayload(Uint8List message) async {
+    final failure = _failure;
+    if (failure != null) throw failure;
+    if (_closed) throw StateError('direct session transport is closed');
+    if (!_directReady) {
+      throw const DirectTransportFailure(
+        'direct WebRTC payload path is not ready',
+      );
+    }
+    try {
+      await _peer.send(message).timeout(sendTimeout);
+    } on Object catch (error, stack) {
+      final failure = DirectTransportFailure(
+        'direct WebRTC payload send failed: $error',
+      );
+      _fail(failure.message, stack);
+      throw failure;
+    }
+  }
+
+  @override
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _offerTimer?.cancel();
+    if (!_payloadReady.isCompleted) {
+      _payloadReady.completeError(
+        const DirectTransportFailure(
+          'session closed before the direct WebRTC payload path was ready',
+        ),
+      );
+    }
     await _relaySubscription.cancel();
     await _peer.close();
     if (!_events.isClosed) await _events.close();
     await _relay.close();
   }
 
-  void _handleDirectRuntimeError(Object error, StackTrace stack) {
-    if (_closed) return;
-    _directReady = false;
-    if (!_directRuntimeErrorReported) {
-      _directRuntimeErrorReported = true;
-      stderr.writeln(
-        '[rhr] direct WebRTC runtime failure: $error; '
-        'using WebSocket fallback',
-      );
+  void _onRelayControl(String message) {
+    final decoded = _decodeControl(message);
+    switch (decoded) {
+      case DirectSignal signal:
+        unawaited(
+          _handleSignal(signal).catchError((Object error, StackTrace stack) {
+            _fail('direct WebRTC negotiation failed: $error', stack);
+          }),
+        );
+      case _DeviceInfo():
+        _offerTimer ??= Timer(
+          offerTimeout,
+          () => _fail('device did not offer a direct WebRTC payload path'),
+        );
+        if (!_events.isClosed) _events.add(message);
+      case _ApplicationControl():
+        if (!_events.isClosed) _events.add(message);
+      case _InvalidDirectControl(:final error):
+        _fail('invalid direct signaling message: $error');
     }
-    // Do not rethrow: this is precisely the unawaited package failure that
-    // previously terminated the CLI isolate. Closing is best effort; any
-    // secondary package error is handled by this same zone.
-    unawaited(_peer.close());
-  }
-
-  void _onRelayMessage(Object message) {
-    final signal = _tryDecodeDirectSignal(message);
-    if (signal == null) {
-      if (!_events.isClosed) _events.add(message);
-      return;
-    }
-    unawaited(_handleSignal(signal));
   }
 
   Future<void> _handleSignal(DirectSignal signal) async {
     switch (signal) {
       case DirectDescriptionSignal(:final type):
-        if (type != 'offer') return;
-        await _peer.acceptOffer(signal);
-        try {
-          await _peer.waitUntilOpen(timeout: const Duration(seconds: 20));
-          _directReady = true;
-          stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
-        } catch (_) {
-          // Keep the WebSocket payload path if ICE/DTLS cannot complete.
-          _directReady = false;
-          stderr.writeln(
-            '[rhr] direct WebRTC path unavailable; using WebSocket fallback',
+        if (type != 'offer') {
+          throw const FormatException(
+            'device sent an unexpected direct answer',
           );
         }
+        _offerTimer?.cancel();
+        await _peer.acceptOffer(signal);
+        await _peer.waitUntilOpen(timeout: connectionTimeout);
+        if (_closed || _failure != null) return;
+        _directReady = true;
+        if (!_payloadReady.isCompleted) _payloadReady.complete();
+        stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
       case DirectCandidateSignal():
         await _peer.addCandidate(signal);
       case DirectEndSignal():
         break;
+      case DirectErrorSignal(:final message):
+        _fail('device direct transport failed: $message', null, false);
     }
   }
 
-  Future<void> _sendDirect(Uint8List frame) async {
-    // Frames queued before a direct failure must immediately use the relay;
-    // retrying each one against a closed/stalled SCTP channel would serialize
-    // a timeout for every pending VM-service packet.
-    if (!_directReady) {
-      try {
-        _relay.send(frame);
-      } on StateError {
-        // The relay can be closing at the same time as the direct peer.
-      }
-      return;
+  void _fail(String message, [StackTrace? stack, bool notifyPeer = true]) {
+    if (_closed || _failure != null) return;
+    final failure = _failure = DirectTransportFailure(message);
+    _directReady = false;
+    _offerTimer?.cancel();
+    if (!_payloadReady.isCompleted) {
+      _payloadReady.completeError(failure, stack ?? StackTrace.current);
     }
-    try {
-      // A stalled SCTP association otherwise waits for its retransmission
-      // timer (roughly a minute on a real phone) before the relay fallback
-      // becomes usable. Direct is an optimization, so fail fast and keep
-      // the VM-service request on the proven relay path.
-      await _peer.send(frame).timeout(const Duration(seconds: 4));
-    } catch (_) {
-      _directReady = false;
-      // Closing the host peer tells the Android endpoint to stop selecting
-      // the stale direct channel too; its next response then uses the relay.
-      unawaited(_peer.close());
-      if (!_directFallbackReported) {
-        _directFallbackReported = true;
-        stderr.writeln(
-          '[rhr] direct WebRTC payload stalled; using WebSocket fallback',
-        );
-      }
+    if (notifyPeer) {
       try {
-        _relay.send(frame);
-      } on StateError {
-        // The relay can be closing at the same time as the direct peer.
-      }
+        _relay.sendControl(DirectErrorSignal(message).encode());
+      } catch (_) {}
     }
+    if (!_events.isClosed) {
+      _events.addError(failure, stack ?? StackTrace.current);
+    }
+    unawaited(_peer.close());
   }
 
   void _relayClosed() {
     _directReady = false;
+    if (!_payloadReady.isCompleted) {
+      _payloadReady.completeError(
+        const DirectTransportFailure(
+          'signaling relay closed before the direct WebRTC payload path was ready',
+        ),
+      );
+    }
     if (!_events.isClosed) unawaited(_events.close());
   }
 
-  static DirectSignal? _tryDecodeDirectSignal(Object message) {
-    if (message is! String) return null;
+  static Object _decodeControl(String message) {
     try {
       final decoded = jsonDecode(message);
-      if (decoded is! Map<String, dynamic>) return null;
+      if (decoded is! Map<String, dynamic>) return const _ApplicationControl();
       final type = decoded['t'];
-      if (type is! String || !type.startsWith('direct_')) return null;
-      return DirectSignal.decode(decoded);
+      if (type == 'info') return const _DeviceInfo();
+      if (type is! String || !type.startsWith('direct_')) {
+        return const _ApplicationControl();
+      }
+      try {
+        return DirectSignal.decode(decoded);
+      } on FormatException catch (error) {
+        return _InvalidDirectControl(error);
+      }
     } on FormatException {
-      return null;
+      return const _ApplicationControl();
     }
   }
+}
+
+final class _DeviceInfo {
+  const _DeviceInfo();
+}
+
+final class _ApplicationControl {
+  const _ApplicationControl();
+}
+
+final class _InvalidDirectControl {
+  const _InvalidDirectControl(this.error);
+
+  final FormatException error;
 }

@@ -21,15 +21,19 @@ final class _FakeTransport implements SessionTransport {
   Future<String> get selectedRelay async => 'fake';
 
   @override
+  Future<void> get payloadReady async {}
+
+  @override
   String? get closeReason => null;
 
   @override
-  void send(Object message) {
-    if (message is String) {
-      sentText.add(jsonDecode(message) as Map<String, dynamic>);
-    } else {
-      sentFrames.add(decodeFrame(message as List<int>));
-    }
+  void sendControl(String message) {
+    sentText.add(jsonDecode(message) as Map<String, dynamic>);
+  }
+
+  @override
+  Future<void> sendPayload(Uint8List message) async {
+    sentFrames.add(decodeFrame(message));
   }
 
   @override

@@ -5,6 +5,8 @@
 - Allow patch-level Flutter/Dart skew inside one stable series with a warning;
   cross-minor, non-stable, and unknown-channel pairs keep the exact gate.
 - Players report their release channel so the gate can prove series identity.
+- Direct mode keeps tunnel payloads off the relay and fails instead of silently
+  falling back. Use `--no-direct` for explicit relay-only sessions.
 
 ## 0.1.0-beta.3
 
