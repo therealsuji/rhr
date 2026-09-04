@@ -85,6 +85,10 @@ final class DirectSessionTransport implements SessionTransport {
   late final DirectWebRtcPeer _peer;
   late final StreamSubscription<String> _relaySubscription;
   Timer? _offerTimer;
+  Timer? _candidateTimer;
+  DirectDescriptionSignal? _pendingOffer;
+  Future<void>? _negotiation;
+  var _remoteCandidatesComplete = false;
   var _directReady = false;
   var _closed = false;
   DirectTransportFailure? _failure;
@@ -135,6 +139,7 @@ final class DirectSessionTransport implements SessionTransport {
     if (_closed) return;
     _closed = true;
     _offerTimer?.cancel();
+    _candidateTimer?.cancel();
     if (!_payloadReady.isCompleted) {
       _payloadReady.completeError(
         const DirectTransportFailure(
@@ -179,19 +184,37 @@ final class DirectSessionTransport implements SessionTransport {
           );
         }
         _offerTimer?.cancel();
-        await _peer.acceptOffer(signal);
-        await _peer.waitUntilOpen(timeout: connectionTimeout);
-        if (_closed || _failure != null) return;
-        _directReady = true;
-        if (!_payloadReady.isCompleted) _payloadReady.complete();
-        stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
+        _pendingOffer = signal;
+        _candidateTimer ??= Timer(
+          connectionTimeout,
+          () => _fail('device did not finish gathering direct ICE candidates'),
+        );
+        await _startNegotiationWhenReady();
       case DirectCandidateSignal():
         await _peer.addCandidate(signal);
       case DirectEndSignal():
-        break;
+        _remoteCandidatesComplete = true;
+        _candidateTimer?.cancel();
+        await _startNegotiationWhenReady();
       case DirectErrorSignal(:final message):
         _fail('device direct transport failed: $message', null, false);
     }
+  }
+
+  Future<void> _startNegotiationWhenReady() async {
+    final offer = _pendingOffer;
+    if (offer == null || !_remoteCandidatesComplete) return;
+    final negotiation = _negotiation ??= _negotiate(offer);
+    await negotiation;
+  }
+
+  Future<void> _negotiate(DirectDescriptionSignal offer) async {
+    await _peer.acceptOffer(offer);
+    await _peer.waitUntilOpen(timeout: connectionTimeout);
+    if (_closed || _failure != null) return;
+    _directReady = true;
+    if (!_payloadReady.isCompleted) _payloadReady.complete();
+    stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
   }
 
   void _fail(String message, [StackTrace? stack, bool notifyPeer = true]) {
@@ -199,6 +222,7 @@ final class DirectSessionTransport implements SessionTransport {
     final failure = _failure = DirectTransportFailure(message);
     _directReady = false;
     _offerTimer?.cancel();
+    _candidateTimer?.cancel();
     if (!_payloadReady.isCompleted) {
       _payloadReady.completeError(failure, stack ?? StackTrace.current);
     }

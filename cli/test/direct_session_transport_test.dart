@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:rhr_bridge/direct_signaling.dart';
+import 'package:rhr_bridge/direct_webrtc.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:test/test.dart';
@@ -9,6 +11,7 @@ import 'package:test/test.dart';
 final class _FakeControlTransport implements RelayControlTransport {
   final controller = StreamController<String>();
   final sent = <String>[];
+  void Function(String message)? onSend;
 
   @override
   Stream<String> get controlStream => controller.stream;
@@ -20,7 +23,10 @@ final class _FakeControlTransport implements RelayControlTransport {
   String? get closeReason => null;
 
   @override
-  void sendControl(String message) => sent.add(message);
+  void sendControl(String message) {
+    sent.add(message);
+    onSend?.call(message);
+  }
 
   @override
   Future<void> close() => controller.close();
@@ -85,4 +91,57 @@ void main() {
     await subscription.cancel();
     await transport.close();
   });
+
+  test(
+    'waits for end-of-candidates before answering an offer',
+    () async {
+      final relay = _FakeControlTransport();
+      final transport = DirectSessionTransport(relay);
+      final subscription = transport.stream.listen((_) {}, onError: (_) {});
+      late final DirectWebRtcPeer device;
+      final offerSent = Completer<void>();
+
+      device = DirectWebRtcPeer.localOnly(
+        onSignal: (signal) {
+          if (signal is DirectEndSignal) return;
+          relay.controller.add(signal.encode());
+          if (signal is DirectDescriptionSignal && !offerSent.isCompleted) {
+            offerSent.complete();
+          }
+        },
+      );
+      relay.onSend = (message) {
+        final signal = DirectSignal.decode(message);
+        switch (signal) {
+          case DirectDescriptionSignal(:final type) when type == 'answer':
+            unawaited(device.acceptAnswer(signal));
+          case DirectCandidateSignal():
+            unawaited(device.addCandidate(signal));
+          case DirectDescriptionSignal() || DirectEndSignal():
+            break;
+          case DirectErrorSignal():
+            fail('unexpected direct transport failure: ${signal.message}');
+        }
+      };
+
+      await device.startOffer();
+      await offerSent.future;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(
+        relay.sent
+            .map(DirectSignal.decode)
+            .whereType<DirectDescriptionSignal>(),
+        isEmpty,
+        reason: 'starting checks while candidates trickle mutates the ICE list',
+      );
+
+      relay.controller.add(const DirectEndSignal().encode());
+      await transport.payloadReady.timeout(const Duration(seconds: 10));
+
+      await subscription.cancel();
+      await transport.close();
+      await device.close();
+    },
+    timeout: const Timeout(Duration(seconds: 20)),
+  );
 }

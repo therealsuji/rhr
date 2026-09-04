@@ -35,6 +35,11 @@ final class DirectWebRtcPeer {
         ),
       );
     });
+    _iceGatheringSubscription = _peer.onIceGatheringStateChange.listen((state) {
+      if (state == IceGatheringState.complete) {
+        _onSignal(const DirectEndSignal());
+      }
+    });
     _peer.onDataChannel.listen(_bindChannel);
     _peer.onConnectionStateChange.listen((state) {
       if (!_state.isClosed) _state.add(state);
@@ -60,6 +65,7 @@ final class DirectWebRtcPeer {
   final _state = StreamController<PeerConnectionState>.broadcast();
   final _remoteCandidates = <DirectCandidateSignal>[];
   StreamSubscription<RTCIceCandidate>? _iceSubscription;
+  StreamSubscription<IceGatheringState>? _iceGatheringSubscription;
   StreamSubscription<DataChannelState>? _channelStateSubscription;
   StreamSubscription<dynamic>? _channelMessageSubscription;
   dynamic _channel;
@@ -188,6 +194,7 @@ final class DirectWebRtcPeer {
     await _channelMessageSubscription?.cancel();
     await _channelStateSubscription?.cancel();
     await _iceSubscription?.cancel();
+    await _iceGatheringSubscription?.cancel();
     try {
       await _peer.close();
     } finally {

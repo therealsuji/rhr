@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:rhr_bridge/direct_signaling.dart';
@@ -26,5 +27,19 @@ void main() {
         candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host',
       ),
     );
+  });
+
+  test('signals when local ICE candidate gathering is complete', () async {
+    final end = Completer<void>();
+    final peer = DirectWebRtcPeer.localOnly(
+      onSignal: (signal) {
+        if (signal is DirectEndSignal && !end.isCompleted) end.complete();
+      },
+    );
+    addTearDown(peer.close);
+
+    await peer.startOffer();
+
+    await end.future.timeout(const Duration(seconds: 5));
   });
 }
