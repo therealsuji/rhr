@@ -54,7 +54,9 @@ run options:
   --project <dir>       Flutter project dir (default: current dir)
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      reuse a specific pairing code (default: generate one)
-  --direct              attempt a direct WebRTC/STUN payload path, then fall back
+  --no-direct           skip the direct WebRTC/STUN payload path (relay only;
+                        direct is attempted by default and falls back to the
+                        relay automatically)
   --resync              ignore the local asset manifest and re-push all assets
   --update-player       on version skew, rebuild and update the player without asking
   --no-update-player    on version skew, hard-block instead of offering an update
@@ -75,7 +77,9 @@ attach options:
                         generic player (its APK has no per-project assets)
   --resync              forget the pushed-asset manifest and re-push all
   --no-flutter          just print the tunneled VM URI; don't run flutter attach
-  --direct              attempt a direct WebRTC/STUN payload path, then fall back
+  --no-direct           skip the direct WebRTC/STUN payload path (relay only;
+                        direct is attempted by default and falls back to the
+                        relay automatically)
   --pid-file <path>     write the flutter process pid here
   -h, --help            show this help
 
@@ -231,7 +235,7 @@ Future<void> main(List<String> args) async {
     String? relay;
     String? code;
     var resync = false;
-    var direct = false;
+    var direct = true;
     var updatePolicy = PlayerUpdatePolicy.prompt;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
@@ -243,6 +247,8 @@ Future<void> main(List<String> args) async {
           code = args[++i];
         case '--direct':
           direct = true;
+        case '--no-direct':
+          direct = false;
         case '--resync':
           resync = true;
         case '--update-player':
@@ -302,7 +308,7 @@ Future<void> main(List<String> args) async {
   var runFlutter = true;
   var syncAssets = false;
   var resync = false;
-  var direct = false;
+  var direct = true;
   var updatePolicy = PlayerUpdatePolicy.prompt;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -326,6 +332,8 @@ Future<void> main(List<String> args) async {
         resync = true;
       case '--direct':
         direct = true;
+      case '--no-direct':
+        direct = false;
       case '--update-player':
         updatePolicy = PlayerUpdatePolicy.always;
       case '--no-update-player':

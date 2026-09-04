@@ -92,7 +92,8 @@ class MainActivity : FlutterActivity() {
 												.putExtra("relayUrl", relay)
 												.putExtra("code", code)
 												.putExtra("vmUri", vmUri)
-												.putExtra("watchVm", false))
+												.putExtra("watchVm", false)
+												.putExtra("preferDirect", true))
 									} catch (e: Exception) {
 										Log.w(AdbConnection.TAG, "FGS deferred: $e")
 									}
