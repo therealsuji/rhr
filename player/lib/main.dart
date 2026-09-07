@@ -23,6 +23,8 @@ import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'connector.dart';
+
 const _relayUrl = String.fromEnvironment(
   'RHR_RELAY',
   defaultValue: defaultPublicRelay,
@@ -377,6 +379,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         _codeEntry(),
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
+                        const SizedBox(height: 18),
+                        _connectorEntry(),
                         const SizedBox(height: 20),
                         Center(
                           child: Row(
@@ -424,6 +428,56 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       ),
     );
   }
+
+  /// The second way to use the player: leave an already-installed app where
+  /// it is and tunnel that instead of hosting a guest project here. Presented
+  /// as a peer of the code entry above, not buried in a menu, because a user
+  /// arriving with their own debug build has no reason to guess it exists.
+  Widget _connectorEntry() => GestureDetector(
+    onTap: () => Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ConnectorScreen(
+          relay: _relay,
+          fallbackRelays: _fallbackRelays,
+        ),
+      ),
+    ),
+    child: Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _surfaceHi),
+      ),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Connect an installed app',
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Hot reload a debug build already on this phone, instead '
+                  'of hosting a project here.',
+                  style: TextStyle(color: _inkDim, fontSize: 12.5, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          const Icon(Icons.chevron_right, color: _inkDim),
+        ],
+      ),
+    ),
+  );
 
   Widget _chip(String text, Color color) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),

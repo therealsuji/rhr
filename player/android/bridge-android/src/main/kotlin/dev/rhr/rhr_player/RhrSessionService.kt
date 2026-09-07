@@ -419,11 +419,18 @@ class RhrSessionService : Service() {
 		// {"t":"ready"} frame has already been consumed.
 		.put("ready", readySent)
 		.put("assetStoreId", assetStoreId)
-		// "player" | "app" — a wrapped app's identity is baked from the same
-		// SDK the CLI builds with, so the gate is exact-match by construction;
-		// the dev side also uses this to route update offers (never offered
-		// to a wrapped host).
-		.put("host", RhrConfig.hostKind(this))
+		// "player" | "app" | "connector". A wrapped app's identity is baked
+		// from the same SDK the CLI builds with, so the gate is exact-match by
+		// construction; the dev side also uses this to route update offers
+		// (never offered to a wrapped host).
+		//
+		// Connector mode is the exception: we are tunneling a THIRD-party
+		// app's VM service, so the identity in this hello describes US, not
+		// the target. Announcing "player" there would gate the developer
+		// against the wrong app's Flutter version — and offer them a player
+		// update that could not fix it. `watchOwnVm` is false exactly when
+		// the vmUri belongs to someone else, so it is the honest signal.
+		.put("host", if (watchOwnVm) RhrConfig.hostKind(this) else "connector")
 		.put(
 			"compatibility",
 			JSONObject()

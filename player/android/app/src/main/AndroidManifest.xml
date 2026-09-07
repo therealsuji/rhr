@@ -19,6 +19,22 @@
     <!-- Over-the-wire player self-update: the CLI streams a replacement APK
          and the player installs it via PackageInstaller. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- Connector mode draws the shake-to-open session bubble above the
+         tester's OWN app, which is a different process — an in-Activity
+         overlay would be behind it. Granted on a settings screen, not by a
+         runtime prompt, and only ever asked for in connector mode. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+
+    <!-- Connector-mode target picker: every app with a launcher entry.
+         Without this, package visibility (Android 11+) hides the apps we
+         could tunnel and the picker comes back empty. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LAUNCHER"/>
+        </intent>
+    </queries>
 
     <application
         android:label="RHR Player"
@@ -53,6 +69,24 @@
             android:name=".RhrSessionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Connector-mode one-time Wireless Debugging pairing. Lives in the
+             shared adb-android module, so the name is fully qualified. -->
+        <service
+            android:name="dev.rhr.adb.PairingNotificationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!-- Holds the shake-to-open bubble while the tester is inside their
+             own app; foreground so backgrounding the player can't kill it
+             mid-session. -->
+        <service
+            android:name=".OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Developer tooling: keeps the debug session
+                    overlay available while testing another app" />
+        </service>
         <!-- PackageInstaller commit callback for the player self-update. -->
         <receiver
             android:name=".UpdateResultReceiver"

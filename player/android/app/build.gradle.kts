@@ -160,8 +160,9 @@ dependencies {
     // installed debug app's VM service, and tunnel it. Shared with the
     // standalone connector so the ADB logic has one implementation.
     implementation(project(":adb-android"))
-    // Spring physics for the dev overlay animations
-    implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
     // Core library desugaring (see compileOptions above)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // JVM tests for the pure-Kotlin shake gesture (sensors cannot be faked on
+    // a physical device).
+    testImplementation("junit:junit:4.13.2")
 }
