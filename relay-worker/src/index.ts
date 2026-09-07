@@ -17,6 +17,13 @@
 // connection order doesn't matter. The cache lives in DO storage (hibernation
 // wipes in-memory state) and is cleared when the device disconnects — a dead
 // device's info would tunnel the dev into nothing.
+//
+// Every accepted socket carries a generation: the count of sockets accepted
+// for its role so far. A replaced socket keeps running until its close event
+// arrives, which can be long after its replacement is live, so anything that
+// mutates shared session state first checks that the socket is still the
+// current one for its role. Without that check a predecessor's close event
+// tears down its own successor.
 
 export interface Env {
 	SESSIONS: DurableObjectNamespace;
@@ -41,7 +48,16 @@ interface ConnMeta {
 	connectedAt: number;
 	msgs: number;
 	bytes: number;
+	/**
+	 * Which socket this is for its role, counting from 1. Immutable: tags are
+	 * fixed at acceptWebSocket, which is what makes this a reliable identity
+	 * for a socket that may outlive its own replacement.
+	 */
+	generation: number;
 }
+
+/** DO storage key holding the newest generation handed out for a role. */
+const generationKey = (role: Role) => `gen:${role}`;
 
 export class RelaySession implements DurableObject {
 	constructor(private ctx: DurableObjectState) {}
@@ -62,26 +78,49 @@ export class RelaySession implements DurableObject {
 			dev: this.ctx.getWebSockets("dev").length,
 			device: this.ctx.getWebSockets("device").length,
 		};
-		// One connection per role: kick the previous holder.
+		// One connection per role: kick the previous holder. The evicted socket
+		// stays alive until its own close event arrives, so it must not be able
+		// to act on the session from here on — hence the generation.
 		for (const ws of this.ctx.getWebSockets(role)) {
 			ws.close(1000, "replaced by new connection");
 		}
 
+		const generation =
+			((await this.ctx.storage.get<number>(generationKey(role))) ?? 0) + 1;
+		await this.ctx.storage.put(generationKey(role), generation);
+
 		const pair = new WebSocketPair();
-		const meta: ConnMeta = { role, connectedAt: Date.now(), msgs: 0, bytes: 0 };
+		const meta: ConnMeta = {
+			role,
+			connectedAt: Date.now(),
+			msgs: 0,
+			bytes: 0,
+			generation,
+		};
 		this.ctx.acceptWebSocket(pair[1], [role, JSON.stringify(meta)]);
 		console.log(
-			`[rhr] ${role} CONNECTED (was dev=${before.dev} device=${before.device})`,
+			`[rhr] ${role} CONNECTED gen=${generation} ` +
+				`(was dev=${before.dev} device=${before.device})`,
 		);
 		if (role === "dev") {
 			const deviceLive = this.ctx.getWebSockets("device").length > 0;
 			const info = await this.ctx.storage.get<string>("deviceInfo");
 			const at = (await this.ctx.storage.get<number>("deviceInfoAt")) ?? 0;
+			const infoGen =
+				(await this.ctx.storage.get<number>("deviceInfoGen")) ?? 0;
+			const deviceGen =
+				(await this.ctx.storage.get<number>(generationKey("device"))) ?? 0;
 			const fresh = info !== undefined && Date.now() - at < INFO_TTL_MS;
+			// Info from a device connection that has since been replaced describes
+			// a VM the current device is not serving; replaying it would tunnel
+			// the dev into nothing.
+			const current = infoGen === deviceGen;
 			console.log(
-				`[rhr] dev replay check: deviceLive=${deviceLive} hasInfo=${info !== undefined} fresh=${fresh}`,
+				`[rhr] dev replay check: deviceLive=${deviceLive} ` +
+					`hasInfo=${info !== undefined} fresh=${fresh} ` +
+					`infoGen=${infoGen} deviceGen=${deviceGen}`,
 			);
-			if (deviceLive && fresh) {
+			if (deviceLive && fresh && current) {
 				pair[1].send(info);
 				console.log("[rhr] dev replayed cached info");
 			}
@@ -118,8 +157,9 @@ export class RelaySession implements DurableObject {
 			await this.ctx.storage.put({
 				deviceInfo: message,
 				deviceInfoAt: Date.now(),
+				deviceInfoGen: meta?.generation ?? 0,
 			});
-			console.log("[rhr] cached device info");
+			console.log(`[rhr] cached device info gen=${meta?.generation ?? 0}`);
 		}
 		const peer: Role = role === "device" ? "dev" : "device";
 		const peers = this.ctx.getWebSockets(peer);
@@ -143,24 +183,40 @@ export class RelaySession implements DurableObject {
 		clean: boolean,
 	) {
 		this.logDrop(ws, "close", code, clean);
-		const role = this.roleOf(ws);
-		if (role === "device") {
-			await this.ctx.storage.delete("deviceInfo");
-			// The session is dead without a device: its tunnel channels are
-			// half-open and the attached dev's flutter attach would hang on
-			// them forever. Drop the dev too so the CLI's recovery loop wakes
-			// up, re-dials, and re-pairs with the device when it returns.
-			this.closeRole("dev", 1001, "device disconnected");
-		}
+		await this.onDeviceGone(ws);
 	}
 
 	async webSocketError(ws: WebSocket, _error: unknown) {
 		this.logDrop(ws, "error", -1, false);
-		const role = this.roleOf(ws);
-		if (role === "device") {
-			await this.ctx.storage.delete("deviceInfo");
-			this.closeRole("dev", 1001, "device disconnected");
+		await this.onDeviceGone(ws);
+	}
+
+	/**
+	 * Tears the session down when the CURRENT device connection ends.
+	 *
+	 * An evicted socket's close event can arrive after its replacement is
+	 * already serving — reconnects are routine, so this is the common case, not
+	 * a rare race. Acting on role alone would let the outgoing connection
+	 * delete the live device's cached info and hang up on its dev, leaving a
+	 * session that looks connected on both ends and moves no traffic.
+	 */
+	private async onDeviceGone(ws: WebSocket) {
+		if (this.roleOf(ws) !== "device") return;
+		const generation = this.metaOf(ws)?.generation ?? 0;
+		const current =
+			(await this.ctx.storage.get<number>(generationKey("device"))) ?? 0;
+		if (generation !== current) {
+			console.log(
+				`[rhr] ignoring stale device close gen=${generation} current=${current}`,
+			);
+			return;
 		}
+		await this.ctx.storage.delete("deviceInfo");
+		// The session is dead without a device: its tunnel channels are
+		// half-open and the attached dev's flutter attach would hang on
+		// them forever. Drop the dev too so the CLI's recovery loop wakes
+		// up, re-dials, and re-pairs with the device when it returns.
+		this.closeRole("dev", 1001, "device disconnected");
 	}
 
 	private closeRole(role: Role, code: number, reason: string) {
@@ -177,7 +233,8 @@ export class RelaySession implements DurableObject {
 		const m = this.metaOf(ws);
 		const secs = m ? Math.round((Date.now() - m.connectedAt) / 1000) : -1;
 		console.log(
-			`[rhr] ${m?.role ?? "?"} ${how} code=${code} clean=${clean} ` +
+			`[rhr] ${m?.role ?? "?"} ${how} gen=${m?.generation ?? "?"} ` +
+				`code=${code} clean=${clean} ` +
 				`aliveSec=${secs} msgs=${m?.msgs ?? "?"} bytes=${m?.bytes ?? "?"}`,
 		);
 	}
