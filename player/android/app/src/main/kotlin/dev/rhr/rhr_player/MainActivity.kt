@@ -3,7 +3,6 @@ package dev.rhr.rhr_player
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -176,7 +175,15 @@ class MainActivity : FlutterActivity() {
 						main.post { result.success(ok) }
 					}.start()
 				}
-				"listApps" -> result.success(listConnectableApps())
+				"listApps" -> {
+					// Walking every installed package touches the package manager
+					// and, for apps with uncompressed libraries, real disk IO. On
+					// the platform main thread that froze the route push animation.
+					Thread {
+						val apps = listConnectableApps()
+						main.post { result.success(apps) }
+					}.start()
+				}
 				"connectTarget" -> connectTarget(call, result)
 				// The shake-to-open bubble needs "Display over other apps" to
 				// draw above the tester's own app. There is no runtime prompt
@@ -300,20 +307,16 @@ class MainActivity : FlutterActivity() {
 	 */
 	private fun listConnectableApps(): List<Map<String, String>> {
 		val pm = packageManager
-		return pm.getInstalledPackages(PackageManager.GET_META_DATA)
-			.filter { info ->
-				val appInfo = info.applicationInfo
-				appInfo != null && (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0
-			}
+		return pm.getInstalledApplications(0)
+			.filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
 			.filter {
 				it.packageName != packageName && !it.packageName.startsWith("dev.rhr.")
 			}
-			.mapNotNull { info ->
-				val appInfo = info.applicationInfo ?: return@mapNotNull null
+			.mapNotNull { appInfo ->
 				if (!isFlutterApp(appInfo)) return@mapNotNull null
 				val label = appInfo.loadLabel(pm)?.toString() ?: return@mapNotNull null
 				mapOf(
-					"package" to info.packageName,
+					"package" to appInfo.packageName,
 					"label" to label,
 					"debuggable" to
 						((appInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0).toString(),

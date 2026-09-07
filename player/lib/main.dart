@@ -12,18 +12,17 @@
 // guest in place of this lobby.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:developer' show Service;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'connector.dart';
+import 'session_code_field.dart';
 
 const _relayUrl = String.fromEnvironment(
   'RHR_RELAY',
@@ -199,40 +198,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Open the camera, scan the dev's QR ({"relay":..,"code":..}), fill the
-  /// fields, and connect — the Expo Go flow. Falls back gracefully if the QR
-  /// isn't ours.
-  Future<void> _scan() async {
-    final result = await Navigator.of(
-      context,
-    ).push<String>(MaterialPageRoute(builder: (_) => const _ScannerScreen()));
-    if (result == null) return;
-    String code = result;
-    String relay = _relay;
-    var fallbackRelays = _fallbackRelays;
-    // Prefer the structured payload; tolerate a bare code string too.
-    try {
-      final m = jsonDecode(result) as Map<String, dynamic>;
-      final encodedCode = m['code'];
-      if (encodedCode is String) code = encodedCode;
-      final encodedRelays = m['relays'];
-      if (encodedRelays is List) {
-        final parsed = encodedRelays.whereType<String>().toList();
-        if (parsed.isNotEmpty) {
-          relay = parsed.first;
-          fallbackRelays = parsed.skip(1).toList(growable: false);
-        }
-      } else if (m['relay'] case final String encodedRelay) {
-        relay = encodedRelay;
-        fallbackRelays = const [];
-      }
-    } catch (_) {
-      /* bare code */
-    }
+  /// A scan carries its own relay when the dev's QR named one; a typed code
+  /// leaves whatever relay we already had in place.
+  Future<void> _onScanned(SessionCodeEntry entry) async {
     setState(() {
-      _relay = relay;
-      _fallbackRelays = fallbackRelays;
-      _code.text = code;
+      if (entry.relay != null) {
+        _relay = entry.relay!;
+        _fallbackRelays = entry.fallbackRelays;
+      }
     });
     await _connect();
   }
@@ -372,11 +345,12 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                           ),
                         ),
                         const SizedBox(height: 26),
-                        _scanButton(),
-                        const SizedBox(height: 18),
-                        _divider(),
-                        const SizedBox(height: 18),
-                        _codeEntry(),
+                        SessionCodeField(
+                          controller: _code,
+                          actionLabel: 'Connect',
+                          onSubmit: _connect,
+                          onScanned: _onScanned,
+                        ),
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
                         const SizedBox(height: 18),
@@ -499,85 +473,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     width: 8,
     height: 8,
     decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-  );
-
-  Widget _scanButton() => FilledButton.icon(
-    onPressed: _scan,
-    icon: const Icon(Icons.qr_code_scanner_rounded, size: 22),
-    label: const Text('Scan QR to connect'),
-    style: FilledButton.styleFrom(
-      backgroundColor: _violet,
-      foregroundColor: Colors.white,
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      textStyle: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
-    ),
-  );
-
-  Widget _divider() => const Row(
-    children: [
-      Expanded(child: Divider(color: _surfaceHi)),
-      Padding(
-        padding: EdgeInsets.symmetric(horizontal: 12),
-        child: Text(
-          'or enter code',
-          style: TextStyle(color: _inkDim, fontSize: 12.5),
-        ),
-      ),
-      Expanded(child: Divider(color: _surfaceHi)),
-    ],
-  );
-
-  Widget _codeEntry() => Row(
-    children: [
-      Expanded(
-        child: TextField(
-          controller: _code,
-          autocorrect: false,
-          enableSuggestions: false,
-          style: const TextStyle(color: _ink, fontSize: 14),
-          decoration: InputDecoration(
-            hintText: 'rhr-xxxx-xxxx-xxxx',
-            hintStyle: const TextStyle(color: _hintColor),
-            prefixIcon: const Icon(Icons.tag, color: _inkDim, size: 18),
-            filled: true,
-            fillColor: _surface,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 16,
-            ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide.none,
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: _surfaceHi),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: _violet, width: 1.5),
-            ),
-          ),
-        ),
-      ),
-      const SizedBox(width: 10),
-      FilledButton(
-        onPressed: _connect,
-        style: FilledButton.styleFrom(
-          backgroundColor: _violet,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-          ),
-        ),
-        child: const Text(
-          'Connect',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
-      ),
-    ],
   );
 
   /// Live session card: code, status, and next step, plus Disconnect.
@@ -776,61 +671,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           height: 1.4,
           fontFamily: 'monospace',
         ),
-      ),
-    );
-  }
-}
-
-/// Full-screen camera QR scanner. Pops with the raw scanned string (the caller
-/// parses {relay, code}); returns null if the user backs out.
-class _ScannerScreen extends StatefulWidget {
-  const _ScannerScreen();
-
-  @override
-  State<_ScannerScreen> createState() => _ScannerScreenState();
-}
-
-class _ScannerScreenState extends State<_ScannerScreen> {
-  bool _handled = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Scan the dev QR')),
-      body: Stack(
-        alignment: Alignment.center,
-        children: [
-          MobileScanner(
-            onDetect: (capture) {
-              if (_handled) return;
-              final raw = capture.barcodes
-                  .map((b) => b.rawValue)
-                  .firstWhere(
-                    (v) => v != null && v.isNotEmpty,
-                    orElse: () => null,
-                  );
-              if (raw == null) return;
-              _handled = true;
-              Navigator.of(context).pop(raw);
-            },
-          ),
-          // Simple viewfinder.
-          Container(
-            width: 240,
-            height: 240,
-            decoration: BoxDecoration(
-              border: Border.all(color: _violetColor, width: 3),
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-          const Positioned(
-            bottom: 48,
-            child: Text(
-              'Point at the QR in the dev’s terminal',
-              style: TextStyle(color: Colors.white70),
-            ),
-          ),
-        ],
       ),
     );
   }

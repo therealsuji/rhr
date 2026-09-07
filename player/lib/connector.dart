@@ -17,6 +17,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhr_bridge/session_code.dart';
 
+import 'session_code_field.dart';
+
 const _connector = MethodChannel('rhr/connector');
 // The tunnel itself is still the native session service, shared with hosted
 // mode; only target selection is connector-specific.
@@ -92,6 +94,11 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     with WidgetsBindingObserver {
   final _code = TextEditingController();
 
+  /// Relay for the session this screen starts. Seeded from the lobby, but a
+  /// QR scanned here can point at a different one.
+  late String _relay = widget.relay;
+  late List<String> _fallbackRelays = widget.fallbackRelays;
+
   ConnectorStage _stage = ConnectorStage.disconnected;
   List<InstalledApp> _apps = const [];
 
@@ -101,8 +108,19 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   bool _overlayGranted = true;
   String? _message;
   String? _failure;
+
+  /// Complaint about the code itself, rendered against the field. Kept apart
+  /// from `_failure` (pairing, adb, discovery) because those belong to the
+  /// screen, not the input.
+  String? _codeError;
   String? _tunneledLabel;
   bool _busy = false;
+
+  /// True until the first setupState + listApps pair has landed. `_busy` alone
+  /// only spins a dot in the banner, which left the screen blank and looking
+  /// hung while the very first read was in flight; a refresh keeps whatever is
+  /// already on screen instead.
+  bool _loading = true;
 
   @override
   void initState() {
@@ -184,10 +202,12 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         }
       });
       if (connected) await _loadApps();
+      if (mounted) setState(() => _loading = false);
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() {
         _busy = false;
+        _loading = false;
         _failure = 'Could not read the pairing state: ${e.message}';
       });
     }
@@ -254,15 +274,26 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     }
   }
 
-  Future<void> _connectTarget(InstalledApp app) async {
-    final code = _code.text.trim();
-    if (!isValidRhrSessionCode(code)) {
-      setState(
-        () => _failure = "That doesn't look like an rhr code — codes look "
-            'like rhr-xxxx-xxxx-xxxx.',
-      );
-      return;
+  /// True when the field holds a usable code, complaining in place when it
+  /// does not. Checked before discovery rather than after, because discovery
+  /// can take half a minute — long enough that a typo reported at the end
+  /// reads as "my app is broken" rather than "I mistyped".
+  bool _checkCode() {
+    if (isValidRhrSessionCode(_code.text.trim())) {
+      // No banner on success: the cleared error IS the feedback, and a
+      // confirmation rendered below a screen-long app list is never seen.
+      setState(() => _codeError = null);
+      return true;
     }
+    setState(
+      () => _codeError = 'Codes look like rhr-xxxx-xxxx-xxxx.',
+    );
+    return false;
+  }
+
+  Future<void> _connectTarget(InstalledApp app) async {
+    if (!_checkCode()) return;
+    final code = _code.text.trim();
     setState(() {
       _stage = ConnectorStage.working;
       _failure = null;
@@ -271,10 +302,10 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     try {
       await _connector.invokeMethod('connectTarget', {
         'package': app.package,
-        'relay': widget.relay,
+        'relay': _relay,
         // Same fallback ordering hosted mode uses, so a scanned QR that
         // carries several relays behaves identically in either mode.
-        'relayUrls': [widget.relay, ...widget.fallbackRelays],
+        'relayUrls': [_relay, ..._fallbackRelays],
         'code': code,
       });
       if (!mounted) return;
@@ -321,10 +352,13 @@ class _ConnectorScreenState extends State<ConnectorScreen>
           children: [
             _stageBanner(),
             const SizedBox(height: 16),
-            if (_stage == ConnectorStage.unpaired) _pairingCard(),
-            if (_stage == ConnectorStage.disconnected) _reconnectCard(),
-            if (_stage == ConnectorStage.ready ||
-                _stage == ConnectorStage.working) ...[
+            if (_loading) _loadingCard(),
+            if (!_loading && _stage == ConnectorStage.unpaired) _pairingCard(),
+            if (!_loading && _stage == ConnectorStage.disconnected)
+              _reconnectCard(),
+            if (!_loading &&
+                (_stage == ConnectorStage.ready ||
+                    _stage == ConnectorStage.working)) ...[
               _codeField(),
               if (!_overlayGranted) ...[
                 const SizedBox(height: 16),
@@ -365,6 +399,29 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     );
   }
 
+  /// Placeholder for the first read. Reading the installed app list walks
+  /// every package on the phone, so on a busy device this is a real wait —
+  /// showing rows that are obviously not yet filled beats an empty screen.
+  Widget _loadingCard() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const Text(
+        'Reading installed apps…',
+        style: TextStyle(color: _inkDim, fontSize: 13),
+      ),
+      const SizedBox(height: 12),
+      for (var i = 0; i < 3; i++)
+        Container(
+          height: 64,
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            color: _surface,
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+    ],
+  );
+
   /// One honest line about what is actually true right now.
   Widget _stageBanner() {
     final (label, color) = switch (_stage) {
@@ -377,18 +434,21 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         _ok,
       ),
     };
+    final (bannerLabel, bannerColor) = _loading
+        ? ('Checking this phone…', _warn)
+        : (label, color);
     return Row(
       children: [
         Container(
           width: 8,
           height: 8,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          decoration: BoxDecoration(color: bannerColor, shape: BoxShape.circle),
         ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
-            label,
-            style: TextStyle(color: color, fontSize: 13),
+            bannerLabel,
+            style: TextStyle(color: bannerColor, fontSize: 13),
           ),
         ),
         if (_busy)
@@ -482,21 +542,26 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     ),
   );
 
-  Widget _codeField() => TextField(
+  /// Same entry widget the lobby uses, so a scanned QR works here too.
+  ///
+  /// Picking a target below is what actually starts a session, so the action
+  /// here only checks the code — worth its own button because the alternative
+  /// is learning about a typo after thirty seconds of discovery.
+  Widget _codeField() => SessionCodeField(
     controller: _code,
-    style: const TextStyle(color: _ink),
-    decoration: InputDecoration(
-      labelText: 'Session code',
-      hintText: 'rhr-xxxx-xxxx-xxxx',
-      labelStyle: const TextStyle(color: _inkDim),
-      hintStyle: const TextStyle(color: _hintFaded),
-      filled: true,
-      fillColor: _surface,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide.none,
-      ),
-    ),
+    actionLabel: 'Check',
+    onSubmit: _checkCode,
+    onScanned: (entry) {
+      setState(() {
+        _codeError = null;
+        if (entry.relay != null) {
+          _relay = entry.relay!;
+          _fallbackRelays = entry.fallbackRelays;
+        }
+      });
+    },
+    enabled: _stage == ConnectorStage.ready,
+    errorText: _codeError,
   );
 
   Widget _targetList() {
@@ -604,5 +669,3 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     ),
   );
 }
-
-const _hintFaded = Color(0xFF5A4E80);
