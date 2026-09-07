@@ -326,4 +326,65 @@ void main() {
     },
     timeout: const Timeout(Duration(seconds: 240)),
   );
+
+  test(
+    'connector mode: a third-party target tunnels without an identity gate',
+    () async {
+      // The player announces host "connector" when it is tunneling an app it
+      // does not host. That app contains no rhr code, so the hello carries no
+      // identity — gating on one would compare the developer against the
+      // WRONG app's Flutter version and offer a player update that could not
+      // possibly fix it. This test pins that the CLI accepts such a hello.
+      final code = 'conn-${DateTime.now().millisecondsSinceEpoch}';
+      final cliLines = <String>[];
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--no-direct',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      addTearDown(() => cli.kill());
+
+      await _waitFor(cliLines, RegExp('connected to relay'), 'cli connected');
+
+      final deviceLines = <String>[];
+      final device = await _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+          '--connector',
+        ],
+        workDir: '$_repo/bridge',
+        lines: deviceLines,
+      );
+      addTearDown(() => device.kill());
+
+      await _waitFor(
+        cliLines,
+        RegExp('device VM service:'),
+        'cli accepted the connector hello',
+      );
+      await _waitFor(
+        cliLines,
+        RegExp('tunneled VM service:'),
+        'cli exposed the tunneled VM URI',
+      );
+      expect(
+        cliLines.any((l) => l.contains('COMPATIBILITY_BLOCKED')),
+        isFalse,
+        reason: 'a connector target has no identity to gate on',
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 240)),
+  );
 }

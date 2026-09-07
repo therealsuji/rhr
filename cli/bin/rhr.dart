@@ -609,15 +609,16 @@ Future<int?> _runSession({
           final hostKind =
               announcedHost is String ? announcedHost : 'player';
           if (hostKind == 'connector') {
-            // M3: the connector tunnels a THIRD-party app's VM service —
-            // the target contains no rhr code, so there is no identity to
-            // gate on and no player to update. The dev pushes its own
-            // kernel, making the SDK question moot.
+            // Connector mode tunnels a THIRD-party app's VM service — the
+            // target contains no rhr code, so there is no identity to gate on
+            // and no player to update. The dev pushes its own kernel, making
+            // the SDK question moot. Announced by the player when it is
+            // tunneling an installed app rather than hosting a guest project.
             final connectorVm = m['vm'];
             if (connectorVm is! String || connectorVm.isEmpty) {
               stderr.writeln(
-                  '[rhr] connector announced no VM service — is the target '
-                  'app a debug build?');
+                  '[rhr] the target app announced no VM service — is it a '
+                  'debug build?');
               exit(78);
             }
             assetStoreId =
