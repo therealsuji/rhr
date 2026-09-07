@@ -59,6 +59,40 @@ interface ConnMeta {
 /** DO storage key holding the newest generation handed out for a role. */
 const generationKey = (role: Role) => `gen:${role}`;
 
+// How long a dev's claim on a phone outlives its socket. Long enough that the
+// CLI's own recovery loop (which backs off for seconds) reconnects into the
+// claim it already held, short enough that a laptop that crashed or walked out
+// of the building gives the phone back without anyone intervening.
+//
+// A claim is only consulted while it is unexpired AND its holder is absent: a
+// live socket holds the phone on its own, so these seconds only matter across
+// a disconnect.
+const CLAIM_GRACE_MS = 45_000;
+
+/**
+ * Who currently holds the device, across disconnects.
+ *
+ * Without this a second developer's connect silently evicts the first, which
+ * on a phone that several people share means whoever typed most recently wins
+ * and the tester watching the screen is not consulted.
+ */
+interface Claim {
+	/** Opaque per-invocation id: identity for resuming across a reconnect. */
+	claimId: string;
+	generation: number;
+	/** When the grace period ends. Only meaningful while the holder is away. */
+	expiresAt: number;
+}
+
+const CLAIM_KEY = "claim";
+
+/**
+ * A dev announces the claim it is resuming with this header. The granted claim
+ * comes back as a control frame instead: neither Dart WebSocket client exposes
+ * the upgrade response, and a frame rides the channel that already exists.
+ */
+const CLAIM_HEADER = "x-rhr-claim";
+
 export class RelaySession implements DurableObject {
 	constructor(private ctx: DurableObjectState) {}
 
@@ -78,6 +112,28 @@ export class RelaySession implements DurableObject {
 			dev: this.ctx.getWebSockets("dev").length,
 			device: this.ctx.getWebSockets("device").length,
 		};
+
+		// A dev asks to hold the phone; a device reconnecting is the same phone
+		// coming back, so it keeps the old replace-on-connect behaviour.
+		let claim: Claim | null = null;
+		if (role === "dev") {
+			const decision = await this.admitDev(
+				request.headers.get(CLAIM_HEADER),
+				before.dev > 0,
+			);
+			if (decision.refused) {
+				console.log(`[rhr] dev REFUSED ${decision.reason}`);
+				// 409 rather than a close code: the CLI learns why before it has a
+				// socket to be closed on, so it can say "busy" instead of retrying
+				// into a fight for a phone someone else is holding.
+				return new Response(decision.reason, {
+					status: 409,
+					headers: { "content-type": "text/plain" },
+				});
+			}
+			claim = decision.claim;
+		}
+
 		// One connection per role: kick the previous holder. The evicted socket
 		// stays alive until its own close event arrives, so it must not be able
 		// to act on the session from here on — hence the generation.
@@ -88,6 +144,9 @@ export class RelaySession implements DurableObject {
 		const generation =
 			((await this.ctx.storage.get<number>(generationKey(role))) ?? 0) + 1;
 		await this.ctx.storage.put(generationKey(role), generation);
+		if (claim) {
+			await this.ctx.storage.put(CLAIM_KEY, { ...claim, generation });
+		}
 
 		const pair = new WebSocketPair();
 		const meta: ConnMeta = {
@@ -125,7 +184,61 @@ export class RelaySession implements DurableObject {
 				console.log("[rhr] dev replayed cached info");
 			}
 		}
+		if (claim) {
+			// The dev needs its claim id to resume this same claim after a drop
+			// rather than arrive as a stranger and be told the phone is busy.
+			pair[1].send(JSON.stringify({ t: "claim", id: claim.claimId }));
+		}
 		return new Response(null, { status: 101, webSocket: pair[0] });
+	}
+
+	/**
+	 * Decides whether a connecting dev may hold this phone.
+	 *
+	 * Three cases, in order:
+	 *
+	 *   - Nobody holds it, or the last holder's grace ran out: admit, new claim.
+	 *   - The caller names the claim that is still standing: admit, same claim.
+	 *     This is the CLI's own recovery loop coming back after a drop, which is
+	 *     routine, so it must resume rather than be told its own phone is busy.
+	 *   - Anyone else while the holder is live or still inside its grace: refuse.
+	 *
+	 * `holderLive` decides whether the grace period even applies: a connected
+	 * holder owns the phone outright, and the clock only matters once it is
+	 * gone.
+	 */
+	private async admitDev(
+		offeredClaimId: string | null,
+		holderLive: boolean,
+	): Promise<
+		{ refused: false; claim: Claim } | { refused: true; reason: string }
+	> {
+		const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
+		const now = Date.now();
+
+		if (held && offeredClaimId === held.claimId) {
+			return {
+				refused: false,
+				claim: { ...held, expiresAt: now + CLAIM_GRACE_MS },
+			};
+		}
+		if (held && (holderLive || now < held.expiresAt)) {
+			const seconds = Math.max(0, Math.round((held.expiresAt - now) / 1000));
+			return {
+				refused: true,
+				reason: holderLive
+					? "busy: another developer is connected to this device"
+					: `busy: another developer holds this device for ${seconds}s more`,
+			};
+		}
+		return {
+			refused: false,
+			claim: {
+				claimId: crypto.randomUUID(),
+				generation: 0,
+				expiresAt: now + CLAIM_GRACE_MS,
+			},
+		};
 	}
 
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
@@ -183,12 +296,45 @@ export class RelaySession implements DurableObject {
 		clean: boolean,
 	) {
 		this.logDrop(ws, "close", code, clean);
-		await this.onDeviceGone(ws);
+		await this.onSocketGone(ws);
 	}
 
 	async webSocketError(ws: WebSocket, _error: unknown) {
 		this.logDrop(ws, "error", -1, false);
+		await this.onSocketGone(ws);
+	}
+
+	private async onSocketGone(ws: WebSocket) {
+		if (this.roleOf(ws) === "dev") {
+			await this.onDevGone(ws);
+			return;
+		}
 		await this.onDeviceGone(ws);
+	}
+
+	/**
+	 * Starts the grace clock when the holding dev's socket ends.
+	 *
+	 * The claim outlives the socket so the CLI's recovery loop reconnects into
+	 * what it already held. A dev that never comes back simply lets the clock
+	 * run out, which is what stops a crashed laptop from holding a phone that
+	 * someone else is standing in front of.
+	 */
+	private async onDevGone(ws: WebSocket) {
+		const generation = this.metaOf(ws)?.generation ?? 0;
+		const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
+		if (!held || held.generation !== generation) {
+			console.log(
+				`[rhr] ignoring stale dev close gen=${generation} ` +
+					`claimGen=${held?.generation ?? "none"}`,
+			);
+			return;
+		}
+		const expiresAt = Date.now() + CLAIM_GRACE_MS;
+		await this.ctx.storage.put(CLAIM_KEY, { ...held, expiresAt });
+		console.log(
+			`[rhr] dev gone; claim held ${CLAIM_GRACE_MS / 1000}s for reconnect`,
+		);
 	}
 
 	/**
@@ -212,6 +358,11 @@ export class RelaySession implements DurableObject {
 			return;
 		}
 		await this.ctx.storage.delete("deviceInfo");
+		// Holding a phone that is gone helps nobody: the claim exists to stop
+		// developers stealing a phone from each other, and there is no phone to
+		// steal. Releasing here also means a tester who walks away and comes
+		// back is not locked out by whoever held it last.
+		await this.ctx.storage.delete(CLAIM_KEY);
 		// The session is dead without a device: its tunnel channels are
 		// half-open and the attached dev's flutter attach would hang on
 		// them forever. Drop the dev too so the CLI's recovery loop wakes

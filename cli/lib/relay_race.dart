@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
@@ -22,6 +23,19 @@ abstract interface class SessionTransport {
   Future<void> close();
 }
 
+/// Thrown when the relay refuses because another developer holds the device.
+///
+/// Distinct from an ordinary connect failure: retrying will not help until the
+/// holder disconnects, so the CLI reports it instead of looping.
+final class DeviceBusyException implements Exception {
+  const DeviceBusyException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Connects the dev end to several relay candidates and selects the first one
 /// that produces a device `info` message.
 ///
@@ -31,6 +45,17 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   RelayRace._();
 
   static const _hello = '{"t":"hello"}';
+
+  /// Header naming the claim being resumed, and carrying the granted one back.
+  static const _claimHeader = 'x-rhr-claim';
+
+  /// The claim this invocation holds. Sent on every re-dial so the relay knows
+  /// a reconnect is the incumbent returning rather than a rival arriving.
+  static String? _claimId;
+
+  /// The claim id the relay granted, for a caller that reconnects through a
+  /// fresh RelayRace.
+  static String? get claimId => _claimId;
 
   final _events = StreamController<Object>();
   final _selected = Completer<String>();
@@ -55,10 +80,16 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   }) async {
     final race = RelayRace._();
     final uniqueRelays = relays.toSet();
+    final refusals = <String>[];
     await Future.wait(
-      uniqueRelays.map((relay) => race._connectCandidate(relay, code)),
+      uniqueRelays.map(
+        (relay) => race._connectCandidate(relay, code, refusals),
+      ),
     );
     if (race._candidates.isEmpty) {
+      // A refusal is a definite answer — someone else has the phone — where a
+      // plain connect failure is not, so it is worth reporting as itself.
+      if (refusals.isNotEmpty) throw DeviceBusyException(refusals.first);
       throw StateError('could not connect to any relay candidate');
     }
     for (final candidate in race._candidates) {
@@ -67,17 +98,31 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     return race;
   }
 
-  Future<void> _connectCandidate(String relay, String code) async {
-    final channel = IOWebSocketChannel.connect(
-      '$relay/s/$code/dev',
-      pingInterval: const Duration(seconds: 20),
-    );
+  Future<void> _connectCandidate(
+    String relay,
+    String code,
+    List<String> refusals,
+  ) async {
+    final claim = _claimId;
+    // dart:io's WebSocket rather than IOWebSocketChannel.connect: a refused
+    // claim comes back as an HTTP 409, and only this surfaces the status
+    // instead of a bare "connection failed".
+    WebSocket? socket;
     try {
-      await channel.ready.timeout(const Duration(seconds: 8));
-    } catch (_) {
-      await channel.sink.close();
+      socket = await WebSocket.connect(
+        '$relay/s/$code/dev',
+        headers: claim == null ? null : {_claimHeader: claim},
+      ).timeout(const Duration(seconds: 8));
+    } catch (e) {
+      // The relay refuses a claim someone else holds with 409; anything else
+      // is an ordinary unreachable-relay failure and stays silent, because a
+      // race across several candidates expects some of them to fail.
+      final text = '$e';
+      if (text.contains('409')) refusals.add(_busyReason(text));
       return;
     }
+    socket.pingInterval = const Duration(seconds: 20);
+    final channel = IOWebSocketChannel(socket);
     if (_closed || _winner != null) {
       await channel.sink.close();
       return;
@@ -91,7 +136,37 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     );
   }
 
+  /// Reads the claim id out of the relay's `{"t":"claim","id":..}` frame.
+  static String? _readClaim(String message) {
+    try {
+      final decoded = jsonDecode(message);
+      if (decoded is! Map<String, dynamic>) return null;
+      if (decoded['t'] != 'claim') return null;
+      final id = decoded['id'];
+      return id is String ? id : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// The relay's own words where they survive, otherwise a plain sentence.
+  ///
+  /// dart:io reports the refusal as "not upgraded to websocket, HTTP status
+  /// code: 409" and drops the response body, so the relay's specific reason is
+  /// usually gone by the time it reaches here.
+  static String _busyReason(String raw) {
+    final marker = raw.indexOf('busy:');
+    return marker == -1
+        ? 'this device is in use by another developer'
+        : raw.substring(marker);
+  }
+
   void _onMessage(_RelayCandidate candidate, Object message) {
+    if (message is String && message.contains('"claim"')) {
+      final granted = _readClaim(message);
+      if (granted != null) _claimId = granted;
+      return;
+    }
     if (_winner == null) {
       if (!_isDeviceInfo(message)) return;
       _winner = candidate;

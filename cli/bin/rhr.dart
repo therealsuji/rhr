@@ -92,6 +92,10 @@ flags override the file.
 // correct the code and start a fresh attach instead.
 const _noDeviceExitCode = 75;
 const _directFailureExitCode = 69;
+// The device is reachable but another developer is holding it. Distinct from
+// "no device joined" so a caller can tell "wait, or pick another phone" apart
+// from "check the code".
+const _deviceBusyExitCode = 76;
 
 Future<void> main(List<String> args) async {
   if (args.length == 1 &&
@@ -417,6 +421,12 @@ Future<void> main(List<String> args) async {
     } on DirectTransportFailure catch (failure) {
       stderr.writeln('[rhr] direct connection failed: $failure');
       exit(_directFailureExitCode);
+    } on DeviceBusyException catch (busy) {
+      // Reconnecting cannot win a device someone else is holding; it would
+      // only spin until they leave. Report and quit so the operator can pick
+      // another device or wait deliberately.
+      stderr.writeln('[rhr] $busy');
+      exit(_deviceBusyExitCode);
     } on Exception catch (e) {
       failures++;
       stderr.writeln('[rhr] session error: $e');
@@ -549,6 +559,12 @@ Future<int?> _runSession({
   late final RelayRace relayTransport;
   try {
     relayTransport = await RelayRace.connect(relays: relays, code: code);
+  } on DeviceBusyException catch (e) {
+    // Someone else is on this device. Retrying would only fight them for it,
+    // so say who has it and stop — the caller must not treat this as a
+    // transient relay failure.
+    stderr.writeln('[rhr] $e');
+    rethrow;
   } catch (e) {
     stderr.writeln('[rhr] could not connect to any relay for code "$code": $e');
     return null;
@@ -1241,6 +1257,12 @@ Future<int> _runAttachProductFlow({
       } on DirectTransportFailure catch (failure) {
         stderr.writeln('[rhr] direct connection failed: $failure');
         return _directFailureExitCode;
+      } on DeviceBusyException catch (busy) {
+        // Reconnecting cannot win a device someone else is holding; it would
+        // only spin until they leave. Report and quit so the operator can pick
+        // another device or wait deliberately.
+        stderr.writeln('[rhr] $busy');
+        return _deviceBusyExitCode;
       } on Exception catch (error) {
         failures++;
         stderr.writeln('[rhr] session error: $error');
