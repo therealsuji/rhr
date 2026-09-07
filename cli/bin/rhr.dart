@@ -410,8 +410,18 @@ Future<void> main(List<String> args) async {
       );
       // Clean flutter exit (user pressed q) => done. A nonzero exit is a
       // failed attach (e.g. the flaky first-connect DDS race) => reconnect.
-      if (result == 0) exit(0);
-      if (result == _noDeviceExitCode) exit(result!);
+      if (result == 0) {
+        // Leaving on purpose gives the device back now rather than holding it
+        // for the rest of a grace period meant for a CLI that crashed. Only on
+        // a deliberate exit: a dropped relay must keep the claim so the
+        // recovery loop resumes it.
+        RelayRace.releaseClaim(code);
+        exit(0);
+      }
+      if (result == _noDeviceExitCode) {
+        RelayRace.releaseClaim(code);
+        exit(result!);
+      }
       if (result != null) {
         failures++;
         stderr.writeln('[rhr] flutter attach exited ($result)');
@@ -959,6 +969,11 @@ Future<int?> _runSession({
       return null; // reconnect
     }
   }
+  // Flutter ended on its own and the relay is still up, so this is a person
+  // quitting rather than a connection failing: hand the device back now
+  // instead of making the next developer wait out a grace period meant for a
+  // CLI that crashed.
+  relayTransport.release();
   await cleanup();
   final failure = directFailure;
   if (failure != null) throw failure;

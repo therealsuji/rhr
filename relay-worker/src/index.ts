@@ -263,6 +263,16 @@ export class RelaySession implements DurableObject {
 			meta.msgs++;
 			meta.bytes += messageBytes;
 		}
+		// A dev leaving on purpose hands the device back now rather than making
+		// the next person wait out a grace period meant for crashes.
+		if (role === "dev" && message.includes('"release"')) {
+			const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
+			if (held && held.generation === meta?.generation) {
+				await this.ctx.storage.delete(CLAIM_KEY);
+				console.log("[rhr] dev released its claim");
+			}
+			return;
+		}
 		// Cache ONLY the device's info announcement for late-dev replay. Pings
 		// and other control text must NOT overwrite it (they used to, clobbering
 		// the cached VM URI with "{"t":"ping"}").

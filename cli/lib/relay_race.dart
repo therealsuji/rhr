@@ -42,20 +42,42 @@ final class DeviceBusyException implements Exception {
 /// It forwards messages only from the candidate that first announces device
 /// info and closes the remaining candidates once that winner is selected.
 final class RelayRace implements RelayControlTransport, SessionTransport {
-  RelayRace._();
+  RelayRace._(this._code);
+
+  /// The session this race is for, so a granted claim is filed under it.
+  final String _code;
 
   static const _hello = '{"t":"hello"}';
 
   /// Header naming the claim being resumed, and carrying the granted one back.
   static const _claimHeader = 'x-rhr-claim';
 
-  /// The claim this invocation holds. Sent on every re-dial so the relay knows
-  /// a reconnect is the incumbent returning rather than a rival arriving.
-  static String? _claimId;
+  /// Claims this process holds, by session code.
+  ///
+  /// Static because a reconnect builds a fresh RelayRace: the recovery loop
+  /// must re-dial as the incumbent rather than as a stranger asking for a
+  /// phone it already has. Keyed by code so attaching to a different session
+  /// never offers another session's claim, which the relay would refuse.
+  static final _claims = <String, String>{};
 
-  /// The claim id the relay granted, for a caller that reconnects through a
-  /// fresh RelayRace.
-  static String? get claimId => _claimId;
+  /// Forgets the claim for [code], so the next connect asks for a new one.
+  ///
+  /// Local bookkeeping only: [release] is what tells the relay to hand the
+  /// device back before the grace period runs out.
+  static void releaseClaim(String code) => _claims.remove(code);
+
+  /// Tells the relay this session is over on purpose, so the next developer
+  /// takes the device immediately instead of waiting out a grace period meant
+  /// for a CLI that crashed.
+  void release() {
+    _claims.remove(_code);
+    if (_closed) return;
+    try {
+      sendControl('{"t":"release"}');
+    } catch (_) {
+      // A socket already gone releases the claim by its own timeout.
+    }
+  }
 
   final _events = StreamController<Object>();
   final _selected = Completer<String>();
@@ -78,7 +100,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     required List<String> relays,
     required String code,
   }) async {
-    final race = RelayRace._();
+    final race = RelayRace._(code);
     final uniqueRelays = relays.toSet();
     final refusals = <String>[];
     await Future.wait(
@@ -103,7 +125,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     String code,
     List<String> refusals,
   ) async {
-    final claim = _claimId;
+    final claim = _claims[code];
     // dart:io's WebSocket rather than IOWebSocketChannel.connect: a refused
     // claim comes back as an HTTP 409, and only this surfaces the status
     // instead of a bare "connection failed".
@@ -164,7 +186,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   void _onMessage(_RelayCandidate candidate, Object message) {
     if (message is String && message.contains('"claim"')) {
       final granted = _readClaim(message);
-      if (granted != null) _claimId = granted;
+      if (granted != null) _claims[_code] = granted;
       return;
     }
     if (_winner == null) {
