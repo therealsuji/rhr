@@ -11,11 +11,17 @@ import android.content.Intent
  * own log — shell can read it for ANY app.
  *
  * Launch discipline (the old loop killed the target every ~2s):
- *   - `logcat -G` clears the buffer, so a RUNNING app's startup line is
- *     usually unrecoverable → restart it ONCE for a fresh line.
+ *   - A RUNNING app's startup line may have rotated out of the buffer →
+ *     look once, then restart it ONCE for a fresh line.
  *   - After that, never force-stop on a timing hunch: the engine prints
  *     the door line when it's ready — poll the buffer for it until the
  *     deadline, relaunching only if the process actually died.
+ *
+ * Only Flutter-tagged lines are read. A full `logcat -d` on a busy phone
+ * ran to 16 MB (`logcat -G 16M` resizes but does not clear on Android 16),
+ * took 16 s to stream through the embedded client, and used up the whole
+ * discovery budget on one poll that then failed. The door line is tagged
+ * `flutter`, so `-s flutter:I` is all discovery needs.
  */
 object ShellVm {
 	private const val TAG = "rhr_adb"
@@ -38,11 +44,6 @@ object ShellVm {
 		onProgress: (String) -> Unit = {},
 	): String? {
 		try {
-			onProgress("enlarging the log buffer")
-			// NOTE: changing the buffer size CLEARS it — any VM line the
-			// running app already printed is gone after this.
-			shell(ctx, "logcat -G 16M")
-
 			fun pidOf(): Int? = shell(ctx, "pidof $pkg")
 				.split(Regex("\\s+"))
 				.firstOrNull { it.isNotBlank() }?.toIntOrNull()
@@ -50,10 +51,10 @@ object ShellVm {
 			fun vmLine(pid: Int): String? {
 				// `--pid=` returns NOTHING through this embedded adb client
 				// (it works over a desktop `adb shell`), so filter the pid out
-				// of the plain dump ourselves. The pid appears as "( 1234)" in
-				// brief format; matching it keeps another app's VM line from
+				// of the dump ourselves. The pid appears as "( 1234)" in brief
+				// format; matching it keeps another Flutter app's VM line from
 				// being mistaken for the target's.
-				val out = shell(ctx, "logcat -d -v brief")
+				val out = shell(ctx, "logcat -d -v brief -s flutter:I")
 				val pidMark = Regex("\\(\\s*$pid\\)")
 				val line = out.lineSequence().lastOrNull {
 					pidMark.containsMatchIn(it) && vmLineRegex.containsMatchIn(it)
@@ -85,8 +86,8 @@ object ShellVm {
 			var pid = pidOf()
 
 			if (pid != null) {
-				// Already running — one look in case the line survived the
-				// buffer wipe; otherwise restart ONCE for a fresh print.
+				// Already running — one look in case the line is still in
+				// the buffer; otherwise restart ONCE for a fresh print.
 				vmLine(pid)?.let {
 					onProgress("VM door found")
 					return it
