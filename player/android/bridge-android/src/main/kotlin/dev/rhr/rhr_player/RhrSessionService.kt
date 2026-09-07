@@ -61,6 +61,20 @@ class RhrSessionService : Service() {
 		// developer" and clear any progress that belonged to their connection.
 		private const val DEV_LEASE_MS = 45_000L
 
+		// How long the direct tunnel may outlive the developer that opened it.
+		//
+		// Payload rides WebRTC, never the relay, so once a session is up the
+		// relay is not in the data path and cannot end it: a relay outage, or a
+		// phone that loses its control socket while the peer connection holds,
+		// leaves VM access — arbitrary code execution in the app — open with
+		// nobody watching. Only this side can close it, so this deadline is the
+		// enforcement rather than a backstop.
+		//
+		// Longer than DEV_LEASE_MS: presence expiring is routine (a laptop
+		// sleeps, Wi-Fi moves) and the developer usually returns to the same
+		// tunnel. This is the outer bound on that patience.
+		private const val DIRECT_AUTHORIZATION_MS = 120_000L
+
 		// The running service instance, so the dev-menu fault injector can reach
 		// instance state (the live WebSocket) from a static context.
 		@Volatile var current: RhrSessionService? = null
@@ -296,7 +310,13 @@ class RhrSessionService : Service() {
 					stopped.set(false)
 					sweepOrphanedDevfsDirs()
 					if (watchOwnVm) watchForDevfsDirs()
-					if (watchOwnVm) startVmUriWatch() else startPresenceWatch()
+					// The VM watcher tracks OUR own service URI across guest hot
+					// restarts; the presence watcher tracks the developer and
+					// enforces the tunnel deadline. Different jobs, and hosted
+					// mode needs both — it used to run only the first, so a
+					// hosted session's tunnel outlived its developer unchecked.
+					if (watchOwnVm) startVmUriWatch()
+					startPresenceWatch()
 					startReconnectLoop(sessionGeneration)
 				}
 				onUpdate?.invoke()
@@ -735,11 +755,24 @@ class RhrSessionService : Service() {
 		presenceWatchThread = Thread {
 			while (!stopped.get()) {
 				try {
-					if (status == "connected" &&
-						System.currentTimeMillis() - lastDevActivity > DEV_LEASE_MS) {
+					val sinceDev = System.currentTimeMillis() - lastDevActivity
+					if (status == "connected" && sinceDev > DEV_LEASE_MS) {
 						Log.i(TAG, "[$sessionCode] developer lease expired — waiting for developer")
 						status = "waiting_dev"
 						setProgress("", 0, 0)
+					}
+					// Presence expiring only changes what the screen says; the
+					// tunnel itself stays open so a developer who steps away can
+					// pick up where they left off. Past this outer deadline that
+					// patience becomes a hole: nobody is watching, and the relay
+					// cannot close a WebRTC channel it was never part of.
+					if (directTransport != null && sinceDev > DIRECT_AUTHORIZATION_MS) {
+						Log.w(
+							TAG,
+							"[$sessionCode] no developer for ${sinceDev / 1000}s — " +
+								"closing the direct tunnel",
+						)
+						closeDirectForExpiry()
 					}
 					// A phase that stays on "restarting"/"awaiting_restart" with
 					// no VM change is a stalled restart, not slow progress — the
@@ -759,6 +792,22 @@ class RhrSessionService : Service() {
 				}
 			}
 		}.also { it.isDaemon = true; it.start() }
+	}
+
+	/**
+	 * Ends VM access when no developer has been heard from for too long.
+	 *
+	 * Closing the peer connection is what actually revokes access: the tunnel
+	 * carries the VM service, and the VM service is arbitrary code execution
+	 * inside the app. The relay socket is left alone on purpose — the session
+	 * is still valid and the developer may come back, at which point their
+	 * hello starts a fresh offer and a new tunnel.
+	 */
+	private fun closeDirectForExpiry() {
+		directTransport?.close()
+		directTransport = null
+		setProgress("", 0, 0)
+		if (status == "connected") status = "waiting_dev"
 	}
 
 	// ---- tunnel frames ----------------------------------------------------
