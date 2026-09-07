@@ -1,4 +1,4 @@
-package dev.rhr.rhr_connector
+package dev.rhr.adb
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -38,7 +38,14 @@ import java.util.concurrent.TimeUnit
  * All functions block and must be called OFF the main thread.
  */
 object AdbConnection {
-	const val TAG = "rhr_connector"
+	const val TAG = "rhr_adb"
+	// Both names are ON-DISK/ON-DEVICE identities, not cosmetics. KEY_NAME is
+	// the label baked into the RSA key that adbd already trusts, and PREFS is
+	// the SharedPreferences file holding it. Renaming either orphans an
+	// existing pairing and silently forces the user to pair again, so they
+	// keep the connector's original values even though this code is now
+	// shared. Note the key is per-app private storage: the player pairs
+	// separately from the connector and cannot inherit its trust.
 	private const val KEY_NAME = "rhr_connector"
 	private const val PREFS = "rhr_adb"
 	private const val PAIRING_SERVICE = "_adb-tls-pairing._tcp."

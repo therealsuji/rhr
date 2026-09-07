@@ -1,4 +1,4 @@
-package dev.rhr.rhr_connector
+package dev.rhr.adb
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -52,7 +52,7 @@ class PairingNotificationService : Service() {
 		private const val CHANNEL_ID = "rhr_pairing"
 		private const val NOTIF_ID = 7413
 		private const val KEY_CODE = "pairing_code"
-		private const val ACTION_SUBMIT_CODE = "dev.rhr.rhr_connector.SUBMIT_PAIRING_CODE"
+		private const val ACTION_SUBMIT_CODE = "dev.rhr.adb.SUBMIT_PAIRING_CODE"
 
 		/** Set by MainActivity; delivers the final result to Flutter. */
 		@Volatile

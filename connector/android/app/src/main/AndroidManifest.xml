@@ -47,8 +47,10 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Fully qualified: the pairing flow now lives in the shared
+             adb-android module, not in this app's own package. -->
         <service
-            android:name=".PairingNotificationService"
+            android:name="dev.rhr.adb.PairingNotificationService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

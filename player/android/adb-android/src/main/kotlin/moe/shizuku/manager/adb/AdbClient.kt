@@ -104,8 +104,14 @@ class AdbClient(private val host: String, private val port: Int, private val key
                 }
             }
             A_CLSE -> {
+                // adbd refused to open the stream (it closed instead of
+                // ACKing). Returning quietly here makes the command look like
+                // it succeeded with empty output, which is indistinguishable
+                // from a genuinely silent command — the failure then surfaces
+                // far away as "no VM service found". Say so instead.
                 val remoteId = message.arg0
                 write(A_CLSE, localId, remoteId)
+                throw AdbException("adbd refused the shell stream for: $command")
             }
             else -> {
                 error("not A_OKAY or A_CLSE")

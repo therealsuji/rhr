@@ -1,9 +1,8 @@
-package dev.rhr.rhr_connector
+package dev.rhr.adb
 
 import android.content.Context
 import android.util.Log
 import android.content.Intent
-import dev.rhr.rhr_connector.AdbConnection
 
 /**
  * Finds the target app's Dart VM service door using the embedded ADB
@@ -19,7 +18,7 @@ import dev.rhr.rhr_connector.AdbConnection
  *     deadline, relaunching only if the process actually died.
  */
 object ShellVm {
-	private const val TAG = "rhr_connector"
+	private const val TAG = "rhr_adb"
 	private val vmLineRegex =
 		Regex("Dart VM [Ss]ervice.*?(http://127\\.0\\.0\\.1:\\d+/\\S+/)")
 
@@ -48,9 +47,30 @@ object ShellVm {
 				.split(Regex("\\s+"))
 				.firstOrNull { it.isNotBlank() }?.toIntOrNull()
 
-			fun vmLine(pid: Int): String? =
-				vmLineRegex.find(shell(ctx, "logcat -d -v brief --pid=$pid"))
-					?.groupValues?.get(1)
+			fun vmLine(pid: Int): String? {
+				// `--pid=` returns NOTHING through this embedded adb client
+				// (it works over a desktop `adb shell`), so filter the pid out
+				// of the plain dump ourselves. The pid appears as "( 1234)" in
+				// brief format; matching it keeps another app's VM line from
+				// being mistaken for the target's.
+				val out = shell(ctx, "logcat -d -v brief")
+				val pidMark = Regex("\\(\\s*$pid\\)")
+				val line = out.lineSequence().lastOrNull {
+					pidMark.containsMatchIn(it) && vmLineRegex.containsMatchIn(it)
+				}
+				val hit = line?.let { vmLineRegex.find(it)?.groupValues?.get(1) }
+				if (hit == null) {
+					// Empty output here means the shell stream itself failed,
+					// not that the target is quiet — worth distinguishing when
+					// discovery times out.
+					Log.d(
+						TAG,
+						"vmLine pid=$pid: ${out.length} chars, " +
+							"pidLines=${out.lineSequence().count { pidMark.containsMatchIn(it) }}",
+					)
+				}
+				return hit
+			}
 
 			fun waitPid(pkg: String, ctx: Context, onProgress: (String) -> Unit): Int? {
 				val launchDeadline = System.currentTimeMillis() + 15_000
