@@ -69,7 +69,7 @@ player build options:
   --template <dir>      rhr player template (defaults to this repository/player)
 
 attach options:
-  --relay <wss://...>   relay URL (or set `relay:` in .rhr.yaml)
+  --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      session code, 16+ chars (or `code:` in .rhr.yaml)
   --project <dir>       Flutter project dir (default: current dir)
   --sync-assets         also push build/flutter_assets — required for the
@@ -348,16 +348,17 @@ Future<void> main(List<String> args) async {
         exit(64);
     }
   }
-  // Fill unset relay/code from .rhr.yaml in the project dir (flags win).
+  // Fill unset relay/code from .rhr.yaml in the project dir (flags win), and
+  // fall back to the public relay like `rhr run` does: the player dials it by
+  // default, so a bare `rhr attach --code` should meet it there.
   final cfg = _loadConfig(project);
-  relay ??= cfg['relay'];
+  relay ??= cfg['relay'] ?? defaultPublicRelay;
   code ??= cfg['code'];
   direct ??= cfg['direct']?.toLowerCase() != 'false';
 
-  if (relay == null || code == null) {
+  if (code == null) {
     stderr.writeln(
-      'rhr attach: missing --relay and/or --code '
-      '(set them as flags or in .rhr.yaml).\n',
+      'rhr attach: missing --code (set it as a flag or in .rhr.yaml).\n',
     );
     stderr.write(_usage);
     exit(64);
