@@ -240,7 +240,7 @@ Future<void> main(List<String> args) async {
     String? relay;
     String? code;
     var resync = false;
-    bool? direct;
+    var direct = true;
     var updatePolicy = PlayerUpdatePolicy.prompt;
     for (var i = 1; i < args.length; i++) {
       switch (args[i]) {
@@ -313,7 +313,7 @@ Future<void> main(List<String> args) async {
   var runFlutter = true;
   var syncAssets = false;
   var resync = false;
-  bool? direct;
+  var direct = true;
   var updatePolicy = PlayerUpdatePolicy.prompt;
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -354,7 +354,7 @@ Future<void> main(List<String> args) async {
   final cfg = _loadConfig(project);
   relay ??= cfg['relay'] ?? defaultPublicRelay;
   code ??= cfg['code'];
-  direct ??= cfg['direct']?.toLowerCase() != 'false';
+  if (direct && cfg['direct']?.toLowerCase() == 'false') direct = false;
 
   if (code == null) {
     stderr.writeln(
