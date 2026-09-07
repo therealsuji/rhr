@@ -80,23 +80,55 @@ class AdbClient(private val host: String, private val port: Int, private val key
         if (message.command != A_CNXN) error("not A_CNXN")
     }
 
+    /**
+     * Every stream needs its OWN local id. Reusing one id made a previous
+     * stream's trailing packets indistinguishable from the current stream's
+     * reply, which silently truncated whichever command ran next (see
+     * [shellCommand]). Ids are per-transport and never reused.
+     */
+    private var nextLocalId = 1
+
     fun shellCommand(command: String, listener: ((ByteArray) -> Unit)?) {
-        val localId = 1
+        // ADB ids are sender-relative: adbd's packets carry arg0=its id and
+        // arg1=OUR id. So arg1 is what says "this packet is for you".
+        val localId = nextLocalId++
         write(A_OPEN, localId, 0, "shell:$command")
 
+        // Await THIS stream's opening reply, skipping anything addressed to a
+        // stream we already finished.
+        //
+        // The stale packet is not a timing fluke. adbd can send data and EOF
+        // together and destroy the socket immediately; our ACK for that data
+        // then arrives after the socket is gone, and adbd answers a stray OKAY
+        // with another CLSE. That second CLSE is what the old code read as the
+        // *next* command's response — which is why `pidof` worked and the
+        // `logcat` that followed it came back empty.
         var message = read()
+        while (message.arg1 != localId) {
+            Log.d(TAG, "discarding stale ${message.toStringShort()} (want localId=$localId)")
+            message = read()
+        }
+
         when (message.command) {
             A_OKAY -> {
+                // Peer id is fixed by the opening OKAY. Deriving it per packet
+                // would let a stale packet redirect our ACKs.
+                val remoteId = message.arg0
                 while (true) {
                     message = read()
-                    val remoteId = message.arg0
+                    if (message.arg1 != localId || message.arg0 != remoteId) {
+                        Log.d(TAG, "discarding stale ${message.toStringShort()}")
+                        continue
+                    }
                     if (message.command == A_WRTE) {
                         if (message.data_length > 0) {
                             listener?.invoke(message.data!!)
                         }
                         write(A_OKAY, localId, remoteId)
                     } else if (message.command == A_CLSE) {
-                        write(A_CLSE, localId, remoteId)
+                        // The protocol says a CLSE needs no reply, and echoing
+                        // one for an already-dead stream only invites another
+                        // stray packet. Just stop reading.
                         break
                     } else {
                         error("not A_WRTE or A_CLSE")
@@ -104,13 +136,11 @@ class AdbClient(private val host: String, private val port: Int, private val key
                 }
             }
             A_CLSE -> {
-                // adbd refused to open the stream (it closed instead of
-                // ACKing). Returning quietly here makes the command look like
-                // it succeeded with empty output, which is indistinguishable
-                // from a genuinely silent command — the failure then surfaces
-                // far away as "no VM service found". Say so instead.
-                val remoteId = message.arg0
-                write(A_CLSE, localId, remoteId)
+                // A close addressed to THIS stream before any OKAY is a real
+                // refusal (unknown service, permission). Returning quietly
+                // here would look like a command that legitimately printed
+                // nothing, so the failure would surface far away as "no VM
+                // service found".
                 throw AdbException("adbd refused the shell stream for: $command")
             }
             else -> {
