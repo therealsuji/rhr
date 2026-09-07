@@ -109,7 +109,10 @@ class AdbMessage(
             A_STLS -> "A_STLS"
             else -> command.toString()
         }
-        return "command=$commandString, arg0=$arg0, arg1=$arg1, data_length=$data_length, data_crc32=$data_crc32, magic=$magic, data=${data?.contentToString()}"
+        // Header only. Logging the payload fed every `logcat -d` the shell
+        // read straight back into logcat, so the buffer grew several times
+        // over per poll and VM discovery choked on its own echo.
+        return "command=$commandString, arg0=$arg0, arg1=$arg1, data_length=$data_length, data_crc32=$data_crc32, magic=$magic"
     }
 
     companion object {
