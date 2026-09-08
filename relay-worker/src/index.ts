@@ -1,10 +1,21 @@
 // rhr relay on Cloudflare Workers.
 //
-// One Durable Object per session code. The DO holds two WebSockets — the
-// device bridge (dials out from the phone) and the dev CLI — and forwards text
-// control messages between them. Uses the WebSocket Hibernation API so idle
-// sessions cost nothing. Binary tunnel payloads are rejected: they belong on
-// the direct WebRTC data channel.
+// ONE Durable Object for every session. It holds two WebSockets per session —
+// the device bridge (dials out from the phone) and the dev CLI — and forwards
+// text control messages between them, keyed by session code.
+//
+// A Durable Object earns its place here for exactly one reason: a phone
+// waiting for a developer holds an idle socket for hours, and a plain Worker
+// cannot hold a socket at all. Hibernation makes that wait free; polling
+// instead would cost millions of requests a day once there are more than a
+// handful of phones. Everything else the relay does is a few kilobytes of
+// signaling.
+//
+// That reason does not scale with sessions, so neither does the object count.
+// A single instance handles tens of thousands of concurrent sockets, far more
+// than this will see; if it ever stops being enough, hashing the code across a
+// fixed handful of shards is a one-line change. Binary tunnel payloads are
+// rejected: they belong on the direct WebRTC data channel.
 //
 // Routes:
 //   GET /s/<code>/device  — device bridge end
@@ -36,6 +47,9 @@ type Role = "device" | "dev";
 // cached device info older than this is assumed stale (device WS died without
 // a close event, e.g. eviction).
 const MIN_CODE_LENGTH = 16;
+
+/** The single relay object's name. Every session shares it. */
+const RELAY_OBJECT = "relay";
 const INFO_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_CONTROL_MESSAGE_BYTES = 64 * 1024;
 const textEncoder = new TextEncoder();
@@ -56,8 +70,18 @@ interface ConnMeta {
 	generation: number;
 }
 
-/** DO storage key holding the newest generation handed out for a role. */
-const generationKey = (role: Role) => `gen:${role}`;
+// Every key and socket tag carries the session code, because one object now
+// holds every session: without it, one session's state would answer for
+// another's.
+const generationKey = (code: string, role: Role) => `gen:${code}:${role}`;
+const claimKey = (code: string) => `claim:${code}`;
+const pausedKey = (code: string) => `paused:${code}`;
+const infoKey = (code: string) => `info:${code}`;
+const infoAtKey = (code: string) => `infoAt:${code}`;
+const infoGenKey = (code: string) => `infoGen:${code}`;
+
+/** Socket tag identifying which session and role a connection belongs to. */
+const socketTag = (code: string, role: Role) => `${code}|${role}`;
 
 // How long a dev's claim on a phone outlives its socket. Long enough that the
 // CLI's own recovery loop (which backs off for seconds) reconnects into the
@@ -84,8 +108,6 @@ interface Claim {
 	expiresAt: number;
 }
 
-const CLAIM_KEY = "claim";
-
 /**
  * Set while the tester has paused the phone.
  *
@@ -94,7 +116,6 @@ const CLAIM_KEY = "claim";
  * developer's recovery loop reclaims it a second later, and their screen is
  * taken over again. Pause is what actually gives the phone back.
  */
-const PAUSED_KEY = "paused";
 
 /**
  * A dev announces the claim it is resuming with this header. The granted claim
@@ -112,6 +133,7 @@ export class RelaySession implements DurableObject {
 		// /s/<code>/<role>
 		const parts = url.pathname.split("/").filter(Boolean);
 		const role = parts.at(-1) as Role;
+		const code = parts.at(-2) as string;
 
 		if (request.headers.get("Upgrade") !== "websocket") {
 			console.log(`[rhr] ${role} NON-WS request → 426`);
@@ -119,8 +141,8 @@ export class RelaySession implements DurableObject {
 		}
 
 		const before = {
-			dev: this.ctx.getWebSockets("dev").length,
-			device: this.ctx.getWebSockets("device").length,
+			dev: this.ctx.getWebSockets(socketTag(code, "dev")).length,
+			device: this.ctx.getWebSockets(socketTag(code, "device")).length,
 		};
 
 		// A dev asks to hold the phone; a device reconnecting is the same phone
@@ -128,6 +150,7 @@ export class RelaySession implements DurableObject {
 		let claim: Claim | null = null;
 		if (role === "dev") {
 			const decision = await this.admitDev(
+				code,
 				request.headers.get(CLAIM_HEADER),
 				before.dev > 0,
 			);
@@ -147,15 +170,16 @@ export class RelaySession implements DurableObject {
 		// One connection per role: kick the previous holder. The evicted socket
 		// stays alive until its own close event arrives, so it must not be able
 		// to act on the session from here on — hence the generation.
-		for (const ws of this.ctx.getWebSockets(role)) {
+		for (const ws of this.ctx.getWebSockets(socketTag(code, role))) {
 			ws.close(1000, "replaced by new connection");
 		}
 
 		const generation =
-			((await this.ctx.storage.get<number>(generationKey(role))) ?? 0) + 1;
-		await this.ctx.storage.put(generationKey(role), generation);
+			((await this.ctx.storage.get<number>(generationKey(code, role))) ?? 0) +
+			1;
+		await this.ctx.storage.put(generationKey(code, role), generation);
 		if (claim) {
-			await this.ctx.storage.put(CLAIM_KEY, { ...claim, generation });
+			await this.ctx.storage.put(claimKey(code), { ...claim, generation });
 		}
 
 		const pair = new WebSocketPair();
@@ -166,19 +190,24 @@ export class RelaySession implements DurableObject {
 			bytes: 0,
 			generation,
 		};
-		this.ctx.acceptWebSocket(pair[1], [role, JSON.stringify(meta)]);
+		this.ctx.acceptWebSocket(pair[1], [
+			socketTag(code, role),
+			JSON.stringify(meta),
+		]);
 		console.log(
 			`[rhr] ${role} CONNECTED gen=${generation} ` +
 				`(was dev=${before.dev} device=${before.device})`,
 		);
 		if (role === "dev") {
-			const deviceLive = this.ctx.getWebSockets("device").length > 0;
-			const info = await this.ctx.storage.get<string>("deviceInfo");
-			const at = (await this.ctx.storage.get<number>("deviceInfoAt")) ?? 0;
+			const deviceLive =
+				this.ctx.getWebSockets(socketTag(code, "device")).length > 0;
+			const info = await this.ctx.storage.get<string>(infoKey(code));
+			const at = (await this.ctx.storage.get<number>(infoAtKey(code))) ?? 0;
 			const infoGen =
-				(await this.ctx.storage.get<number>("deviceInfoGen")) ?? 0;
+				(await this.ctx.storage.get<number>(infoGenKey(code))) ?? 0;
 			const deviceGen =
-				(await this.ctx.storage.get<number>(generationKey("device"))) ?? 0;
+				(await this.ctx.storage.get<number>(generationKey(code, "device"))) ??
+				0;
 			const fresh = info !== undefined && Date.now() - at < INFO_TTL_MS;
 			// Info from a device connection that has since been replaced describes
 			// a VM the current device is not serving; replaying it would tunnel
@@ -218,18 +247,19 @@ export class RelaySession implements DurableObject {
 	 * gone.
 	 */
 	private async admitDev(
+		code: string,
 		offeredClaimId: string | null,
 		holderLive: boolean,
 	): Promise<
 		{ refused: false; claim: Claim } | { refused: true; reason: string }
 	> {
-		if (await this.ctx.storage.get<boolean>(PAUSED_KEY)) {
+		if (await this.ctx.storage.get<boolean>(pausedKey(code))) {
 			return {
 				refused: true,
 				reason: "paused: the tester has paused this device",
 			};
 		}
-		const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
+		const held = await this.ctx.storage.get<Claim>(claimKey(code));
 		const now = Date.now();
 
 		if (held && offeredClaimId === held.claimId) {
@@ -258,7 +288,7 @@ export class RelaySession implements DurableObject {
 	}
 
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-		const role = this.roleOf(ws);
+		const { code, role } = this.sessionOf(ws);
 		if (typeof message !== "string") {
 			console.warn(
 				`[rhr] ${role} rejected binary payload (${message.byteLength} bytes)`,
@@ -282,26 +312,26 @@ export class RelaySession implements DurableObject {
 		// The tester's pause and resume, which only the phone may set: it is
 		// the one that knows whether someone is holding it.
 		if (role === "device" && message.includes('"pause"')) {
-			await this.ctx.storage.put(PAUSED_KEY, true);
-			await this.ctx.storage.delete(CLAIM_KEY);
+			await this.ctx.storage.put(pausedKey(code), true);
+			await this.ctx.storage.delete(claimKey(code));
 			// 1001 (going away) rather than a custom code: the runtime accepts it
 			// on a hibernatable socket, and the CLI already treats it as a clean
 			// end of session rather than an error to retry through.
-			this.closeRole("dev", 1001, "paused by the tester");
+			this.closeRole(code, "dev", 1001, "paused by the tester");
 			console.log("[rhr] device paused by the tester");
 			return;
 		}
 		if (role === "device" && message.includes('"resume"')) {
-			await this.ctx.storage.delete(PAUSED_KEY);
+			await this.ctx.storage.delete(pausedKey(code));
 			console.log("[rhr] device resumed by the tester");
 			return;
 		}
 		// A dev leaving on purpose hands the device back now rather than making
 		// the next person wait out a grace period meant for crashes.
 		if (role === "dev" && message.includes('"release"')) {
-			const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
+			const held = await this.ctx.storage.get<Claim>(claimKey(code));
 			if (held && held.generation === meta?.generation) {
-				await this.ctx.storage.delete(CLAIM_KEY);
+				await this.ctx.storage.delete(claimKey(code));
 				console.log("[rhr] dev released its claim");
 			}
 			return;
@@ -311,14 +341,14 @@ export class RelaySession implements DurableObject {
 		// the cached VM URI with "{"t":"ping"}").
 		if (role === "device" && message.includes('"info"')) {
 			await this.ctx.storage.put({
-				deviceInfo: message,
-				deviceInfoAt: Date.now(),
-				deviceInfoGen: meta?.generation ?? 0,
+				[infoKey(code)]: message,
+				[infoAtKey(code)]: Date.now(),
+				[infoGenKey(code)]: meta?.generation ?? 0,
 			});
 			console.log(`[rhr] cached device info gen=${meta?.generation ?? 0}`);
 		}
 		const peer: Role = role === "device" ? "dev" : "device";
-		const peers = this.ctx.getWebSockets(peer);
+		const peers = this.ctx.getWebSockets(socketTag(code, peer));
 		for (const other of peers) {
 			try {
 				other.send(message);
@@ -364,8 +394,9 @@ export class RelaySession implements DurableObject {
 	 * someone else is standing in front of.
 	 */
 	private async onDevGone(ws: WebSocket) {
+		const { code } = this.sessionOf(ws);
 		const generation = this.metaOf(ws)?.generation ?? 0;
-		const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
+		const held = await this.ctx.storage.get<Claim>(claimKey(code));
 		if (!held || held.generation !== generation) {
 			console.log(
 				`[rhr] ignoring stale dev close gen=${generation} ` +
@@ -374,7 +405,7 @@ export class RelaySession implements DurableObject {
 			return;
 		}
 		const expiresAt = Date.now() + CLAIM_GRACE_MS;
-		await this.ctx.storage.put(CLAIM_KEY, { ...held, expiresAt });
+		await this.ctx.storage.put(claimKey(code), { ...held, expiresAt });
 		console.log(
 			`[rhr] dev gone; claim held ${CLAIM_GRACE_MS / 1000}s for reconnect`,
 		);
@@ -390,33 +421,34 @@ export class RelaySession implements DurableObject {
 	 * session that looks connected on both ends and moves no traffic.
 	 */
 	private async onDeviceGone(ws: WebSocket) {
-		if (this.roleOf(ws) !== "device") return;
+		const { code, role } = this.sessionOf(ws);
+		if (role !== "device") return;
 		const generation = this.metaOf(ws)?.generation ?? 0;
 		const current =
-			(await this.ctx.storage.get<number>(generationKey("device"))) ?? 0;
+			(await this.ctx.storage.get<number>(generationKey(code, "device"))) ?? 0;
 		if (generation !== current) {
 			console.log(
 				`[rhr] ignoring stale device close gen=${generation} current=${current}`,
 			);
 			return;
 		}
-		await this.ctx.storage.delete("deviceInfo");
+		await this.ctx.storage.delete(infoKey(code));
 		// Holding a phone that is gone helps nobody: the claim exists to stop
 		// developers stealing a phone from each other, and there is no phone to
 		// steal. Releasing here also means a tester who walks away and comes
 		// back is not locked out by whoever held it last.
-		await this.ctx.storage.delete(CLAIM_KEY);
+		await this.ctx.storage.delete(claimKey(code));
 		// The session is dead without a device: its tunnel channels are
 		// half-open and the attached dev's flutter attach would hang on
 		// them forever. Drop the dev too so the CLI's recovery loop wakes
 		// up, re-dials, and re-pairs with the device when it returns.
-		this.closeRole("dev", 1001, "device disconnected");
+		this.closeRole(code, "dev", 1001, "device disconnected");
 	}
 
-	private closeRole(role: Role, code: number, reason: string) {
-		for (const ws of this.ctx.getWebSockets(role)) {
+	private closeRole(code: string, role: Role, wsCode: number, reason: string) {
+		for (const ws of this.ctx.getWebSockets(socketTag(code, role))) {
 			try {
-				ws.close(code, reason);
+				ws.close(wsCode, reason);
 			} catch {
 				// Already gone.
 			}
@@ -433,8 +465,14 @@ export class RelaySession implements DurableObject {
 		);
 	}
 
+	/** Session and role, recovered from the tag fixed at acceptWebSocket. */
+	private sessionOf(ws: WebSocket): { code: string; role: Role } {
+		const [code, role] = (this.ctx.getTags(ws)[0] ?? "|").split("|");
+		return { code, role: role as Role };
+	}
+
 	private roleOf(ws: WebSocket): Role {
-		return this.ctx.getTags(ws)[0] as Role;
+		return this.sessionOf(ws).role;
 	}
 
 	private metaOf(ws: WebSocket): ConnMeta | null {
@@ -466,7 +504,15 @@ export default {
 					{ status: 400 },
 				);
 			}
-			const id = env.SESSIONS.idFromName(seg[1]);
+			// One object for every session, not one per code. A Durable Object
+			// exists here only to hold idle sockets and introduce two peers;
+			// spending an object per session buys nothing and multiplies them
+			// with traffic. Signaling is a few kilobytes and a DO handles tens
+			// of thousands of concurrent sockets, so a single instance covers
+			// far more load than this will see — and when it stops doing so,
+			// hashing the code across a fixed handful of shards is a one-line
+			// change from here.
+			const id = env.SESSIONS.idFromName(RELAY_OBJECT);
 			return env.SESSIONS.get(id).fetch(request);
 		}
 		return new Response("not found", { status: 404 });
