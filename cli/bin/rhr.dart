@@ -29,6 +29,7 @@ import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/player_builder.dart';
 import 'package:rhr_cli/player_update.dart';
 import 'package:rhr_cli/relay_race.dart';
+import 'package:rhr_cli/account_auth.dart';
 import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/restart_tracker.dart';
 import 'package:rhr_cli/terminal_qr.dart';
@@ -43,6 +44,9 @@ Usage:
   rhr run [options]           run Flutter with automatic initial launch
   rhr attach [options]        connect to a session and hot reload into it
   rhr doctor                  check the local Flutter/RHR setup
+  rhr login                   sign in so this machine can use account devices
+  rhr logout                  forget the signed-in account
+  rhr whoami                  print the signed-in account
   rhr --version               print the installed CLI version
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
@@ -114,6 +118,26 @@ Future<void> main(List<String> args) async {
 
   if (args.first == 'doctor') {
     exit(await _doctor());
+  }
+
+  if (args.first == 'login') {
+    exit(await _login());
+  }
+
+  if (args.first == 'logout') {
+    await clearAccountSession();
+    stdout.writeln('[rhr] signed out');
+    exit(0);
+  }
+
+  if (args.first == 'whoami') {
+    final session = await loadAccountSession();
+    if (session == null) {
+      stderr.writeln('[rhr] not signed in — run `rhr login`');
+      exit(1);
+    }
+    stdout.writeln(session.email.isEmpty ? session.userId : session.email);
+    exit(0);
   }
 
   // rhr setup [--relay <wss://...>]
@@ -1306,6 +1330,42 @@ Future<int> _runAttachProductFlow({
     }
   } finally {
     await localRelay?.close();
+  }
+}
+
+/// `rhr login`: sign in so this machine can reach the devices on an account.
+///
+/// The device grant prints a code rather than opening a browser here, so the
+/// developer can approve it wherever they already have a session — including
+/// from a phone when this is running over SSH.
+Future<int> _login() async {
+  final existing = await loadAccountSession();
+  if (existing != null) {
+    stdout.writeln(
+      '[rhr] already signed in as '
+      '${existing.email.isEmpty ? existing.userId : existing.email}',
+    );
+    return 0;
+  }
+  try {
+    final prompt = await requestDeviceCode();
+    stdout.writeln('');
+    stdout.writeln('  Open        ${prompt.verificationUri}');
+    stdout.writeln('  Enter code  ${prompt.userCode}');
+    stdout.writeln('');
+    stdout.writeln('  (or go straight to ${prompt.verificationUriComplete})');
+    stdout.writeln('');
+    stdout.writeln('[rhr] waiting for you to approve…');
+    final session = await pollForToken(prompt);
+    await saveAccountSession(session);
+    stdout.writeln(
+      '[rhr] signed in as '
+      '${session.email.isEmpty ? session.userId : session.email}',
+    );
+    return 0;
+  } on AuthFailure catch (e) {
+    stderr.writeln('[rhr] $e');
+    return 1;
   }
 }
 
