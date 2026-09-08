@@ -854,6 +854,25 @@ class DevOverlay(
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
 
+		// Pause, not Stop: ending a session while the phone stays available just
+		// lets the next recovery loop take it again a second later, which reads
+		// as the button not working. This is what actually gives the phone back.
+		val isPaused = RhrSessionService.status == "paused"
+		sheet.addView(
+			iconRow(
+				if (isPaused) "▶" else "⏸",
+				if (isPaused) "Resume — let developers connect" else "Pause — keep this phone to myself",
+				primary = false,
+			) {
+				activity.startService(
+					Intent(activity, RhrSessionService::class.java)
+						.putExtra("cmd", if (isPaused) "resume" else "pause"))
+				closeMenu()
+			},
+			LinearLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT,
+				ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+
 		sheet.addView(iconRow("✕", "Disconnect — back to lobby", primary = false) {
 			// Stop the tunnel, then restart the process cleanly into the lobby.
 			// A guest kernel owns the Dart VM, so only a fresh process re-runs the

@@ -243,6 +243,9 @@ class RhrSessionService : Service() {
 	// Last time we heard from the developer (any dev→device message, or a
 	// relay dev_present). Drives the presence lease expiry.
 	@Volatile private var lastDevActivity = 0L
+
+	/** True while the tester has made this phone unavailable. */
+	@Volatile private var paused = false
 	private var presenceWatchThread: Thread? = null
 	private var devfsObserver: FileObserver? = null
 	@Volatile private var vmUriLock = Object()
@@ -332,6 +335,24 @@ class RhrSessionService : Service() {
 				startForeground(NOTIF_ID, buildNotification())
 			}
 			"kick" -> synchronized(flowLock) { flowLock.notifyAll() } // also wakes backoff
+			// The tester making the phone unavailable without ending the session:
+			// the code stays, the relay refuses new claims, and the developer who
+			// was connected is dropped. Stop alone would hand the phone straight
+			// to whoever asked next.
+			"pause" -> {
+				paused = true
+				ws?.send(JSONObject().put("t", "pause").toString())
+				directTransport?.close()
+				directTransport = null
+				status = "paused"
+				onUpdate?.invoke()
+			}
+			"resume" -> {
+				paused = false
+				ws?.send(JSONObject().put("t", "resume").toString())
+				status = "waiting_dev"
+				onUpdate?.invoke()
+			}
 			"stop" -> {
 				stopped.set(true)
 				ws?.close(1000, "stopped")

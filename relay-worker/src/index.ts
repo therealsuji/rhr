@@ -87,6 +87,16 @@ interface Claim {
 const CLAIM_KEY = "claim";
 
 /**
+ * Set while the tester has paused the phone.
+ *
+ * Stopping a session without this just hands the phone to whoever asks next,
+ * which reads as the Stop button not working: the tester ends a session, a
+ * developer's recovery loop reclaims it a second later, and their screen is
+ * taken over again. Pause is what actually gives the phone back.
+ */
+const PAUSED_KEY = "paused";
+
+/**
  * A dev announces the claim it is resuming with this header. The granted claim
  * comes back as a control frame instead: neither Dart WebSocket client exposes
  * the upgrade response, and a frame rides the channel that already exists.
@@ -213,6 +223,12 @@ export class RelaySession implements DurableObject {
 	): Promise<
 		{ refused: false; claim: Claim } | { refused: true; reason: string }
 	> {
+		if (await this.ctx.storage.get<boolean>(PAUSED_KEY)) {
+			return {
+				refused: true,
+				reason: "paused: the tester has paused this device",
+			};
+		}
 		const held = await this.ctx.storage.get<Claim>(CLAIM_KEY);
 		const now = Date.now();
 
@@ -262,6 +278,23 @@ export class RelaySession implements DurableObject {
 		if (meta) {
 			meta.msgs++;
 			meta.bytes += messageBytes;
+		}
+		// The tester's pause and resume, which only the phone may set: it is
+		// the one that knows whether someone is holding it.
+		if (role === "device" && message.includes('"pause"')) {
+			await this.ctx.storage.put(PAUSED_KEY, true);
+			await this.ctx.storage.delete(CLAIM_KEY);
+			// 1001 (going away) rather than a custom code: the runtime accepts it
+			// on a hibernatable socket, and the CLI already treats it as a clean
+			// end of session rather than an error to retry through.
+			this.closeRole("dev", 1001, "paused by the tester");
+			console.log("[rhr] device paused by the tester");
+			return;
+		}
+		if (role === "device" && message.includes('"resume"')) {
+			await this.ctx.storage.delete(PAUSED_KEY);
+			console.log("[rhr] device resumed by the tester");
+			return;
 		}
 		// A dev leaving on purpose hands the device back now rather than making
 		// the next person wait out a grace period meant for crashes.
