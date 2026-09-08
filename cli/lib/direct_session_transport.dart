@@ -59,8 +59,14 @@ final class DirectSessionTransport implements SessionTransport {
       );
       _peer.connectionStates.listen((state) {
         if (_closed || _failure != null) return;
+        // `disconnected` is transient by definition: the ICE layer raises it on
+        // a SINGLE missed consent check — one STUN binding request with a 2s
+        // wait and no retransmit — and clears it again on the next success.
+        // During a 50MB asset push a 2s blip is ordinary, so treating it as
+        // fatal tore down healthy sessions. Real loss still arrives as
+        // `failed`, which the ICE layer raises only after six consecutive
+        // misses, roughly the 30s RFC 7675 allows before consent expires.
         if (state == PeerConnectionState.failed ||
-            state == PeerConnectionState.disconnected ||
             state == PeerConnectionState.closed) {
           _fail('direct WebRTC connection ${state.name}');
         }
