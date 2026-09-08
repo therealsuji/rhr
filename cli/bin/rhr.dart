@@ -582,6 +582,19 @@ Future<int?> _runSession({
   final SessionTransport transport = preferDirect
       ? DirectSessionTransport(relayTransport)
       : relayTransport;
+  // Ctrl-C is how most sessions actually end, and an interrupted process that
+  // says nothing holds the device for the rest of its grace period — so the
+  // developer who quits and immediately re-runs is locked out of their own
+  // phone. Hand the claim back on the way out.
+  final interrupts = ProcessSignal.sigint.watch().listen((_) async {
+    relayTransport.release();
+    // The release is a WebSocket frame; exiting immediately can kill the
+    // process before it leaves the socket, which is the case this handler
+    // exists to prevent. A short flush beats a 45-second lockout, and the
+    // relay's own grace still covers a CLI that dies harder than this.
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    exit(130); // 128 + SIGINT, the shell's convention for an interrupted run.
+  });
   stderr.writeln('[rhr] connected to relay candidate(s): ${relays.join(', ')}');
   unawaited(
     relayTransport.selectedRelay.then<void>(
@@ -855,6 +868,9 @@ Future<int?> _runSession({
       s.destroy();
     }
     sockets.clear();
+    // The session loop reconnects, so the handler must go with this attempt
+    // or every retry stacks another one.
+    await interrupts.cancel();
     // Farewell so the phone leaves "Connected" immediately instead of waiting
     // out its watchdog. Harmless if the socket already died (relay drop).
     try {
