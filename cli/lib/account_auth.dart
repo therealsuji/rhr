@@ -21,9 +21,10 @@ const _tokenUrl = 'https://api.workos.com/user_management/authenticate';
 
 /// Public client identifier. Not a secret: the device grant is designed for
 /// clients that cannot keep one, which is why there is no client secret here.
+/// Overridable so a contributor can point at their own environment.
 const rhrClientId = String.fromEnvironment(
   'RHR_CLIENT_ID',
-  defaultValue: 'client_01M20J9FXX5DBN995108GEMC11',
+  defaultValue: 'client_01M20J8AWHXDECB250NDEB8YYJ',
 );
 
 /// What the CLI shows the developer while it waits for them to approve.
@@ -58,6 +59,7 @@ class AccountSession {
     required this.refreshToken,
     required this.userId,
     required this.email,
+    this.provider = '',
   });
 
   final String accessToken;
@@ -65,11 +67,20 @@ class AccountSession {
   final String userId;
   final String email;
 
+  /// Which identity provider signed this developer in, when the service says.
+  ///
+  /// Recorded from the start because the same person arriving once through
+  /// Google and once through GitHub is the case that decides whether they get
+  /// one account or two — and that is expensive to change after people have
+  /// accounts.
+  final String provider;
+
   Map<String, Object?> toJson() => {
     'accessToken': accessToken,
     'refreshToken': refreshToken,
     'userId': userId,
     'email': email,
+    'provider': provider,
   };
 
   static AccountSession? fromJson(Map<String, Object?> json) {
@@ -78,11 +89,13 @@ class AccountSession {
     final id = json['userId'];
     final email = json['email'];
     if (access is! String || refresh is! String || id is! String) return null;
+    final provider = json['provider'];
     return AccountSession(
       accessToken: access,
       refreshToken: refresh,
       userId: id,
       email: email is String ? email : '',
+      provider: provider is String ? provider : '',
     );
   }
 }
@@ -160,6 +173,7 @@ Future<AccountSession> pollForToken(
           refreshToken: json['refresh_token']! as String,
           userId: (user?['id'] as String?) ?? '',
           email: (user?['email'] as String?) ?? '',
+          provider: (json['authentication_method'] as String?) ?? '',
         );
       }
 
