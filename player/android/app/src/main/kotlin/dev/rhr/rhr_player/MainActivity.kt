@@ -188,6 +188,10 @@ class MainActivity : FlutterActivity() {
 				// The shake-to-open bubble needs "Display over other apps" to
 				// draw above the tester's own app. There is no runtime prompt
 				// for it — only a settings screen the user has to visit.
+				// Who this installation is, for joining an account. The secret
+				// deliberately stays native: Dart is replaced wholesale by a guest
+				// hot restart, so anything a guest could read is not a secret.
+				"installationId" -> result.success(InstallationIdentity.id(this))
 				"overlayGranted" -> result.success(SystemOverlayHost.granted(this))
 				"requestOverlay" -> {
 					startActivity(SystemOverlayHost.permissionIntent(this))

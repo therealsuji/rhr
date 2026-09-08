@@ -608,6 +608,28 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
+            // The installation identity is minted lazily and lives only in
+            // native storage, so this is the one place a tester can read it
+            // back — useful when an account says it does not recognise this
+            // phone.
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.fingerprint, color: _violet, size: 20),
+              title: const Text(
+                'Show installation id',
+                style: TextStyle(color: _ink, fontSize: 14),
+              ),
+              onTap: () async {
+                final id = await const MethodChannel(
+                  'rhr/connector',
+                ).invokeMethod<String>('installationId');
+                if (!context.mounted) return;
+                Navigator.of(context).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(id ?? 'unavailable')),
+                );
+              },
+            ),
             for (final (icon, label, name) in _faults)
               ListTile(
                 dense: true,
