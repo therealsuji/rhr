@@ -52,6 +52,15 @@ class RhrSessionService : Service() {
 		private const val OP_ACK = 3
 		private const val OP_UPDATE_DATA = 4
 		private const val DIRECT_SIGNAL_VERSION = 1
+		// SCTP's negotiated maximum message size, minus this protocol's 5-byte
+		// data header. The Dart answer emits no a=max-message-size, so libwebrtc
+		// falls back to the 64 KiB default from draft-ietf-mmusic-sdp-sctp-23 —
+		// and a message over that limit makes libwebrtc close the data channel
+		// itself, reporting success to the caller first. A full 64 KiB read plus
+		// the header was five bytes over, which killed the tunnel whenever the
+		// phone was busy enough to wake the reader on a full socket buffer.
+		private const val TUNNEL_READ_BYTES = 64 * 1024 - 5
+
 		private const val WINDOW_BYTES = 512 * 1024
 		private const val LOW_WATER = WINDOW_BYTES / 2
 
@@ -879,7 +888,7 @@ class RhrSessionService : Service() {
 					sockets[channel] = sock
 				}
 				val reader = Thread {
-					val buf = ByteArray(64 * 1024)
+					val buf = ByteArray(TUNNEL_READ_BYTES)
 					try {
 						val input = sock.getInputStream()
 						while (true) {

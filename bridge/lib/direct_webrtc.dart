@@ -138,6 +138,12 @@ final class DirectWebRtcPeer {
     await ready.future.timeout(timeout);
   }
 
+  /// Pause new sends above this much queued data, resuming as it clears.
+  ///
+  /// One megabyte is enough to keep the SCTP association busy on a fast link
+  /// without letting an asset push queue the whole bundle in memory.
+  static const _bufferHighWater = 1024 * 1024;
+
   Future<void> send(Uint8List frame) async {
     _ensureOpen();
     final channel = _channel;
@@ -168,6 +174,15 @@ final class DirectWebRtcPeer {
     await completion.future;
   }
 
+  /// Applies backpressure while a send is outstanding, then completes.
+  ///
+  /// `bufferedAmount` counts the WHOLE channel, not this frame, so waiting for
+  /// zero makes every send wait for every other send. During an asset push
+  /// that backlog reaches megabytes and never empties, so a nine-byte control
+  /// frame would sit behind it until the caller's timeout fired — and that
+  /// timeout tears down the session. Waiting instead for the buffer to fall
+  /// under a high-water mark keeps the channel from growing without bound
+  /// while letting a send finish as soon as the queue is moving.
   Future<void> _sendAndDrain(
     dynamic channel,
     Uint8List frame,
@@ -176,7 +191,7 @@ final class DirectWebRtcPeer {
     try {
       await channel.sendBinary(frame);
       final deadline = DateTime.now().add(const Duration(seconds: 15));
-      while (channel.bufferedAmount > 0) {
+      while (channel.bufferedAmount > _bufferHighWater) {
         if (DateTime.now().isAfter(deadline)) {
           throw TimeoutException('direct WebRTC data channel did not drain');
         }
