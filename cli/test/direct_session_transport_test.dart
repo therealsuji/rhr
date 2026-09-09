@@ -67,6 +67,42 @@ void main() {
     await transport.close();
   });
 
+  // A dead WebRTC payload path used to veto control traffic, which rides the
+  // relay and never touches WebRTC. That took out the farewell (dev_gone), the
+  // presence heartbeat, and the re-signaling that would rebuild the channel —
+  // so a tester was left reading "Can't reach relay - retrying..." after a
+  // clean quit.
+  test('control still reaches the relay after the payload path fails', () async {
+    final relay = _FakeControlTransport();
+    final transport = DirectSessionTransport(
+      relay,
+      offerTimeout: const Duration(milliseconds: 20),
+    );
+    final subscription = transport.stream.listen((_) {}, onError: (_) {});
+
+    relay.controller.add(jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}));
+    await expectLater(
+      transport.payloadReady,
+      throwsA(isA<DirectTransportFailure>()),
+    );
+
+    // Payloads genuinely need the data channel, so they must still fail.
+    await expectLater(
+      transport.sendPayload(Uint8List.fromList([1, 2, 3])),
+      throwsA(isA<DirectTransportFailure>()),
+    );
+
+    // Control does not, so it must go out regardless.
+    transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+    expect(
+      relay.sent.map((message) => jsonDecode(message)['t']),
+      contains('dev_gone'),
+    );
+
+    await subscription.cancel();
+    await transport.close();
+  });
+
   test('a device-side direct failure terminates payload readiness', () async {
     final relay = _FakeControlTransport();
     final transport = DirectSessionTransport(relay);

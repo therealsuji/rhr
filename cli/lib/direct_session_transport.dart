@@ -113,8 +113,14 @@ final class DirectSessionTransport implements SessionTransport {
 
   @override
   void sendControl(String message) {
-    final failure = _failure;
-    if (failure != null) throw failure;
+    // Deliberately NOT gated on _failure, unlike sendPayload below. Control
+    // text rides the relay and never touches WebRTC, so a dead payload path
+    // says nothing about whether this can be delivered — _fail itself sends
+    // its peer notification through _relay.sendControl for that reason.
+    //
+    // Gating it here meant a WebRTC failure silently took out the farewell
+    // (dev_gone), the presence heartbeat (ping) and the re-signaling that
+    // would have rebuilt the very channel that died.
     if (_closed) throw StateError('direct session transport is closed');
     _relay.sendControl(message);
   }

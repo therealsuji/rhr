@@ -70,6 +70,16 @@ class RhrSessionService : Service() {
 		// developer" and clear any progress that belonged to their connection.
 		private const val DEV_LEASE_MS = 45_000L
 
+		/**
+		 * States a developer can go absent FROM. "connected" is the obvious one;
+		 * "retrying" matters because a direct-transport failure moves us there
+		 * (failDirectSession) while the relay socket is still perfectly alive.
+		 * Gating the lease on "connected" alone meant the session that lost its
+		 * WebRTC path — the one case where the developer is most likely already
+		 * gone — was the one case the lease could never reclaim.
+		 */
+		private val DEV_PRESENT_STATES = setOf("connected", "retrying")
+
 		// How long the direct tunnel may outlive the developer that opened it.
 		//
 		// Payload rides WebRTC, never the relay, so once a session is up the
@@ -623,10 +633,13 @@ class RhrSessionService : Service() {
 							return
 						}
 						// The CLI's farewell on clean quit: leave "Connected" and
-						// clear progress it owned.
+						// clear progress it owned. Honoured from "retrying" too —
+						// a dev whose direct tunnel died still says goodbye over
+						// the relay, and that is the case where the tester is
+						// otherwise left reading a connection error.
 						if (text.contains("\"dev_gone\"")) {
 							Log.i(TAG, "[$sessionCode] developer left the session")
-							if (status == "connected") status = "waiting_dev"
+							if (status in DEV_PRESENT_STATES) status = "waiting_dev"
 							setProgress("", 0, 0)
 							return
 						}
@@ -793,7 +806,7 @@ class RhrSessionService : Service() {
 			while (!stopped.get()) {
 				try {
 					val sinceDev = System.currentTimeMillis() - lastDevActivity
-					if (status == "connected" && sinceDev > DEV_LEASE_MS) {
+					if (status in DEV_PRESENT_STATES && sinceDev > DEV_LEASE_MS) {
 						Log.i(TAG, "[$sessionCode] developer lease expired — waiting for developer")
 						status = "waiting_dev"
 						setProgress("", 0, 0)
@@ -844,7 +857,7 @@ class RhrSessionService : Service() {
 		directTransport?.close()
 		directTransport = null
 		setProgress("", 0, 0)
-		if (status == "connected") status = "waiting_dev"
+		if (status in DEV_PRESENT_STATES) status = "waiting_dev"
 	}
 
 	// ---- tunnel frames ----------------------------------------------------

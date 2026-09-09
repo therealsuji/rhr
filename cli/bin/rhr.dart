@@ -585,15 +585,37 @@ Future<int?> _runSession({
   // says nothing holds the device for the rest of its grace period — so the
   // developer who quits and immediately re-runs is locked out of their own
   // phone. Hand the claim back on the way out.
-  final interrupts = ProcessSignal.sigint.watch().listen((_) async {
+  //
+  // SIGTERM (`kill`) and SIGHUP (the terminal window closed) end a session just
+  // as deliberately and were not watched at all, so they left the tester
+  // waiting out the 45s lease with a connection error on screen. SIGKILL cannot
+  // be caught by anyone; that is what the device's lease is for.
+  Future<void> leaveOnSignal(ProcessSignal signal) async {
     relayTransport.release();
-    // The release is a WebSocket frame; exiting immediately can kill the
-    // process before it leaves the socket, which is the case this handler
-    // exists to prevent. A short flush beats a 45-second lockout, and the
-    // relay's own grace still covers a CLI that dies harder than this.
+    // Tell the phone as well as the relay: releasing the claim frees the
+    // device for the next developer, but only dev_gone takes the tester off
+    // "Connected" without waiting out the lease.
+    try {
+      transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+    } catch (error) {
+      stderr.writeln('[rhr] could not tell the phone we are leaving: $error');
+    }
+    // Both are WebSocket frames; exiting immediately can kill the process
+    // before they leave the socket, which is the case this handler exists to
+    // prevent. A short flush beats a 45-second lockout, and the relay's own
+    // grace still covers a CLI that dies harder than this.
     await Future<void>.delayed(const Duration(milliseconds: 250));
-    exit(130); // 128 + SIGINT, the shell's convention for an interrupted run.
-  });
+    // 128 + signal number, the shell's convention for a signalled process.
+    exit(switch (signal) {
+      ProcessSignal.sigterm => 143,
+      ProcessSignal.sighup => 129,
+      _ => 130,
+    });
+  }
+
+  final interrupts = ProcessSignal.sigint.watch().listen(leaveOnSignal);
+  final terminations = ProcessSignal.sigterm.watch().listen(leaveOnSignal);
+  final hangups = ProcessSignal.sighup.watch().listen(leaveOnSignal);
   stderr.writeln('[rhr] connected to relay candidate(s): ${relays.join(', ')}');
   unawaited(
     relayTransport.selectedRelay.then<void>(
@@ -771,8 +793,13 @@ Future<int?> _runSession({
   final keepalive = Timer.periodic(developerLeasePingInterval, (_) {
     try {
       transport.sendControl(jsonEncode({'t': 'ping'}));
-    } catch (_) {
-      // No relay has produced device info yet.
+    } catch (error) {
+      // Before a relay is selected there is nothing to ping yet, which is
+      // ordinary. Anything else means the device's presence lease is now
+      // counting down against us, so say so rather than going quiet.
+      if (error is! StateError) {
+        stderr.writeln('[rhr] keepalive ping failed: $error');
+      }
     }
   });
 
@@ -856,11 +883,17 @@ Future<int?> _runSession({
     // The session loop reconnects, so the handler must go with this attempt
     // or every retry stacks another one.
     await interrupts.cancel();
+    await terminations.cancel();
+    await hangups.cancel();
     // Farewell so the phone leaves "Connected" immediately instead of waiting
-    // out its watchdog. Harmless if the socket already died (relay drop).
+    // out its 45s presence lease. Harmless if the socket already died (relay
+    // drop) — but a swallowed failure here is why a tester was left reading
+    // "Can't reach relay — retrying…" after a clean quit, so it gets logged.
     try {
       transport.sendControl(jsonEncode({'t': 'dev_gone'}));
-    } catch (_) {}
+    } catch (error) {
+      stderr.writeln('[rhr] could not tell the phone we are leaving: $error');
+    }
     await transport.close();
   }
 
