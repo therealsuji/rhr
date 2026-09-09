@@ -312,33 +312,9 @@ Future<void> main(List<String> args) async {
           exit(64);
       }
     }
-    // Same rule `attach` follows: a device and a code name one thing two
-    // ways, so asking for both is a contradiction.
-    if (device != null && code != null) {
-      stderr.writeln(
-        '[rhr] --device and --code both name a session; pass one or the other',
-      );
-      exit(64);
-    }
-    if (device != null) {
-      final session = await currentAccountSession();
-      if (session == null) {
-        stderr.writeln('[rhr] not signed in — run `rhr login`');
-        exit(1);
-      }
-      final rendezvous = await rendezvousForDevice(
-        service: _accountService(),
-        installationId: device,
-        session: session,
-      );
-      if (rendezvous == null) {
-        stderr.writeln(
-          '[rhr] "$device" is not a device on this account — run `rhr devices`',
-        );
-        exit(1);
-      }
-      code = rendezvous;
-    }
+    code =
+        await _resolveDevice(device: device, code: code, project: project) ??
+        code;
     exit(
       await _runAttachProductFlow(
         project: project,
@@ -433,36 +409,8 @@ Future<void> main(List<String> args) async {
   code ??= cfg['code'];
   if (direct && cfg['direct']?.toLowerCase() == 'false') direct = false;
 
-  // A device and a code name the same thing two ways, so asking for both is
-  // a contradiction rather than a preference — refuse instead of silently
-  // picking one.
-  if (device != null && code != null) {
-    stderr.writeln(
-      '[rhr] --device and --code both name a session; pass one or the other',
-    );
-    exit(64);
-  }
-  if (device != null) {
-    final session = await currentAccountSession();
-    if (session == null) {
-      stderr.writeln('[rhr] not signed in — run `rhr login`');
-      exit(1);
-    }
-    final rendezvous = await rendezvousForDevice(
-      service: _accountService(),
-      installationId: device,
-      session: session,
-    );
-    if (rendezvous == null) {
-      // Not falling back to a code: an account that cannot use a device must
-      // not end up in an unauthenticated session on somebody else's phone.
-      stderr.writeln(
-        '[rhr] "$device" is not a device on this account — run `rhr devices`',
-      );
-      exit(1);
-    }
-    code = rendezvous;
-  }
+  code = await _resolveDevice(device: device, code: code, project: project) ??
+      code;
 
   if (code == null) {
     stderr.writeln(
@@ -1415,6 +1363,56 @@ Future<int> _runAttachProductFlow({
   } finally {
     await localRelay?.close();
   }
+}
+
+/// Turns a device selector into a session name, or ends the process saying
+/// why not.
+///
+/// Shared by `run` and `attach` so the two cannot drift apart again — they
+/// disagreed about `.rhr.yaml` for long enough that a project pinning a code
+/// silently got a fresh one.
+Future<String?> _resolveDevice({
+  required String? device,
+  required String? code,
+  required String project,
+}) async {
+  if (device != null && code != null) {
+    stderr.writeln(
+      '[rhr] --device and --code both name a session; pass one or the other',
+    );
+    exit(64);
+  }
+  // A remembered device is a convenience, not an instruction: anything the
+  // developer actually typed wins, and so does a project that pins a code.
+  final wanted = device ?? (code == null ? await preferredDevice(project) : null);
+  if (wanted == null) return null;
+
+  final session = await currentAccountSession();
+  if (session == null) {
+    if (device == null) return null; // a stale preference, not a request
+    stderr.writeln('[rhr] not signed in — run `rhr login`');
+    exit(1);
+  }
+  final rendezvous = await rendezvousForDevice(
+    service: _accountService(),
+    installationId: wanted,
+    session: session,
+  );
+  if (rendezvous == null) {
+    if (device == null) {
+      // The remembered phone has left the account. Say so and carry on
+      // rather than failing a command the developer did not aim at it.
+      stderr.writeln('[rhr] "$wanted" is no longer on this account');
+      await forgetPreferredDevice(project);
+      return null;
+    }
+    stderr.writeln(
+      '[rhr] "$wanted" is not a device on this account — run `rhr devices`',
+    );
+    exit(1);
+  }
+  await rememberDevice(project, wanted);
+  return rendezvous;
 }
 
 /// The account service, derived from the relay: they are the same deployment,

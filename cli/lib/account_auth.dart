@@ -308,6 +308,29 @@ Future<String?> rendezvousForDevice({
   }
 }
 
+/// The device this project last connected to.
+///
+/// Per project rather than global: someone with two projects and two phones
+/// should not have one of them silently retarget the other.
+File _preferredDeviceFile(String project) =>
+    File('$project/.rhr-device');
+
+Future<String?> preferredDevice(String project) async {
+  final file = _preferredDeviceFile(project);
+  if (!file.existsSync()) return null;
+  final value = (await file.readAsString()).trim();
+  return value.isEmpty ? null : value;
+}
+
+Future<void> rememberDevice(String project, String installationId) async {
+  await _preferredDeviceFile(project).writeAsString('$installationId\n');
+}
+
+Future<void> forgetPreferredDevice(String project) async {
+  final file = _preferredDeviceFile(project);
+  if (file.existsSync()) await file.delete();
+}
+
 /// Where the signed-in session lives between runs.
 ///
 /// Beside the rest of this tool's state rather than in the project, so a token
