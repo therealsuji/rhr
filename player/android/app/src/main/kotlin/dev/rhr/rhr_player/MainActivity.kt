@@ -192,6 +192,11 @@ class MainActivity : FlutterActivity() {
 				// deliberately stays native: Dart is replaced wholesale by a guest
 				// hot restart, so anything a guest could read is not a secret.
 				"installationId" -> result.success(InstallationIdentity.id(this))
+				// What the developer will see this phone called in their device
+				// list. A starting point the account owner can rename, not an
+				// identifier — the installation id is what identifies it.
+				"deviceLabel" -> result.success(
+					"${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
 				"overlayGranted" -> result.success(SystemOverlayHost.granted(this))
 				"requestOverlay" -> {
 					startActivity(SystemOverlayHost.permissionIntent(this))

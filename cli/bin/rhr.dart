@@ -47,6 +47,7 @@ Usage:
   rhr login                   sign in so this machine can use account devices
   rhr logout                  forget the signed-in account
   rhr whoami                  print the signed-in account
+  rhr invite                  show a QR for a phone to join this account
   rhr --version               print the installed CLI version
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
@@ -130,8 +131,12 @@ Future<void> main(List<String> args) async {
     exit(0);
   }
 
+  if (args.first == 'invite') {
+    exit(await _invite());
+  }
+
   if (args.first == 'whoami') {
-    final session = await loadAccountSession();
+    final session = await currentAccountSession();
     if (session == null) {
       stderr.writeln('[rhr] not signed in — run `rhr login`');
       exit(1);
@@ -1330,6 +1335,53 @@ Future<int> _runAttachProductFlow({
     }
   } finally {
     await localRelay?.close();
+  }
+}
+
+/// `rhr invite`: show a QR a phone can scan to join this account.
+///
+/// The phone never signs in — it redeems this and holds a membership from
+/// then on, which is what lets a tester lend their phone without being asked
+/// to create an account of their own.
+Future<int> _invite() async {
+  final session = await currentAccountSession();
+  if (session == null) {
+    stderr.writeln('[rhr] not signed in — run `rhr login`');
+    return 1;
+  }
+  final relay = const String.fromEnvironment(
+    'RHR_RELAY',
+    defaultValue: defaultPublicRelay,
+  ).replaceFirst('wss://', 'https://').replaceFirst('ws://', 'http://');
+  final http = HttpClient();
+  try {
+    final uri = Uri.parse(
+      '$relay/account/invite?email=${Uri.encodeQueryComponent(session.email)}',
+    );
+    final request = await http.postUrl(uri);
+    request.headers.add('Authorization', 'Bearer ${session.accessToken}');
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) {
+      stderr.writeln('[rhr] could not create an invite: $body');
+      return 1;
+    }
+    final json = jsonDecode(body) as Map<String, Object?>;
+    // The payload names the service as well as the token: the phone redeems
+    // over HTTPS with the account service, never through the relay socket.
+    final payload = jsonEncode({
+      'v': 1,
+      'join': json['token'],
+      'service': relay,
+      'account': session.email,
+    });
+    final qr = renderTerminalQr(payload);
+    stdout.writeln('\n${qr.text}');
+    stdout.writeln('  Scan with the rhr player to join ${session.email}');
+    stdout.writeln('  Single-use, expires in 5 minutes.\n');
+    return 0;
+  } finally {
+    http.close();
   }
 }
 

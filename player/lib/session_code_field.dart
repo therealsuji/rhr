@@ -37,6 +37,49 @@ class SessionCodeEntry {
   final List<String> fallbackRelays;
 }
 
+/// An invitation to join an account, scanned from `rhr invite`.
+///
+/// Distinct from a session code: a code starts one session, while this joins
+/// the phone to an account for good. The payload names the service so the
+/// phone redeems over HTTPS with the account service rather than through the
+/// relay, which does not authenticate its peers.
+class AccountInvite {
+  const AccountInvite({
+    required this.token,
+    required this.service,
+    required this.account,
+  });
+
+  final String token;
+  final String service;
+
+  /// Whose account this is, for the consent screen. A display name only.
+  final String account;
+}
+
+/// Reads a join invitation, or null when the QR is something else.
+AccountInvite? parseAccountInvite(String raw) {
+  try {
+    final map = jsonDecode(raw.trim()) as Map<String, dynamic>;
+    if (map['v'] != 1) return null;
+    final token = map['join'];
+    final service = map['service'];
+    if (token is! String || service is! String) return null;
+    // Only https: an invitation is a durable credential, and the plaintext
+    // LAN relay this tool also speaks would expose it to the network.
+    if (!service.startsWith('https://')) return null;
+    return AccountInvite(
+      token: token,
+      service: service,
+      account: map['account'] is String ? map['account'] as String : '',
+    );
+  } on FormatException {
+    return null;
+  } on TypeError {
+    return null;
+  }
+}
+
 /// Parses what a QR carries: either the structured payload the CLI prints
 /// (`{"code":..,"relay":..,"relays":[..]}`) or a bare code string.
 SessionCodeEntry parseSessionPayload(String raw) {
@@ -117,6 +160,7 @@ class SessionCodeField extends StatelessWidget {
     required this.actionLabel,
     required this.onSubmit,
     required this.onScanned,
+    this.onInvite,
     this.enabled = true,
     this.errorText,
   });
@@ -134,6 +178,10 @@ class SessionCodeField extends StatelessWidget {
   /// it knows what its current ones are.
   final ValueChanged<SessionCodeEntry> onScanned;
 
+  /// Called when the QR turns out to be an invitation to join an account
+  /// rather than a session code. Absent on screens that cannot join.
+  final ValueChanged<AccountInvite>? onInvite;
+
   final bool enabled;
 
   /// Shown under the field. A code complaint belongs against the input that
@@ -146,6 +194,13 @@ class SessionCodeField extends StatelessWidget {
       MaterialPageRoute(builder: (_) => const ScannerScreen()),
     );
     if (raw == null) return;
+    // An account invitation and a session code arrive through the same
+    // camera, so which one this is decides what happens next.
+    final invite = parseAccountInvite(raw);
+    if (invite != null) {
+      onInvite?.call(invite);
+      return;
+    }
     final entry = parseSessionPayload(raw);
     controller.text = formatSessionCodeInput(entry.code);
     onScanned(

@@ -198,6 +198,82 @@ Future<AccountSession> pollForToken(
   }
 }
 
+/// Exchanges the refresh token for a new access token.
+///
+/// WorkOS access tokens last about an hour, so any command run the next
+/// morning would otherwise be told to sign in again. The refresh token
+/// outlives them and is what makes sign-in a one-time step rather than a
+/// daily one.
+Future<AccountSession?> refreshAccountSession(
+  AccountSession session, {
+  HttpClient? client,
+}) async {
+  final http = client ?? HttpClient();
+  try {
+    final request = await http.postUrl(Uri.parse(_tokenUrl));
+    request.headers.contentType =
+        ContentType('application', 'x-www-form-urlencoded');
+    request.write(
+      'grant_type=refresh_token'
+      '&refresh_token=${Uri.encodeComponent(session.refreshToken)}'
+      '&client_id=${Uri.encodeComponent(rhrClientId)}',
+    );
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) return null;
+    final json = jsonDecode(body) as Map<String, Object?>;
+    final user = json['user'] as Map<String, Object?>?;
+    return AccountSession(
+      accessToken: json['access_token']! as String,
+      refreshToken: (json['refresh_token'] as String?) ?? session.refreshToken,
+      userId: (user?['id'] as String?) ?? session.userId,
+      email: (user?['email'] as String?) ?? session.email,
+      provider: session.provider,
+    );
+  } on Exception {
+    // A refresh that cannot complete is not fatal here: the caller decides
+    // whether to fall back to the unauthenticated path or ask for a sign-in.
+    return null;
+  } finally {
+    if (client == null) http.close();
+  }
+}
+
+/// The stored session with a token that has not expired, refreshing if needed.
+///
+/// Every caller wants a usable token rather than whatever was written to disk
+/// last time, so the refresh happens here instead of at each call site — and
+/// the refreshed session is written back, so the next command starts valid.
+Future<AccountSession?> currentAccountSession() async {
+  final stored = await loadAccountSession();
+  if (stored == null) return null;
+  if (!_expiresSoon(stored.accessToken)) return stored;
+  final refreshed = await refreshAccountSession(stored);
+  if (refreshed == null) return null;
+  await saveAccountSession(refreshed);
+  return refreshed;
+}
+
+/// True when a token is expired or close enough that a request would race it.
+bool _expiresSoon(String jwt) {
+  final parts = jwt.split('.');
+  if (parts.length != 3) return true;
+  try {
+    var payload = parts[1].replaceAll('-', '+').replaceAll('_', '/');
+    payload += '=' * ((4 - payload.length % 4) % 4);
+    final claims =
+        jsonDecode(utf8.decode(base64.decode(payload))) as Map<String, Object?>;
+    final exp = claims['exp'];
+    if (exp is! num) return true;
+    final expiry = DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000);
+    // A minute of headroom: a token that expires mid-request is the same
+    // problem as one that expired already.
+    return DateTime.now().add(const Duration(minutes: 1)).isAfter(expiry);
+  } on FormatException {
+    return true;
+  }
+}
+
 /// Where the signed-in session lives between runs.
 ///
 /// Beside the rest of this tool's state rather than in the project, so a token

@@ -21,6 +21,7 @@ import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'account_join.dart';
 import 'connector.dart';
 import 'session_code_field.dart';
 
@@ -198,6 +199,85 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Asks before joining, then joins.
+  ///
+  /// This phone usually belongs to the tester rather than the developer, so a
+  /// scan must not quietly attach it to someone's account: the sheet names
+  /// whose account it is and what joining allows, and does nothing until they
+  /// accept.
+  Future<void> _onInvite(AccountInvite invite) async {
+    final accepted = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: _surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                invite.account.isEmpty
+                    ? 'Join this account?'
+                    : 'Join ${invite.account}?',
+                style: const TextStyle(
+                  color: _ink,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'They will be able to see this phone in their device list and '
+                'connect to it to test their app.\n\n'
+                'They cannot see anything else on this phone, and you can '
+                'leave at any time.',
+                style: TextStyle(color: _inkDim, fontSize: 13.5, height: 1.45),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.of(sheetContext).pop(false),
+                      style: TextButton.styleFrom(foregroundColor: _inkDim),
+                      child: const Text('Not now'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(sheetContext).pop(true),
+                      style: FilledButton.styleFrom(backgroundColor: _violet),
+                      child: const Text('Join'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (accepted != true || !mounted) return;
+
+    final outcome = await redeemInvite(invite);
+    if (!mounted) return;
+    setState(() {
+      _status = switch (outcome) {
+        JoinAccepted(:final account, alreadyJoined: true) =>
+          'Already joined ${account.email}.',
+        JoinAccepted(:final account) =>
+          'Joined ${account.email}. They can now connect to this phone.',
+        JoinRejected(:final reason) => reason,
+      };
+    });
+  }
+
   /// A scan carries its own relay when the dev's QR named one; a typed code
   /// leaves whatever relay we already had in place.
   Future<void> _onScanned(SessionCodeEntry entry) async {
@@ -350,6 +430,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                           actionLabel: 'Connect',
                           onSubmit: _connect,
                           onScanned: _onScanned,
+                          onInvite: _onInvite,
                         ),
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
