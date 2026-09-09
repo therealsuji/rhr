@@ -520,7 +520,9 @@ class RhrSessionService : Service() {
 		if (!preferDirect || directFailureReported) return
 		directFailureReported = true
 		Log.w(TAG, "[$sessionCode] direct WebRTC session failed: $reason")
-		status = "retrying"
+		// Same reason as the socket failure above: a teardown the tester asked
+		// for must not report itself as a connection problem.
+		if (!stopped.get()) status = "retrying"
 		if (notifyPeer) {
 			webSocket.send(
 				JSONObject()
@@ -701,7 +703,13 @@ class RhrSessionService : Service() {
 							// the moment the real developer starts rhr.
 							Log.i(TAG, "[$sessionCode] session rejected (http $code)")
 							status = "rejected"
-						} else {
+						} else if (!stopped.get()) {
+							// Disconnect closes this socket itself, so the
+							// failure it raises arrives on a callback thread
+							// AFTER the stop set "idle" — and overwrote it with
+							// "retrying". The lobby then said disconnected while
+							// the overlay said it was still trying, and nothing
+							// was trying at all.
 							status = "retrying"
 						}
 						// Transfer progress belongs to this developer connection. If it
@@ -722,7 +730,8 @@ class RhrSessionService : Service() {
 					override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
 						if (generation != sessionGeneration) return
 						Log.w(TAG, "[$sessionCode] ONCLOSED code=$code reason=\"$reason\"")
-						status = "closed"
+						// A close the tester asked for is not a lost connection.
+						if (!stopped.get()) status = "closed"
 						setProgress("", 0, 0)
 						directTransport?.close()
 						directTransport = null
