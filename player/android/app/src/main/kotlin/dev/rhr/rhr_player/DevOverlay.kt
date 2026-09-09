@@ -1076,13 +1076,12 @@ class DevOverlay(
 			else -> {
 				val st = RhrSessionService.status
 				when (st) {
-					"connected", "idle" -> hideCard()
-					"waiting_dev" -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Waiting for developer…"
-						cardPct.visibility = View.GONE
-					}
+					// Waiting for a developer is the RESTING state, not an
+					// event: a phone sits in it for hours between sessions. A
+					// card here covered the tester's own app the whole time,
+					// which is the opposite of what an overlay is for. The
+					// bubble still carries the status for anyone who wants it.
+					"connected", "idle", "waiting_dev" -> hideCard()
 					"rejected" -> {
 						showCard()
 						bar.isIndeterminate = true
