@@ -7,10 +7,9 @@ plugins {
 }
 
 // Embeddable core of the rhr player: the native session service (relay dial,
-// tunnel, VM-service discovery, presence), published as an AAR for the
-// tier-2 "wrapped app" flow (see notes/PHASE2_CUSTOM_APP_WRAP.md). Deliberately
-// Flutter-free: a wrapped app provides its own engine; this only owns the
-// tunnel that lives outside it.
+// tunnel, VM-service discovery, presence), published as an AAR so the
+// standalone connector can consume it. Deliberately Flutter-free: the host
+// provides its own engine; this only owns the tunnel that lives outside it.
 //
 // Kotlin sources stay in the dev.rhr.rhr_player package so the player app and
 // host apps reference identical class names; only the Gradle namespace (R
@@ -64,8 +63,8 @@ afterEvaluate {
         }
         repositories {
             maven {
-                // Consumed by the rhr CLI's wrap/init-script injection
-                // (rhr wrap adds this repo + a debugImplementation dependency).
+                // Consumed by the connector's Gradle build, which resolves
+                // dev.rhr:bridge-android from this local repo.
                 name = "rhr"
                 url = uri(File(System.getProperty("user.home"), ".rhr/m2"))
             }

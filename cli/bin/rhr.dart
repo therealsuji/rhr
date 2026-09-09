@@ -35,7 +35,6 @@ import 'package:rhr_cli/restart_tracker.dart';
 import 'package:rhr_cli/terminal_qr.dart';
 import 'package:rhr_cli/usb_asset_transport.dart';
 import 'package:rhr_cli/version.dart';
-import 'package:rhr_cli/wrap.dart';
 
 const _usage = '''
 rhr — Expo Go for Flutter, over the internet.
@@ -52,9 +51,6 @@ Usage:
   rhr --version               print the installed CLI version
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
-  rhr wrap [options]          embed the tunnel into the app's own debug build
-  (--deliver streams the APK to the rhr player over the relay: cable-free
-   install — the player shows the system confirm sheet, one tap)
 
 run options:
   --project <dir>       Flutter project dir (default: current dir)
@@ -177,6 +173,19 @@ Future<void> main(List<String> args) async {
     exit(0);
   }
 
+  // `rhr wrap` rebuilt the target under a `.rhr` applicationId, leaving a
+  // second copy of the app on the phone. It was a third answer to a question
+  // the two remaining flows already answer, so it is gone. Say that, rather
+  // than letting the argument fall through to `run` as "unknown arg: wrap".
+  if (args[0] == 'wrap') {
+    stderr.writeln(
+      '[rhr] `rhr wrap` has been removed. Either host the project in the '
+      'player (`rhr run`), or tunnel a debug build already on the phone by '
+      'picking it in the connector and running `rhr attach`.',
+    );
+    exit(64);
+  }
+
   if (args[0] == 'player') {
     if (args.length < 2 || args[1] != 'build') {
       stderr.writeln('usage: rhr player build [options]');
@@ -212,68 +221,6 @@ Future<void> main(List<String> args) async {
       exit(0);
     } catch (error) {
       stderr.writeln('[rhr] player build failed: $error');
-      exit(1);
-    }
-  }
-
-  // rhr wrap — tier-2: embed the tunnel into the app's own debug build with
-  // zero edits to the app codebase (Gradle init script + AAR injection).
-  if (args[0] == 'wrap') {
-    String project = '.';
-    String? relay;
-    String? code;
-    var verbatimId = false;
-    var noInstall = false;
-    var deliver = false;
-    bool? direct;
-    for (var i = 1; i < args.length; i++) {
-      switch (args[i]) {
-        case '--project':
-          project = args[++i];
-        case '--relay':
-          relay = args[++i];
-        case '--code':
-          code = args[++i];
-        case '--id':
-          final value = args[++i];
-          if (value == 'verbatim') {
-            verbatimId = true;
-          } else if (value != 'suffix') {
-            stderr.writeln('unknown --id "$value" (suffix|verbatim)');
-            exit(64);
-          }
-        case '--no-install':
-          noInstall = true;
-        case '--deliver':
-          deliver = true;
-        case '--direct':
-          direct = true;
-        case '--no-direct':
-          direct = false;
-        default:
-          stderr.writeln('unknown arg: ${args[i]}');
-          exit(64);
-      }
-    }
-    try {
-      final result = await wrapApp(
-        WrapOptions(
-          project: project,
-          relay: relay,
-          code: code,
-          verbatimId: verbatimId,
-          install: !noInstall && !deliver,
-          deliver: deliver,
-          preferDirect: direct,
-        ),
-      );
-      stderr.writeln('[rhr] wrapped ✓ — open the app; it dials ${result.relay}');
-      stderr.writeln('[rhr] then attach: rhr run --code ${result.code}');
-      stderr.writeln('[rhr] session code is stable per project; '
-          '--code/--relay override it');
-      exit(0);
-    } on WrapFailure catch (failure) {
-      stderr.writeln('[rhr] wrap failed: $failure');
       exit(1);
     }
   }
@@ -728,26 +675,12 @@ Future<int?> _runSession({
             exit(78);
           }
           assetStoreId = announcedAssetStoreId;
-          final isWrappedApp = hostKind == 'app';
           final report = compatibility.differencesFrom(raw);
           for (final warning in report.warnings) {
             stderr.writeln('[rhr] note: $warning');
           }
           if (report.blockers.isNotEmpty) {
-            // A wrapped app bakes its identity from the SDK that wrapped it.
-            // Blockers mean the developer's SDK moved on since — the fix is a
-            // rebuild, never a player update (there is no player to update).
-            if (isWrappedApp || updateSender != null) {
-              if (isWrappedApp) {
-                stderr.writeln('[rhr] COMPATIBILITY_BLOCKED: the wrapped app '
-                    'was built with a different rhr identity — rebuild it:');
-                for (final difference in report.blockers) {
-                  stderr.writeln('  - $difference');
-                }
-                stderr.writeln('[rhr] fix: rhr wrap (rebuilds the app with '
-                    'this SDK, zero project edits)');
-                exit(78);
-              }
+            if (updateSender != null) {
               return; // transfer already in flight
             }
             stderr.writeln('[rhr] COMPATIBILITY_BLOCKED:');
@@ -1176,8 +1109,8 @@ Future<bool> _updatePlayerOverTheWire({
         '[rhr] confirm the install on the device, then reopen the rhr '
             'player; the session resumes automatically.',
       PlayerUpdateOutcome.installed =>
-        '[rhr] wrapped app installed — open it on the device; it dials the '
-            'relay with its baked code.',
+        '[rhr] app installed on the device — start a session against it '
+            'from the player.',
     });
     return true;
   } on PlayerUpdateFailure catch (failure) {

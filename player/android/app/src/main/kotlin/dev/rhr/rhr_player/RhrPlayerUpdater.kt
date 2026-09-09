@@ -32,8 +32,8 @@ import org.json.JSONObject
  *   kind="player" (default): the APK replaces THIS app; a silent apply
  *       kills the process, so "committed" is sent before commit() and
  *       STATUS_SUCCESS is normally unreachable.
- *   kind="app": the APK is a FOREIGN package (the tier-2 wrapped app,
- *       delivered through the player). This process survives the install,
+ *   kind="app": the APK is a FOREIGN package delivered through the
+ *       player. This process survives the install,
  *       so the result receiver reports the terminal "installed" (or
  *       "failure") after the user confirms the system sheet.
  */
@@ -177,9 +177,9 @@ class RhrPlayerUpdater(
 			val params = PackageInstaller.SessionParams(
 				PackageInstaller.SessionParams.MODE_FULL_INSTALL
 			).apply {
-				// kind=app delivers a FOREIGN package (the tier-2 wrapped
-				// app): the target comes from the wire and this process
-				// survives the install. kind=player is the self-update.
+				// kind=app delivers a FOREIGN package: the target comes
+				// from the wire and this process survives the install.
+				// kind=player is the self-update.
 				if (installTarget.isNotEmpty()) {
 					setAppPackageName(installTarget)
 				} else {
@@ -294,7 +294,7 @@ class UpdateResultReceiver : BroadcastReceiver() {
 			PackageInstaller.STATUS_SUCCESS -> {
 				// Unreachable for self-updates (the process dies first), but
 				// THE terminal state for foreign packages (kind=app): the
-				// wrapped app installed successfully.
+				// delivered app installed successfully.
 				RhrPlayerUpdater.active?.onInstalled()
 			}
 			else -> {

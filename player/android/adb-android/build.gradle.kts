@@ -11,9 +11,9 @@ plugins {
 // Shared by the player (connector mode) and the standalone connector so the
 // pairing/discovery logic has exactly one implementation.
 //
-// Kept OUT of bridge-android on purpose: that module is the tunnel core and
-// is published as an AAR into every wrapped app, which needs neither
-// BouncyCastle nor Conscrypt. Only an app that drives adbd pays for these.
+// Kept OUT of bridge-android on purpose: that module is the tunnel core, and
+// a host embedding it needs neither BouncyCastle nor Conscrypt. Only an app
+// that drives adbd pays for these.
 //
 // src/main/jniLibs carries a prebuilt libadb.so: the SPAKE2 handshake used
 // during pairing is native, and AdbPairingClient fails to initialise without

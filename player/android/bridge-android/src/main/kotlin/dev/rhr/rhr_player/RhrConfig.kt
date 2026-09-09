@@ -3,23 +3,18 @@ package dev.rhr.rhr_player
 import android.content.Context
 
 /**
- * Library configuration, read from the HOST app's string resources so a
- * wrapped app needs zero code: everything is baked at build time (by
- * `rhr wrap`'s init script) as resValue entries.
+ * Library configuration, read from the HOST app's string resources. Both hosts
+ * that ship this library — the player and the connector — bake these at build
+ * time as resValue entries, so the library itself carries no identity.
  *
  * Resource names (all optional; blanks mean "not provided"):
  *   rhr_flutter_version / rhr_framework_revision / rhr_engine_revision /
  *   rhr_dart_sdk_version / rhr_channel / rhr_android_plugins_json
- *       — the compatibility report announced in the session hello. The player
- *         mirrors its BuildConfig identity into these via resValue; wrapped
- *         apps get the project's pinned SDK identity baked by the CLI.
- *   rhr_host          — "player" (default) or "app" (wrapped app; the dev-side
- *                       gate treats this as exact-match-by-construction).
- *   rhr_relay_url     — relay to dial for auto-start. Blank => the host drives
- *                       sessions itself (the player's lobby does), and
- *                       RhrBridgeInit no-ops.
- *   rhr_session_code  — pairing code for auto-start.
- *   rhr_prefer_direct — "false" only for explicit relay-only mode.
+ *       — the compatibility report announced in the session hello, mirrored
+ *         from the host's BuildConfig identity.
+ *   rhr_host          — "player" (default) or "connector". The dev side gates
+ *                       on the player's identity and skips the gate entirely
+ *                       for the connector, which tunnels a third-party VM.
  *
  * Lookups are by name (getIdentifier) because these resources live in the
  * host app, not in the library's own R class.
@@ -41,11 +36,6 @@ object RhrConfig {
 	fun channel(ctx: Context): String = res(ctx, "rhr_channel")
 	fun androidPluginsJson(ctx: Context): String = res(ctx, "rhr_android_plugins_json")
 
-	/** "player" for the rhr player itself, "app" for a wrapped host app. */
+	/** "player" for the rhr player itself, "connector" for the connector. */
 	fun hostKind(ctx: Context): String = res(ctx, "rhr_host").ifBlank { "player" }
-
-	/** Non-blank turns RhrBridgeInit into an auto-start session bootstrap. */
-	fun autoRelayUrl(ctx: Context): String = res(ctx, "rhr_relay_url")
-	fun sessionCode(ctx: Context): String = res(ctx, "rhr_session_code")
-	fun preferDirect(ctx: Context): Boolean = res(ctx, "rhr_prefer_direct").lowercase() != "false"
 }

@@ -110,8 +110,8 @@ android {
             quotedBuildConfig(JsonOutput.toJson(androidPluginProfile)),
         )
         // Mirror the identity into resources for the bridge-android library:
-        // RhrConfig reads these (resource-based, so wrapped apps can bake the
-        // same keys at build time with zero code).
+        // RhrConfig reads these by name, so the library carries no identity of
+        // its own and each host bakes what describes it.
         resValue("string", "rhr_flutter_version", flutterIdentityField("frameworkVersion"))
         resValue("string", "rhr_framework_revision", flutterIdentityField("frameworkRevision"))
         resValue("string", "rhr_engine_revision", flutterIdentityField("engineRevision"))
@@ -119,8 +119,6 @@ android {
         resValue("string", "rhr_channel", flutterIdentityFieldOrNull("channel") ?: "")
         resValue("string", "rhr_android_plugins_json", JsonOutput.toJson(androidPluginProfile))
         resValue("string", "rhr_host", "player")
-        // No rhr_relay_url / rhr_session_code: the player's lobby drives
-        // sessions, so RhrBridgeInit auto-start no-ops here.
     }
 
     buildTypes {

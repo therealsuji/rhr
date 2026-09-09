@@ -44,8 +44,8 @@ flutter {
     source = "../.."
 }
 
-// RhrConfig (bridge-android) reads these; a wrapped app bakes the same
-// keys at build time.
+// RhrConfig (bridge-android) reads these to tell the dev side which host it
+// is talking to.
 android {
     buildFeatures {
         resValues = true

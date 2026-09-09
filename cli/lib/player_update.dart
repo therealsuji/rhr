@@ -113,9 +113,9 @@ enum PlayerUpdateOutcome {
 }
 
 /// Who receives the APK: `player` (the default — a self-update that may
-/// kill the device process) or `app` (a foreign package — the tier-2
-/// wrapped app — where the player survives and the system sheet's result
-/// is reported back as the terminal `installed` state).
+/// kill the device process) or `app` (a foreign package, where the player
+/// survives the install and the system sheet's result is reported back as
+/// the terminal `installed` state).
 enum UpdateKind { player, app }
 
 /// Streams one APK over the session transport. Construct it before sending,
@@ -227,7 +227,7 @@ final class PlayerUpdateSender {
       await _awaitState(
         {'installed'},
         timeout: const Duration(minutes: 10),
-        onTimeout: 'the wrapped app install was not confirmed on the device',
+        onTimeout: 'the app install was not confirmed on the device',
       );
       return PlayerUpdateOutcome.installed;
     }

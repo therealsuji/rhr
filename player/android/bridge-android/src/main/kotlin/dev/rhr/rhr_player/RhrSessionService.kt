@@ -149,7 +149,7 @@ class RhrSessionService : Service() {
 		// RhrPlayerUpdater does PackageInstaller self-updates). The factory
 		// receives the live socket's send functions; invoked lazily when the
 		// dev side starts an update transfer. Null => update frames are
-		// ignored (wrapped apps without an update hook).
+		// ignored (a host that ships no update hook).
 		@Volatile var updateHandlerFactory:
 			((ctx: Context, sendText: (String) -> Unit, sendBinary: (ByteArray) -> Unit)
 				-> RhrUpdateHandler)? = null
@@ -235,7 +235,7 @@ class RhrSessionService : Service() {
 	private var preferDirect = false
 	@Volatile private var directFailureReported = false
 	// Over-the-wire APK-update receiver, provided by the HOST app (the
-	// player installs its own replacement; wrapped apps may ship none).
+	// player installs its own replacement; other hosts may ship none).
 	// Created on demand; must live in this service (not the Dart world)
 	// because the install kills the process and the transfer must survive
 	// guest hot-restarts.
@@ -469,10 +469,8 @@ class RhrSessionService : Service() {
 		// {"t":"ready"} frame has already been consumed.
 		.put("ready", readySent)
 		.put("assetStoreId", assetStoreId)
-		// "player" | "app" | "connector". A wrapped app's identity is baked
-		// from the same SDK the CLI builds with, so the gate is exact-match by
-		// construction; the dev side also uses this to route update offers
-		// (never offered to a wrapped host).
+		// "player" | "connector", which is how the dev side decides whether to
+		// run the compatibility gate and offer a player update.
 		//
 		// Connector mode is the exception: we are tunneling a THIRD-party
 		// app's VM service, so the identity in this hello describes US, not
@@ -600,8 +598,8 @@ class RhrSessionService : Service() {
 							return
 						}
 						// Over-the-wire update control messages. The handler is
-						// host-provided; without one (plain wrapped app) the
-						// frames are ignored and the dev side surfaces the
+						// host-provided; without one the frames are
+						// ignored and the dev side surfaces the
 						// "did not acknowledge" timeout.
 						if (text.contains("\"update_begin\"") ||
 							text.contains("\"update_commit\"")) {
