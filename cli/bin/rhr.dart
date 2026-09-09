@@ -77,6 +77,7 @@ player build options:
 attach options:
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      session code, 16+ chars (or `code:` in .rhr.yaml)
+  --device <id>         a phone on your account (see `rhr devices`)
   --project <dir>       Flutter project dir (default: current dir)
   --sync-assets         also push build/flutter_assets — required for the
                         generic player (its APK has no per-project assets)
@@ -346,6 +347,7 @@ Future<void> main(List<String> args) async {
 
   String? relay;
   String? code;
+  String? device;
   String project = '.';
   String? pidFile;
   var runFlutter = true;
@@ -361,6 +363,8 @@ Future<void> main(List<String> args) async {
         relay = args[++i];
       case '--code':
         code = args[++i];
+      case '--device':
+        device = args[++i];
       case '--project':
         project = args[++i];
       case '--no-flutter':
@@ -393,6 +397,37 @@ Future<void> main(List<String> args) async {
   relay ??= cfg['relay'] ?? defaultPublicRelay;
   code ??= cfg['code'];
   if (direct && cfg['direct']?.toLowerCase() == 'false') direct = false;
+
+  // A device and a code name the same thing two ways, so asking for both is
+  // a contradiction rather than a preference — refuse instead of silently
+  // picking one.
+  if (device != null && code != null) {
+    stderr.writeln(
+      '[rhr] --device and --code both name a session; pass one or the other',
+    );
+    exit(64);
+  }
+  if (device != null) {
+    final session = await currentAccountSession();
+    if (session == null) {
+      stderr.writeln('[rhr] not signed in — run `rhr login`');
+      exit(1);
+    }
+    final rendezvous = await rendezvousForDevice(
+      service: _accountService(),
+      installationId: device,
+      session: session,
+    );
+    if (rendezvous == null) {
+      // Not falling back to a code: an account that cannot use a device must
+      // not end up in an unauthenticated session on somebody else's phone.
+      stderr.writeln(
+        '[rhr] "$device" is not a device on this account — run `rhr devices`',
+      );
+      exit(1);
+    }
+    code = rendezvous;
+  }
 
   if (code == null) {
     stderr.writeln(

@@ -274,6 +274,40 @@ bool _expiresSoon(String jwt) {
   }
 }
 
+/// Asks the account service where to meet a device this account may use.
+///
+/// The answer is a session name, not a secret: it says where to wait, and
+/// membership is what decides who may. A device this account was never
+/// invited to returns null rather than a name, and the caller must not fall
+/// back to an unauthenticated session on somebody else's phone.
+Future<String?> rendezvousForDevice({
+  required String service,
+  required String installationId,
+  required AccountSession session,
+  HttpClient? client,
+}) async {
+  final http = client ?? HttpClient();
+  try {
+    final request = await http.getUrl(
+      Uri.parse(
+        '$service/account/connect'
+        '?installationId=${Uri.encodeQueryComponent(installationId)}',
+      ),
+    );
+    request.headers.add('Authorization', 'Bearer ${session.accessToken}');
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) return null;
+    final json = jsonDecode(body) as Map<String, Object?>;
+    final rendezvous = json['rendezvous'];
+    return rendezvous is String ? rendezvous : null;
+  } on Exception {
+    return null;
+  } finally {
+    if (client == null) http.close();
+  }
+}
+
 /// Where the signed-in session lives between runs.
 ///
 /// Beside the rest of this tool's state rather than in the project, so a token
