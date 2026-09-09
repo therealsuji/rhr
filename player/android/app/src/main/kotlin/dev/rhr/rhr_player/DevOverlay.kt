@@ -807,44 +807,13 @@ class DevOverlay(
 		})
 		statusCard.addView(statusLine, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3); bottomMargin = dp(3) })
+		// Status and session only. The VM URI and cache size answer questions a
+		// developer has and a tester does not, and this sheet belongs to
+		// whoever is holding the phone.
 		row("session", RhrSessionService.currentCode.ifEmpty { "—" })
-		row("vm", RhrSessionService.currentVm.ifEmpty { "—" }, mono = true)
-		val cacheMb = RhrSessionService.assetCacheSizeBytes() / (1024 * 1024)
-		row("cache", "$cacheMb MB")
 		sheet.addView(statusCard, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT,
 			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
-
-		// Recovery: wipe the cached per-project asset stores (next sync cold).
-		sheet.addView(iconRow("✕", "Clear cached apps (next sync cold)", primary = false) {
-			RhrSessionService.clearAssetCaches()
-			closeMenu()
-		}, LinearLayout.LayoutParams(
-			ViewGroup.LayoutParams.MATCH_PARENT,
-			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
-
-		// Deliberate fault injection — QA/state-machine testing only.
-		sheet.addView(TextView(activity).apply {
-			text = "Test faults"
-			setTextColor(inkDim)
-			textSize = 11f
-			letterSpacing = 0.08f
-			typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-			setPadding(0, dp(18), 0, dp(6))
-		})
-		fun faultRow(glyph: String, label: String, fault: String) {
-			sheet.addView(iconRow(glyph, label, primary = false) {
-				RhrSessionService.debugInjectFault(fault)
-				closeMenu()
-			}, LinearLayout.LayoutParams(
-				ViewGroup.LayoutParams.MATCH_PARENT,
-				ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
-		}
-		faultRow("↻", "Relay loss (close socket)", "relay-loss")
-		faultRow("⚠", "Force retrying", "status-retrying")
-		faultRow("✖", "Force rejected", "status-rejected")
-		faultRow("◐", "Stall reload phase", "phase-reloading")
-		faultRow("✓", "Reset state", "clear")
 
 		// Actions
 		sheet.addView(iconRow("↻", "Reconnect", primary = true) {

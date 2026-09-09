@@ -137,6 +137,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       // nothing stays on the lobby, which is what keeps the code path whole.
       _waitOnAccountRendezvous();
     });
+    _collectLinkInvite();
   }
 
   @override
@@ -212,6 +213,32 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Handles what the native side pushes to the lobby.
+  Future<dynamic> lobbyChannelHandler(MethodCall call) async {
+    if (call.method != 'inviteArrived' || !mounted) return null;
+    final invite = parseAccountInvite('${call.arguments}');
+    if (invite != null) await _onInvite(invite);
+    return null;
+  }
+
+  /// Picks up an invitation that arrived as an `rhr://` link.
+  ///
+  /// Same payload a QR carries, so it lands on the same consent screen: the
+  /// difference is only how it reached the phone. A link can travel however a
+  /// team already talks, where a QR needs both people in one room.
+  Future<void> _collectLinkInvite() async {
+    const channel = MethodChannel('rhr/connector');
+    // A link that arrives while the player is already open is pushed rather
+    // than polled, since there is no launch to read it from. Named so the
+    // connector screen can put it back when it leaves — it takes this same
+    // channel over while it is open.
+    channel.setMethodCallHandler(lobbyChannelHandler);
+    final payload = await channel.invokeMethod<String>('pendingInvite');
+    if (payload == null || !mounted) return;
+    final invite = parseAccountInvite(payload);
+    if (invite != null) await _onInvite(invite);
+  }
+
   /// Waits on this phone's own rendezvous, when it belongs to an account.
   ///
   /// Nobody types anything for this: the name comes from the installation
@@ -265,13 +292,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
+              // Two facts decide this: what they get, and that it is
+              // reversible. Everything else was reassurance the tester has to
+              // read before they can answer.
               const Text(
-                'They will be able to see this phone in their device list and '
-                'connect to it to test their app.\n\n'
-                'They cannot see anything else on this phone, and you can '
-                'leave at any time.',
-                style: TextStyle(color: _inkDim, fontSize: 13.5, height: 1.45),
+                'They can connect to this phone to test their app. '
+                'Leave any time.',
+                style: TextStyle(color: _inkDim, fontSize: 13.5, height: 1.4),
               ),
               const SizedBox(height: 20),
               Row(
@@ -581,6 +609,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         builder: (_) => ConnectorScreen(
           relay: _relay,
           fallbackRelays: _fallbackRelays,
+          restoreHandler: lobbyChannelHandler,
         ),
       ),
     ),

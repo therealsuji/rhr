@@ -34,8 +34,12 @@ class MainActivity : FlutterActivity() {
 
 	private var overlay: DevOverlay? = null
 
+	/** An `rhr://` invitation this launch carried, until Dart collects it. */
+	private var pendingInvite: String? = null
+
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
+		readInvite(intent)
 		// The library owns the tunnel; the player owns the over-the-wire
 		// self-update (PackageInstaller). Registered before any session can
 		// start so an update arriving mid-session always has a handler.
@@ -47,6 +51,28 @@ class MainActivity : FlutterActivity() {
 	override fun provideFlutterEngine(context: Context): FlutterEngine? = sessionEngine
 
 	override fun shouldDestroyEngineWithHost(): Boolean = false
+
+	override fun onNewIntent(intent: Intent) {
+		super.onNewIntent(intent)
+		// A link that arrives while the player is already open.
+		readInvite(intent)
+		if (pendingInvite != null) {
+			connector.invokeMethod("inviteArrived", pendingInvite)
+			pendingInvite = null
+		}
+	}
+
+	/**
+	 * Pulls an invitation payload out of an `rhr://join?...` link.
+	 *
+	 * The same JSON a QR carries, so both arrive at one consent screen — the
+	 * difference is only how it reached the phone.
+	 */
+	private fun readInvite(intent: Intent?) {
+		val data = intent?.data ?: return
+		if (data.scheme != "rhr" || data.host != "join") return
+		pendingInvite = data.getQueryParameter("payload")
+	}
 
 	override fun onPostResume() {
 		super.onPostResume()
@@ -191,6 +217,13 @@ class MainActivity : FlutterActivity() {
 				// Who this installation is, for joining an account. The secret
 				// deliberately stays native: Dart is replaced wholesale by a guest
 				// hot restart, so anything a guest could read is not a secret.
+				// An invitation that arrived as a link rather than a QR, if this
+				// launch carried one. Consumed once: a relaunch must not
+				// re-offer a join the tester already answered.
+				"pendingInvite" -> {
+					result.success(pendingInvite)
+					pendingInvite = null
+				}
 				"installationId" -> result.success(InstallationIdentity.id(this))
 				// Proves this installation is itself. The id alone is public —
 				// it appears in device listings — so anything that acts on a

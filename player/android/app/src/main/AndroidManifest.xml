@@ -62,6 +62,17 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- An invitation as a link, so it can arrive however a team
+                 already talks: a message, a chat, a terminal. The QR is the
+                 same payload photographed, and needs both people in one room.
+                 Also what makes this testable without pointing a camera at a
+                 screen. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="rhr"/>
+            </intent-filter>
         </activity>
         <!-- Native session service: the tunnel bridge must live outside the
              Dart world so guest-kernel hot restarts can't kill it. -->

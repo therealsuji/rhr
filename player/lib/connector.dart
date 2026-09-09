@@ -81,7 +81,15 @@ class ConnectorScreen extends StatefulWidget {
     super.key,
     required this.relay,
     required this.fallbackRelays,
+    this.restoreHandler,
   });
+
+  /// Put back when this screen closes.
+  ///
+  /// The lobby listens on the same channel for invitations arriving as links,
+  /// and this screen takes it over while it is open. Clearing it on the way
+  /// out left the lobby deaf for the rest of the run.
+  final Future<dynamic> Function(MethodCall)? restoreHandler;
 
   final String relay;
   final List<String> fallbackRelays;
@@ -133,7 +141,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _connector.setMethodCallHandler(null);
+    _connector.setMethodCallHandler(widget.restoreHandler);
     _code.dispose();
     super.dispose();
   }
