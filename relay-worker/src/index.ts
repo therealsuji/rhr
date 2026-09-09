@@ -36,7 +36,12 @@
 // current one for its role. Without that check a predecessor's close event
 // tears down its own successor.
 
-import { accountForToken, createInvite, redeemInvite } from "./accounts";
+import {
+	accountForToken,
+	cleanLabel,
+	createInvite,
+	redeemInvite,
+} from "./accounts";
 
 export interface Env {
 	SESSIONS: DurableObjectNamespace;
@@ -558,7 +563,7 @@ export default {
 				env,
 				body.invite,
 				body.installationId,
-				body.label?.slice(0, 64) || "phone",
+				cleanLabel(body.label),
 			);
 			if (!result.ok) {
 				return Response.json({ error: result.reason }, { status: 409 });

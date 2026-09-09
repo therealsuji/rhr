@@ -9,9 +9,15 @@
 // request carrying an Origin header because only native clients belong on it,
 // while these are ordinary HTTP endpoints.
 
+import { verifyAccessToken } from "./verify_token";
+
 export interface AccountsEnv {
 	ACCOUNTS: D1Database;
 }
+
+/** The client whose tokens this relay accepts. A token signed for a different
+ *  WorkOS client is somebody else's and is refused. */
+const CLIENT_ID = "client_01M20J8AWHXDECB250NDEB8YYJ";
 
 /** How long a QR stays redeemable. Long enough to walk over, short enough
  *  that a photographed screen is not a standing invitation. */
@@ -19,6 +25,26 @@ const INVITE_TTL_MS = 5 * 60 * 1000;
 
 /** 128 bits, so an invite cannot be guessed inside its lifetime. */
 const INVITE_BYTES = 16;
+
+/**
+ * Cleans a device label supplied by the phone.
+ *
+ * The label is chosen by whoever holds the phone and then displayed in the
+ * developer's device list, so it is attacker-controlled text in someone
+ * else's terminal. Control characters could forge extra lines or overwrite
+ * what is already on screen, which is how a device picker gets made to
+ * suggest something it never said. Strip them, collapse whitespace, and keep
+ * it short.
+ */
+export const cleanLabel = (raw: string | undefined): string => {
+	const cleaned = (raw ?? "")
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 64);
+	return cleaned || "phone";
+};
 
 const token = (bytes: number) => {
 	const raw = crypto.getRandomValues(new Uint8Array(bytes));
@@ -38,19 +64,18 @@ export async function accountForToken(
 	const bearer = authorization?.replace(/^Bearer /, "");
 	if (!bearer) return null;
 
-	// WorkOS signs its access tokens as JWTs. The claims are read here rather
-	// than verified: this endpoint hands out invites to an account, and the
-	// next step (a signature check against the published JWKS) is what makes
-	// that safe. Recorded as a gap rather than left implicit.
-	const claims = readJwtClaims(bearer);
+	// Verified, not merely decoded: an unverified JWT authenticates nobody,
+	// since anyone can write a `sub` and base64 it. This route hands out
+	// invites to an account, so the signature is what stands between a
+	// stranger and someone else's devices.
+	const claims = await verifyAccessToken(bearer, CLIENT_ID);
 	if (!claims) return null;
 	const userId = claims.sub;
-	if (typeof userId !== "string") return null;
-	// The access token carries no email claim, so the CLI passes what the
-	// sign-in told it. It is a display name for the consent screen — "join
-	// Suji's account?" — and never an authorisation input; `sub` is what
-	// identifies the account.
-	const email = claimedEmail ?? "";
+	// WorkOS access tokens carry no email claim, so the CLI passes what
+	// sign-in told it. It names the account on the phone's consent screen —
+	// "join Suji's account?" — and is never an authorisation input; `sub`,
+	// which is signed, is what identifies the account.
+	const email = claims.email ?? claimedEmail ?? "";
 
 	const existing = await env.ACCOUNTS.prepare(
 		"SELECT id, email FROM accounts WHERE auth_user_id = ?",
@@ -76,19 +101,6 @@ export async function accountForToken(
 		.bind(id, userId, email, Date.now())
 		.run();
 	return { id, email };
-}
-
-/** Decodes a JWT's payload without verifying it. */
-function readJwtClaims(jwt: string): Record<string, unknown> | null {
-	const payload = jwt.split(".")[1];
-	if (!payload) return null;
-	try {
-		const json = atob(payload.replaceAll("-", "+").replaceAll("_", "/"));
-		const claims = JSON.parse(json);
-		return typeof claims === "object" && claims !== null ? claims : null;
-	} catch {
-		return null;
-	}
 }
 
 /** Mints an invite for a developer to show as a QR. */
@@ -151,6 +163,22 @@ export async function redeemInvite(
 
 	const already = invite.redeemed_by === installationId;
 	const now = Date.now();
+
+	// Claim the invite with a conditional update rather than trusting the read
+	// above. Two phones scanning the same QR at once would both see it unspent
+	// and both pass that check; only one can win this, because the WHERE
+	// clause is evaluated when the write happens.
+	if (!already) {
+		const claimed = await env.ACCOUNTS.prepare(
+			"UPDATE invites SET redeemed_by = ? WHERE token = ? AND redeemed_by IS NULL",
+		)
+			.bind(installationId, inviteToken)
+			.run();
+		if (!claimed.meta.changes) {
+			return { ok: false, reason: "this invite has already been used" };
+		}
+	}
+
 	await env.ACCOUNTS.batch([
 		env.ACCOUNTS.prepare(
 			"INSERT OR IGNORE INTO installations (id, created_at) VALUES (?, ?)",
@@ -159,9 +187,6 @@ export async function redeemInvite(
 			"INSERT OR IGNORE INTO memberships " +
 				"(account_id, installation_id, label, joined_at) VALUES (?, ?, ?, ?)",
 		).bind(invite.account_id, installationId, label, now),
-		env.ACCOUNTS.prepare(
-			"UPDATE invites SET redeemed_by = ? WHERE token = ?",
-		).bind(installationId, inviteToken),
 	]);
 
 	return {
