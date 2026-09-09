@@ -84,6 +84,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   // Hidden QA entry: tap the footer 7× to open the fault-injection sheet.
   int _debugTaps = 0;
 
+  /// Whether the code field is on screen.
+  ///
+  /// Joining is how this is used now, so the code is a way in round the back:
+  /// still there for a LAN with no account service, or a phone nobody wants
+  /// joined to anything, but no longer the first thing a tester reads.
+  bool _showCodeEntry = false;
+
   // Design tokens matching the native DevOverlay.
   static const _violet = _violetColor;
   static const _ink = Color(0xFFF3F1FA);
@@ -443,9 +450,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 12),
                         const Text(
-                          'rhr plays any Flutter project over the internet. '
-                          'Scan the QR from your terminal (rhr run) or enter a '
-                          'code, then hot reload like the phone is plugged in.',
+                          'Scan the QR from your developer to let them test on '
+                          'this phone. You stay in control — leave any time.',
                           style: TextStyle(
                             color: _inkDim,
                             fontSize: 14,
@@ -453,13 +459,34 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                           ),
                         ),
                         const SizedBox(height: 26),
-                        SessionCodeField(
-                          controller: _code,
-                          actionLabel: 'Connect',
-                          onSubmit: _connect,
-                          onScanned: _onScanned,
-                          onInvite: _onInvite,
-                        ),
+                        _scanToJoin(),
+                        const SizedBox(height: 14),
+                        // Still one tap away, and deliberately so: this is the
+                        // only way in when the account service cannot be
+                        // reached, which is exactly when a buried alternative
+                        // would hurt most.
+                        if (_showCodeEntry)
+                          SessionCodeField(
+                            controller: _code,
+                            actionLabel: 'Connect',
+                            onSubmit: _connect,
+                            onScanned: _onScanned,
+                            onInvite: _onInvite,
+                          )
+                        else
+                          Center(
+                            child: TextButton(
+                              onPressed: () =>
+                                  setState(() => _showCodeEntry = true),
+                              style: TextButton.styleFrom(
+                                foregroundColor: _inkDim,
+                              ),
+                              child: const Text(
+                                'Enter a session code instead',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          ),
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
                         const SizedBox(height: 18),
@@ -511,6 +538,35 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       ),
     );
   }
+
+  /// The front door: scan an invitation and this phone joins an account.
+  Widget _scanToJoin() => FilledButton.icon(
+    onPressed: () async {
+      final raw = await Navigator.of(context).push<String>(
+        MaterialPageRoute(builder: (_) => const ScannerScreen()),
+      );
+      if (raw == null || !mounted) return;
+      final invite = parseAccountInvite(raw);
+      if (invite != null) {
+        await _onInvite(invite);
+        return;
+      }
+      // A session-code QR scanned here still works rather than being
+      // rejected for arriving at the wrong button.
+      final entry = parseSessionPayload(raw);
+      _code.text = formatSessionCodeInput(entry.code);
+      await _onScanned(entry);
+    },
+    icon: const Icon(Icons.qr_code_scanner_rounded, size: 22),
+    label: const Text('Scan to connect'),
+    style: FilledButton.styleFrom(
+      backgroundColor: _violet,
+      foregroundColor: Colors.white,
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      textStyle: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
+    ),
+  );
 
   /// The second way to use the player: leave an already-installed app where
   /// it is and tunnel that instead of hosting a guest project here. Presented

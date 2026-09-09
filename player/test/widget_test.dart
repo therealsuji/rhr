@@ -5,13 +5,30 @@ import 'package:rhr_player/session_code_field.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  testWidgets('shows the empty player lobby', (tester) async {
+  testWidgets('leads with scanning, not with a code field', (tester) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const PlayerApp());
     await tester.pumpAndSettle();
 
     expect(find.text('rhr player · debug build'), findsOneWidget);
+    expect(find.text('Scan to connect'), findsOneWidget);
+    // Joining is how this is used now; the code is a way in round the back.
+    expect(find.byType(SessionCodeField), findsNothing);
+    expect(find.text('Enter a session code instead'), findsOneWidget);
+  });
+
+  testWidgets('a code is still one tap away', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+
+    await tester.pumpWidget(const PlayerApp());
+    await tester.pumpAndSettle();
+
+    // Demoted, not removed: this is the only way in when the account service
+    // cannot be reached.
+    await tester.tap(find.text('Enter a session code instead'));
+    await tester.pumpAndSettle();
+
     expect(find.byType(SessionCodeField), findsOneWidget);
     expect(find.text('Connect'), findsOneWidget);
   });
@@ -21,6 +38,8 @@ void main() {
   ) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(const PlayerApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Enter a session code instead'));
     await tester.pumpAndSettle();
 
     // The formatter drops everything outside the alphabet, so what lands in
