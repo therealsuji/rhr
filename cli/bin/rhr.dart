@@ -48,6 +48,7 @@ Usage:
   rhr logout                  forget the signed-in account
   rhr whoami                  print the signed-in account
   rhr invite                  show a QR for a phone to join this account
+  rhr devices [--remove <id>] list the phones on this account
   rhr --version               print the installed CLI version
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
@@ -133,6 +134,10 @@ Future<void> main(List<String> args) async {
 
   if (args.first == 'invite') {
     exit(await _invite());
+  }
+
+  if (args.first == 'devices') {
+    exit(await _devices(args.skip(1).toList()));
   }
 
   if (args.first == 'whoami') {
@@ -1338,6 +1343,80 @@ Future<int> _runAttachProductFlow({
   }
 }
 
+/// The account service, derived from the relay: they are the same deployment,
+/// and a developer who pointed at a private relay means that one.
+String _accountService() => const String.fromEnvironment(
+  'RHR_RELAY',
+  defaultValue: defaultPublicRelay,
+).replaceFirst('wss://', 'https://').replaceFirst('ws://', 'http://');
+
+/// `rhr devices`: list the phones on this account, or remove one.
+Future<int> _devices(List<String> args) async {
+  final session = await currentAccountSession();
+  if (session == null) {
+    stderr.writeln('[rhr] not signed in — run `rhr login`');
+    return 1;
+  }
+  final removeIndex = args.indexOf('--remove');
+  final removing = removeIndex != -1 && removeIndex + 1 < args.length
+      ? args[removeIndex + 1]
+      : null;
+
+  final http = HttpClient();
+  try {
+    final base = _accountService();
+    if (removing != null) {
+      final request = await http.deleteUrl(
+        Uri.parse(
+          '$base/account/devices'
+          '?installationId=${Uri.encodeQueryComponent(removing)}',
+        ),
+      );
+      request.headers.add('Authorization', 'Bearer ${session.accessToken}');
+      final response = await request.close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode != 200) {
+        stderr.writeln('[rhr] could not remove that device: $body');
+        return 1;
+      }
+      final removed = (jsonDecode(body) as Map<String, Object?>)['removed'];
+      stdout.writeln(
+        removed == true
+            ? '[rhr] removed $removing'
+            : '[rhr] $removing was not on this account',
+      );
+      return removed == true ? 0 : 1;
+    }
+
+    final request = await http.getUrl(Uri.parse('$base/account/devices'));
+    request.headers.add('Authorization', 'Bearer ${session.accessToken}');
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) {
+      stderr.writeln('[rhr] could not list devices: $body');
+      return 1;
+    }
+    final devices =
+        (jsonDecode(body) as Map<String, Object?>)['devices'] as List<Object?>;
+    if (devices.isEmpty) {
+      stdout.writeln(
+        'No devices yet. Run `rhr invite` and scan the QR with the player.',
+      );
+      return 0;
+    }
+    stdout.writeln('');
+    for (final entry in devices.cast<Map<String, Object?>>()) {
+      // The id is what --device and --remove take; the label is only what the
+      // phone called itself, and two phones may well share one.
+      stdout.writeln('  ${entry['installationId']}  ${entry['label']}');
+    }
+    stdout.writeln('');
+    return 0;
+  } finally {
+    http.close();
+  }
+}
+
 /// `rhr invite`: show a QR a phone can scan to join this account.
 ///
 /// The phone never signs in — it redeems this and holds a membership from
@@ -1349,10 +1428,7 @@ Future<int> _invite() async {
     stderr.writeln('[rhr] not signed in — run `rhr login`');
     return 1;
   }
-  final relay = const String.fromEnvironment(
-    'RHR_RELAY',
-    defaultValue: defaultPublicRelay,
-  ).replaceFirst('wss://', 'https://').replaceFirst('ws://', 'http://');
+  final relay = _accountService();
   final http = HttpClient();
   try {
     final uri = Uri.parse(
