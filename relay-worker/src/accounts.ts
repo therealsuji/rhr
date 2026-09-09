@@ -118,6 +118,72 @@ export async function createInvite(
 	return { token: value, expiresAt };
 }
 
+/** Hex SHA-256, so a leaked database does not hand over device credentials. */
+async function hashSecret(secret: string): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(secret),
+	);
+	return [...new Uint8Array(digest)]
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+/**
+ * Proves a request really comes from the installation it names.
+ *
+ * The installation id is public — it appears in device listings and logs —
+ * so it identifies a phone but authenticates nothing. Without this, anyone
+ * who read an id could see which accounts that phone had joined, and remove
+ * it from them. The secret never leaves the phone except as this proof.
+ *
+ * Comparison is constant-time-ish by construction: both sides are fixed-length
+ * hex of a hash, so an early exit leaks nothing about the secret itself.
+ */
+export async function installationIsGenuine(
+	env: AccountsEnv,
+	installationId: string,
+	secret: string | null,
+): Promise<boolean> {
+	if (!secret) return false;
+	const row = await env.ACCOUNTS.prepare(
+		"SELECT secret_hash FROM installations WHERE id = ?",
+	)
+		.bind(installationId)
+		.first<{ secret_hash: string | null }>();
+	if (!row?.secret_hash) return false;
+	return row.secret_hash === (await hashSecret(secret));
+}
+
+/**
+ * The session name a phone waits on when it is reached through an account.
+ *
+ * Derived from the installation id rather than stored, so both ends can
+ * compute it without a lookup, and it is stable for the life of the
+ * installation. It is not a secret: it names where to meet, and membership is
+ * what decides who may. Prefixed and padded to clear the relay's 16-character
+ * minimum, which exists because a session code is a bearer token — this is
+ * not one, but the route enforces the same floor.
+ */
+export function rendezvousFor(installationId: string): string {
+	const safe = installationId.replace(/[^A-Za-z0-9_-]/g, "");
+	return `dev-${safe}`.padEnd(16, "0");
+}
+
+/** Whether this account may use this installation. */
+export async function hasMembership(
+	env: AccountsEnv,
+	accountId: string,
+	installationId: string,
+): Promise<boolean> {
+	const row = await env.ACCOUNTS.prepare(
+		"SELECT 1 AS ok FROM memberships WHERE account_id = ? AND installation_id = ?",
+	)
+		.bind(accountId, installationId)
+		.first<{ ok: number }>();
+	return row !== null;
+}
+
 /** The devices on an account, for the developer's list. */
 export async function devicesForAccount(
 	env: AccountsEnv,
@@ -198,6 +264,7 @@ export async function redeemInvite(
 	env: AccountsEnv,
 	inviteToken: string,
 	installationId: string,
+	secret: string,
 	label: string,
 ): Promise<JoinResult> {
 	const invite = await env.ACCOUNTS.prepare(
@@ -244,9 +311,13 @@ export async function redeemInvite(
 	}
 
 	await env.ACCOUNTS.batch([
+		// The first join is where a phone registers what it will prove itself
+		// with later. An installation that already exists keeps its secret: a
+		// second join must not let a stranger overwrite it.
 		env.ACCOUNTS.prepare(
-			"INSERT OR IGNORE INTO installations (id, created_at) VALUES (?, ?)",
-		).bind(installationId, now),
+			"INSERT OR IGNORE INTO installations (id, secret_hash, created_at) " +
+				"VALUES (?, ?, ?)",
+		).bind(installationId, await hashSecret(secret), now),
 		env.ACCOUNTS.prepare(
 			"INSERT OR IGNORE INTO memberships " +
 				"(account_id, installation_id, label, joined_at) VALUES (?, ?, ?, ?)",

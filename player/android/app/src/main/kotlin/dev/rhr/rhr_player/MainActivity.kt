@@ -192,6 +192,11 @@ class MainActivity : FlutterActivity() {
 				// deliberately stays native: Dart is replaced wholesale by a guest
 				// hot restart, so anything a guest could read is not a secret.
 				"installationId" -> result.success(InstallationIdentity.id(this))
+				// Proves this installation is itself. The id alone is public —
+				// it appears in device listings — so anything that acts on a
+				// membership has to carry this too.
+				"installationSecret" -> result.success(
+					InstallationIdentity.secret(this))
 				// What the developer will see this phone called in their device
 				// list. A starting point the account owner can rename, not an
 				// identifier — the installation id is what identifies it.

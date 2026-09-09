@@ -43,6 +43,9 @@ import {
 	createInvite,
 	devicesForAccount,
 	endMembership,
+	hasMembership,
+	installationIsGenuine,
+	rendezvousFor,
 	redeemInvite,
 } from "./accounts";
 
@@ -555,10 +558,11 @@ export default {
 			const body = (await request.json().catch(() => null)) as {
 				invite?: string;
 				installationId?: string;
+				secret?: string;
 				label?: string;
 			} | null;
-			if (!body?.invite || !body.installationId) {
-				return new Response("invite and installationId are required", {
+			if (!body?.invite || !body.installationId || !body.secret) {
+				return new Response("invite, installationId and secret are required", {
 					status: 400,
 				});
 			}
@@ -566,6 +570,7 @@ export default {
 				env,
 				body.invite,
 				body.installationId,
+				body.secret,
 				cleanLabel(body.label),
 			);
 			if (!result.ok) {
@@ -576,6 +581,33 @@ export default {
 				account: result.email,
 				alreadyJoined: result.alreadyJoined,
 			});
+		}
+
+		// Where to meet a device this account may use.
+		//
+		// Membership is checked here, before the CLI is told anything: an
+		// account that has not been invited learns only that it cannot use this
+		// device, not whether it exists or who has it. The rendezvous name is
+		// derived rather than stored, so both ends compute the same one without
+		// a lookup.
+		if (seg.length === 2 && seg[0] === "account" && seg[1] === "connect") {
+			const installationId = url.searchParams.get("installationId");
+			if (!installationId) {
+				return new Response("installationId is required", { status: 400 });
+			}
+			const account = await accountForToken(
+				env,
+				request.headers.get("Authorization"),
+			);
+			// Failing closed: an unverifiable token must never fall through to
+			// an unauthenticated session on somebody's phone.
+			if (!account) return new Response("sign in first", { status: 401 });
+			if (!(await hasMembership(env, account.id, installationId))) {
+				return new Response("this device is not on your account", {
+					status: 403,
+				});
+			}
+			return Response.json({ rendezvous: rendezvousFor(installationId) });
 		}
 
 		// The devices on the signed-in account, and removing one.
@@ -611,6 +643,21 @@ export default {
 			const installationId = url.searchParams.get("installationId");
 			if (!installationId) {
 				return new Response("installationId is required", { status: 400 });
+			}
+			// An installation id names a phone but proves nothing — it travels
+			// in device listings and logs. Without the secret, anyone who read
+			// one could see which accounts that phone had joined, and remove it
+			// from them.
+			if (
+				!(await installationIsGenuine(
+					env,
+					installationId,
+					request.headers.get("x-rhr-installation-secret"),
+				))
+			) {
+				return new Response("this device could not prove itself", {
+					status: 401,
+				});
 			}
 			if (request.method === "GET") {
 				return Response.json({

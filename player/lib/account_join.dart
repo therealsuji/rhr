@@ -63,7 +63,8 @@ class JoinRejected extends JoinOutcome {
 Future<JoinOutcome> redeemInvite(AccountInvite invite) async {
   final installationId =
       await _connector.invokeMethod<String>('installationId');
-  if (installationId == null) {
+  final secret = await _connector.invokeMethod<String>('installationSecret');
+  if (installationId == null || secret == null) {
     return const JoinRejected('This phone could not identify itself.');
   }
   final http = HttpClient();
@@ -74,6 +75,9 @@ Future<JoinOutcome> redeemInvite(AccountInvite invite) async {
       jsonEncode({
         'invite': invite.token,
         'installationId': installationId,
+        // Registered on the first join and required by anything that acts on
+        // a membership afterwards.
+        'secret': secret,
         'label': await _deviceLabel(),
       }),
     );
