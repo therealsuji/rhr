@@ -122,7 +122,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         if (autoResume && saved.length >= 16) {
           _connect(auto: true);
         }
+        return;
       }
+      // No saved code, but this phone may have joined an account — then it
+      // waits on its own rendezvous instead, so a developer who picks it from
+      // their device list finds it already there. A phone that has joined
+      // nothing stays on the lobby, which is what keeps the code path whole.
+      _waitOnAccountRendezvous();
     });
   }
 
@@ -197,6 +203,28 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         }),
       );
     }
+  }
+
+  /// Waits on this phone's own rendezvous, when it belongs to an account.
+  ///
+  /// Nobody types anything for this: the name comes from the installation
+  /// identity, and a developer who was invited computes the same one. Doing
+  /// nothing when no account has been joined is deliberate — a phone that has
+  /// joined nothing must still reach the code path.
+  Future<void> _waitOnAccountRendezvous() async {
+    if (!mounted) return;
+    final accounts = await joinedAccounts();
+    if (accounts.isEmpty || !mounted) return;
+    final rendezvous = await ownRendezvous();
+    if (rendezvous == null || !mounted) return;
+    setState(() => _code.text = rendezvous);
+    await _connect(auto: true);
+    if (!mounted) return;
+    setState(() {
+      _status = accounts.length == 1
+          ? 'Waiting for ${accounts.first.email}.'
+          : 'Waiting for any of ${accounts.length} accounts.';
+    });
   }
 
   /// Asks before joining, then joins.

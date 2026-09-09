@@ -109,6 +109,23 @@ Future<JoinOutcome> redeemInvite(AccountInvite invite) async {
   }
 }
 
+/// The session name this phone waits on when reached through an account.
+///
+/// Derived from the installation id rather than fetched, so it is the same
+/// name the account service gives a developer, computed without a round trip
+/// and available offline. Not a secret: it says where to wait, and membership
+/// is what decides who may.
+String rendezvousFor(String installationId) {
+  final safe = installationId.replaceAll(RegExp('[^A-Za-z0-9_-]'), '');
+  return 'dev-$safe'.padRight(16, '0');
+}
+
+/// This installation's rendezvous, or null before it has one.
+Future<String?> ownRendezvous() async {
+  final id = await _connector.invokeMethod<String>('installationId');
+  return id == null ? null : rendezvousFor(id);
+}
+
 /// What the developer will see this phone called in their device list.
 Future<String> _deviceLabel() async {
   final model = await _connector.invokeMethod<String>('deviceLabel');

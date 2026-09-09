@@ -60,6 +60,7 @@ run options:
   --project <dir>       Flutter project dir (default: current dir)
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      reuse a specific pairing code (default: generate one)
+  --device <id>         a phone on your account (see `rhr devices`)
   --no-direct           use the relay for tunnel payloads (legacy/private mode;
                         direct WebRTC is strict and enabled by default)
   --resync              ignore the local asset manifest and re-push all assets
@@ -87,6 +88,10 @@ attach options:
                         direct WebRTC is strict and enabled by default)
   --pid-file <path>     write the flutter process pid here
   -h, --help            show this help
+
+Session selection, for both run and attach: --device, else --code, else
+`code:` in .rhr.yaml, else a fresh code. --device and --code together are
+refused rather than one quietly winning.
 
 Config: values in ./.rhr.yaml (keys `relay:`, `code:`, and optional
 `direct: true|false`) are used as
@@ -278,6 +283,7 @@ Future<void> main(List<String> args) async {
   if (args[0] == 'run') {    String project = '.';
     String? relay;
     String? code;
+    String? device;
     var resync = false;
     var direct = true;
     var updatePolicy = PlayerUpdatePolicy.prompt;
@@ -289,6 +295,8 @@ Future<void> main(List<String> args) async {
           relay = args[++i];
         case '--code':
           code = args[++i];
+        case '--device':
+          device = args[++i];
         case '--direct':
           direct = true;
         case '--no-direct':
@@ -303,6 +311,33 @@ Future<void> main(List<String> args) async {
           stderr.writeln('unknown arg: ${args[i]}');
           exit(64);
       }
+    }
+    // Same rule `attach` follows: a device and a code name one thing two
+    // ways, so asking for both is a contradiction.
+    if (device != null && code != null) {
+      stderr.writeln(
+        '[rhr] --device and --code both name a session; pass one or the other',
+      );
+      exit(64);
+    }
+    if (device != null) {
+      final session = await currentAccountSession();
+      if (session == null) {
+        stderr.writeln('[rhr] not signed in — run `rhr login`');
+        exit(1);
+      }
+      final rendezvous = await rendezvousForDevice(
+        service: _accountService(),
+        installationId: device,
+        session: session,
+      );
+      if (rendezvous == null) {
+        stderr.writeln(
+          '[rhr] "$device" is not a device on this account — run `rhr devices`',
+        );
+        exit(1);
+      }
+      code = rendezvous;
     }
     exit(
       await _runAttachProductFlow(
@@ -1282,8 +1317,12 @@ Future<int> _runAttachProductFlow({
   bool resync = false,
   PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.prompt,
 }) async {
-  final sessionCode = code ?? mintRhrSessionCode();
   final config = _loadConfig(project);
+  // Same order `attach` uses: an explicit flag, then the project's own
+  // config, then a fresh code. `run` used to mint before reading the config
+  // at all, so a project that pinned a code got a different one every time
+  // and nobody could tell why.
+  final sessionCode = code ?? config['code'] ?? mintRhrSessionCode();
   final configuredRelay = relay ?? config['relay'];
   preferDirect ??= config['direct']?.toLowerCase() != 'false';
   final localRelay = await LocalRelay.start(sessionCode);
