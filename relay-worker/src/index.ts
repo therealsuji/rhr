@@ -38,8 +38,11 @@
 
 import {
 	accountForToken,
+	accountsForInstallation,
 	cleanLabel,
 	createInvite,
+	devicesForAccount,
+	endMembership,
 	redeemInvite,
 } from "./accounts";
 
@@ -573,6 +576,56 @@ export default {
 				account: result.email,
 				alreadyJoined: result.alreadyJoined,
 			});
+		}
+
+		// The devices on the signed-in account, and removing one.
+		if (seg.length === 2 && seg[0] === "account" && seg[1] === "devices") {
+			const account = await accountForToken(
+				env,
+				request.headers.get("Authorization"),
+			);
+			if (!account) return new Response("sign in first", { status: 401 });
+
+			if (request.method === "GET") {
+				return Response.json({
+					devices: await devicesForAccount(env, account.id),
+				});
+			}
+			if (request.method === "DELETE") {
+				const installationId = url.searchParams.get("installationId");
+				if (!installationId) {
+					return new Response("installationId is required", { status: 400 });
+				}
+				const removed = await endMembership(env, account.id, installationId);
+				return Response.json({ removed });
+			}
+			return new Response("method not allowed", { status: 405 });
+		}
+
+		// The accounts a phone has joined, and leaving one. A phone holds no
+		// token — it proves nothing beyond naming its own installation, which
+		// is why these answer only about that installation and expose nothing
+		// about an account beyond the address that named it on the consent
+		// screen the tester already saw.
+		if (seg.length === 2 && seg[0] === "device" && seg[1] === "accounts") {
+			const installationId = url.searchParams.get("installationId");
+			if (!installationId) {
+				return new Response("installationId is required", { status: 400 });
+			}
+			if (request.method === "GET") {
+				return Response.json({
+					accounts: await accountsForInstallation(env, installationId),
+				});
+			}
+			if (request.method === "DELETE") {
+				const accountId = url.searchParams.get("accountId");
+				if (!accountId) {
+					return new Response("accountId is required", { status: 400 });
+				}
+				const left = await endMembership(env, accountId, installationId);
+				return Response.json({ left });
+			}
+			return new Response("method not allowed", { status: 405 });
 		}
 
 		return new Response("not found", { status: 404 });

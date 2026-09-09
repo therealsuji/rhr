@@ -118,6 +118,70 @@ export async function createInvite(
 	return { token: value, expiresAt };
 }
 
+/** The devices on an account, for the developer's list. */
+export async function devicesForAccount(
+	env: AccountsEnv,
+	accountId: string,
+): Promise<{ installationId: string; label: string; joinedAt: number }[]> {
+	const rows = await env.ACCOUNTS.prepare(
+		"SELECT installation_id, label, joined_at FROM memberships " +
+			"WHERE account_id = ? ORDER BY joined_at",
+	)
+		.bind(accountId)
+		.all<{ installation_id: string; label: string; joined_at: number }>();
+	return (rows.results ?? []).map((row) => ({
+		installationId: row.installation_id,
+		label: row.label,
+		joinedAt: row.joined_at,
+	}));
+}
+
+/**
+ * The accounts a phone has joined.
+ *
+ * Answers only about the installation asking, and says nothing about the
+ * other devices on those accounts: a membership is permission to be used,
+ * not a view into somebody's fleet.
+ */
+export async function accountsForInstallation(
+	env: AccountsEnv,
+	installationId: string,
+): Promise<{ accountId: string; email: string; joinedAt: number }[]> {
+	const rows = await env.ACCOUNTS.prepare(
+		"SELECT m.account_id, a.email, m.joined_at FROM memberships m " +
+			"JOIN accounts a ON a.id = m.account_id " +
+			"WHERE m.installation_id = ? ORDER BY m.joined_at",
+	)
+		.bind(installationId)
+		.all<{ account_id: string; email: string; joined_at: number }>();
+	return (rows.results ?? []).map((row) => ({
+		accountId: row.account_id,
+		email: row.email,
+		joinedAt: row.joined_at,
+	}));
+}
+
+/**
+ * Ends a membership.
+ *
+ * Either side may call this and neither needs the other: the developer
+ * removes a device they no longer use, and the tester stops lending a phone
+ * that is theirs. Deleting the same row from both directions is what makes
+ * that symmetry real rather than stated.
+ */
+export async function endMembership(
+	env: AccountsEnv,
+	accountId: string,
+	installationId: string,
+): Promise<boolean> {
+	const result = await env.ACCOUNTS.prepare(
+		"DELETE FROM memberships WHERE account_id = ? AND installation_id = ?",
+	)
+		.bind(accountId, installationId)
+		.run();
+	return (result.meta.changes ?? 0) > 0;
+}
+
 export type JoinResult =
 	| { ok: true; accountId: string; email: string; alreadyJoined: boolean }
 	| { ok: false; reason: string };
