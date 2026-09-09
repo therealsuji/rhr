@@ -1,19 +1,15 @@
-import java.io.File
-
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
-    id("maven-publish")
 }
 
-// Embeddable core of the rhr player: the native session service (relay dial,
-// tunnel, VM-service discovery, presence), published as an AAR so the
-// standalone connector can consume it. Deliberately Flutter-free: the host
-// provides its own engine; this only owns the tunnel that lives outside it.
+// The rhr player's tunnel core: the native session service (relay dial,
+// tunnel, VM-service discovery, presence). Deliberately Flutter-free — it
+// owns the tunnel that lives outside the engine, so a hot restart cannot
+// kill it.
 //
-// Kotlin sources stay in the dev.rhr.rhr_player package so the player app and
-// host apps reference identical class names; only the Gradle namespace (R
-// class) differs.
+// A separate module rather than app sources because the service must not
+// depend on the Flutter layer it outlives.
 
 android {
     namespace = "dev.rhr.bridge"
@@ -43,31 +39,4 @@ dependencies {
     implementation("io.github.webrtc-sdk:android:144.7559.12")
 }
 
-android {
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
-}
 
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "dev.rhr"
-                artifactId = "bridge-android"
-                version = "0.1.0"
-            }
-        }
-        repositories {
-            maven {
-                // Consumed by the connector's Gradle build, which resolves
-                // dev.rhr:bridge-android from this local repo.
-                name = "rhr"
-                url = uri(File(System.getProperty("user.home"), ".rhr/m2"))
-            }
-        }
-    }
-}
