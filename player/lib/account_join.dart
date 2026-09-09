@@ -120,6 +120,13 @@ String rendezvousFor(String installationId) {
   return 'dev-$safe'.padRight(16, '0');
 }
 
+/// Whether a session name is a derived rendezvous rather than a typed code.
+///
+/// Codes and rendezvous names both name a session, so both are valid here;
+/// they differ only in where they came from.
+bool isRendezvousName(String value) =>
+    value.startsWith('dev-') && value.length >= 16;
+
 /// This installation's rendezvous, or null before it has one.
 Future<String?> ownRendezvous() async {
   final id = await _connector.invokeMethod<String>('installationId');

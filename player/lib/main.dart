@@ -344,7 +344,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
 
   Future<void> _connect({bool auto = false}) async {
     final code = _code.text.trim();
-    if (!isValidRhrSessionCode(code)) {
+    // A rendezvous is a session name too, just not a typed one: it is derived
+    // from the installation identity and never looks like `rhr-xxxx-…`.
+    // Validating it as a code rejected the account path outright.
+    if (!isValidRhrSessionCode(code) && !isRendezvousName(code)) {
       if (!auto) {
         setState(
           () => _status =
