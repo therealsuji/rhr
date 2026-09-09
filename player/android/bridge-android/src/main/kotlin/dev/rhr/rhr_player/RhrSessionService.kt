@@ -80,6 +80,18 @@ class RhrSessionService : Service() {
 		 */
 		private val DEV_PRESENT_STATES = setOf("connected", "retrying")
 
+		/**
+		 * Set when the developer says dev_gone, cleared when one arrives again.
+		 *
+		 * Their departure tears the tunnel down a moment later, and that
+		 * teardown used to overwrite "waiting_dev" with "retrying" — so a
+		 * tester whose developer quit cleanly was told the phone could not
+		 * reach the relay. Same shape as the tester-initiated stop being undone
+		 * by the socket close it caused; this is the developer-initiated twin.
+		 */
+		@Volatile
+		var devLeft: Boolean = false
+
 		// How long the direct tunnel may outlive the developer that opened it.
 		//
 		// Payload rides WebRTC, never the relay, so once a session is up the
@@ -330,6 +342,9 @@ class RhrSessionService : Service() {
 					currentVm = vmUri
 					readySent = false // re-arm sync-ready for a genuinely new session
 					stopped.set(false)
+					// A new session starts with no developer having left it; a
+					// stale flag here would suppress a real reconnect notice.
+					devLeft = false
 					sweepOrphanedDevfsDirs()
 					if (watchOwnVm) watchForDevfsDirs()
 					// The VM watcher tracks OUR own service URI across guest hot
@@ -529,8 +544,10 @@ class RhrSessionService : Service() {
 		directFailureReported = true
 		Log.w(TAG, "[$sessionCode] direct WebRTC session failed: $reason")
 		// Same reason as the socket failure above: a teardown the tester asked
-		// for must not report itself as a connection problem.
-		if (!stopped.get()) status = "retrying"
+		// for must not report itself as a connection problem. Nor one the
+		// developer caused by leaving — their dev_gone arrives seconds before
+		// the ICE teardown it sets off.
+		if (!stopped.get() && !devLeft) status = "retrying"
 		if (notifyPeer) {
 			webSocket.send(
 				JSONObject()
@@ -639,12 +656,14 @@ class RhrSessionService : Service() {
 						// otherwise left reading a connection error.
 						if (text.contains("\"dev_gone\"")) {
 							Log.i(TAG, "[$sessionCode] developer left the session")
+							devLeft = true
 							if (status in DEV_PRESENT_STATES) status = "waiting_dev"
 							setProgress("", 0, 0)
 							return
 						}
 						// Anything else is developer traffic (hello, ping, progress,
 						// reload signals) — a live developer is attached.
+						devLeft = false
 						if (status != "connected") status = "connected"
 						// A dev that connects AFTER us relies on the relay replaying
 						// our cached info. If that ever misses (TTL, ordering, a dev
@@ -714,13 +733,14 @@ class RhrSessionService : Service() {
 							// the moment the real developer starts rhr.
 							Log.i(TAG, "[$sessionCode] session rejected (http $code)")
 							status = "rejected"
-						} else if (!stopped.get()) {
+						} else if (!stopped.get() && !devLeft) {
 							// Disconnect closes this socket itself, so the
 							// failure it raises arrives on a callback thread
 							// AFTER the stop set "idle" — and overwrote it with
 							// "retrying". The lobby then said disconnected while
 							// the overlay said it was still trying, and nothing
-							// was trying at all.
+							// was trying at all. A developer who said dev_gone
+							// leaves the same way, from the other end.
 							status = "retrying"
 						}
 						// Transfer progress belongs to this developer connection. If it
