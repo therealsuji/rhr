@@ -1225,7 +1225,15 @@ Future<void> _syncAssetsAfterAttach(
     assetStoreId: assetStoreId,
     maxConcurrentUploads: maxConcurrentUploads,
     onProgress: onProgress,
-    afterSync: () async {
+    afterSync: ({required bool changed}) async {
+      // Only new assets need a restart. The running isolate loaded the
+      // bundle at startup, so a hot reload would swap code against stale
+      // assets — but when nothing was pushed there is nothing stale, and
+      // restarting anyway throws away the app's state for no reason.
+      if (!changed) {
+        stderr.writeln('[rhr] assets unchanged; no restart needed');
+        return;
+      }
       final pid = int.parse(File(pidFile).readAsStringSync().trim());
       final syncMs = DateTime.now().difference(syncStart).inMilliseconds;
       stderr.writeln(
