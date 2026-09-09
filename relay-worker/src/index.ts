@@ -36,8 +36,11 @@
 // current one for its role. Without that check a predecessor's close event
 // tears down its own successor.
 
+import { accountForToken, createInvite, redeemInvite } from "./accounts";
+
 export interface Env {
 	SESSIONS: DurableObjectNamespace;
+	ACCOUNTS: D1Database;
 }
 
 type Role = "device" | "dev";
@@ -515,6 +518,58 @@ export default {
 			const id = env.SESSIONS.idFromName(RELAY_OBJECT);
 			return env.SESSIONS.get(id).fetch(request);
 		}
+
+		// Account routes. Ordinary HTTP, deliberately apart from the session
+		// socket above: that one is native-clients-only, these are reached by a
+		// phone redeeming an invite and a CLI holding a developer's token.
+		if (seg.length === 2 && seg[0] === "account" && seg[1] === "invite") {
+			if (request.method !== "POST") {
+				return new Response("method not allowed", { status: 405 });
+			}
+			const account = await accountForToken(
+				env,
+				request.headers.get("Authorization"),
+				new URL(request.url).searchParams.get("email") ?? undefined,
+			);
+			if (!account) return new Response("sign in first", { status: 401 });
+			const invite = await createInvite(env, account.id);
+			return Response.json({
+				token: invite.token,
+				expiresAt: invite.expiresAt,
+				account: account.email,
+			});
+		}
+
+		if (seg.length === 2 && seg[0] === "device" && seg[1] === "join") {
+			if (request.method !== "POST") {
+				return new Response("method not allowed", { status: 405 });
+			}
+			const body = (await request.json().catch(() => null)) as {
+				invite?: string;
+				installationId?: string;
+				label?: string;
+			} | null;
+			if (!body?.invite || !body.installationId) {
+				return new Response("invite and installationId are required", {
+					status: 400,
+				});
+			}
+			const result = await redeemInvite(
+				env,
+				body.invite,
+				body.installationId,
+				body.label?.slice(0, 64) || "phone",
+			);
+			if (!result.ok) {
+				return Response.json({ error: result.reason }, { status: 409 });
+			}
+			return Response.json({
+				accountId: result.accountId,
+				account: result.email,
+				alreadyJoined: result.alreadyJoined,
+			});
+		}
+
 		return new Response("not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;

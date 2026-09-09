@@ -7,5 +7,16 @@
 		"bindings": [{ "name": "SESSIONS", "class_name": "RelaySession" }]
 	},
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelaySession"] }],
+	// Accounts, installations and memberships. Relational because the questions
+	// are relational — "which devices does this account have", "which accounts
+	// is this installation in" — and a Durable Object cannot answer those
+	// without knowing every key in advance.
+	"d1_databases": [
+		{
+			"binding": "ACCOUNTS",
+			"database_name": "rhr-accounts",
+			"database_id": "ab64dbb8-9d12-467f-a58f-0fb7842ca6fe"
+		}
+	],
 	"observability": { "enabled": false }
 }
