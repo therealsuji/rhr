@@ -37,9 +37,16 @@ class MainActivity : FlutterActivity() {
 	/** An `rhr://` invitation this launch carried, until Dart collects it. */
 	private var pendingInvite: String? = null
 
+	/** An `rhr://shake` that started the player, until the overlay exists. */
+	private var pendingDebugShake = false
+
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
 		readInvite(intent)
+		pendingDebugShake =
+			BuildConfig.DEBUG &&
+			intent?.data?.scheme == "rhr" &&
+			intent?.data?.host == "shake"
 		// The library owns the tunnel; the player owns the over-the-wire
 		// self-update (PackageInstaller). Registered before any session can
 		// start so an update arriving mid-session always has a handler.
@@ -60,6 +67,31 @@ class MainActivity : FlutterActivity() {
 			connector.invokeMethod("inviteArrived", pendingInvite)
 			pendingInvite = null
 		}
+		readDebugShake(intent)
+	}
+
+	/**
+	 * Debug builds only: `rhr://shake` reveals the dev bubble as a physical
+	 * shake would.
+	 *
+	 *     adb shell am start -a android.intent.action.VIEW -d "rhr://shake"
+	 *
+	 * A physical phone cannot have accelerometer samples injected — that is an
+	 * emulator facility — so without this the bubble, the dev menu and the
+	 * restart button behind them are the one part of the player no automated
+	 * check can reach. The gesture itself is still covered: ShakeDetector is
+	 * pure Kotlin precisely so it can be unit-tested with synthetic samples.
+	 *
+	 * A link rather than a broadcast receiver because `rhr://` is already a
+	 * registered scheme handled by this Activity, so this adds no new exported
+	 * surface — and a debug-only receiver would have had to be exported for adb
+	 * to reach it at all on Android 14+.
+	 */
+	private fun readDebugShake(intent: Intent?) {
+		if (!BuildConfig.DEBUG) return
+		val data = intent?.data ?: return
+		if (data.scheme != "rhr" || data.host != "shake") return
+		overlay?.reveal()
 	}
 
 	/**
@@ -80,6 +112,12 @@ class MainActivity : FlutterActivity() {
 		// content view exists. Idempotent-guarded so config changes don't stack.
 		if (overlay == null) {
 			overlay = DevOverlay(this).also { it.attach() }
+		}
+		// A debug shake link that STARTED the player arrives before the overlay
+		// exists, so it is replayed once there is something to reveal.
+		if (pendingDebugShake) {
+			pendingDebugShake = false
+			overlay?.reveal()
 		}
 	}
 
