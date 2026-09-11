@@ -828,6 +828,24 @@ class DevOverlay(
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
 
+		// The tester's own way back to a clean app. Offered only while a
+		// developer is attached, because a hot restart is theirs to perform:
+		// without one to ask, the row would be a button that does nothing.
+		// Worded "the app" rather than "restart" alone, so it is not read as a
+		// third sibling of Reconnect and Disconnect.
+		if (RhrSessionService.status == "connected") {
+			sheet.addView(
+				iconRow("⟲", "Restart the app — back to a clean start", primary = false) {
+					activity.startService(
+						Intent(activity, RhrSessionService::class.java)
+							.putExtra("cmd", "restart_guest"))
+					closeMenu()
+				},
+				LinearLayout.LayoutParams(
+					ViewGroup.LayoutParams.MATCH_PARENT,
+					ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+		}
+
 		// Pause, not Stop: ending a session while the phone stays available just
 		// lets the next recovery loop take it again a second later, which reads
 		// as the button not working. This is what actually gives the phone back.

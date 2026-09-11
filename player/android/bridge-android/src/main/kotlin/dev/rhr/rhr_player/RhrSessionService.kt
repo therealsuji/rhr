@@ -378,6 +378,13 @@ class RhrSessionService : Service() {
 				status = "waiting_dev"
 				onUpdate?.invoke()
 			}
+			// The tester asking for their app back in its opening state. Only
+			// the developer can do this — a hot restart is Flutter's, driven
+			// from their machine — so this asks rather than acts, and the menu
+			// only offers it while a developer is attached to ask.
+			"restart_guest" -> {
+				ws?.send(JSONObject().put("t", "restart_guest").toString())
+			}
 			"stop" -> {
 				stopped.set(true)
 				ws?.close(1000, "stopped")

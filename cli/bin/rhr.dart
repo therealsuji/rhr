@@ -632,6 +632,9 @@ Future<int?> _runSession({
   final sockets = <int, Socket>{};
   final flow = FlowControl();
   DirectTransportFailure? directFailure;
+  // Set once `flutter attach` is running, so a restart the tester asks for
+  // has something to signal. Null until then, and on the --no-flutter path.
+  String? attachPidFile;
   final bridgeDeadline = _DeadlineHolder(
     DateTime.now().add(const Duration(minutes: 5)),
   );
@@ -660,6 +663,27 @@ Future<int?> _runSession({
       if (msg is String) {
         final m = jsonDecode(msg) as Map<String, dynamic>;
         if (updateSender?.handleMessage(m) ?? false) return;
+        // The tester asking, from the phone's dev menu, for the guest app back
+        // in its opening state. A hot restart is Flutter's and belongs to this
+        // machine, so the phone asks and we perform it — the same SIGUSR2 an
+        // asset sync sends. The player only offers the row while a developer
+        // is attached; this still answers honestly if it arrives anyway.
+        if (m['t'] == 'restart_guest') {
+          final pidFile = attachPidFile;
+          final pid = pidFile == null || !File(pidFile).existsSync()
+              ? null
+              : int.tryParse(File(pidFile).readAsStringSync().trim());
+          if (pid == null) {
+            stderr.writeln(
+              '[rhr] the phone asked to restart the app, but no flutter '
+              'attach is running to do it.',
+            );
+            return;
+          }
+          stderr.writeln('[rhr] restart requested from the phone');
+          Process.killPid(pid, ProcessSignal.sigusr2);
+          return;
+        }
         if (m['t'] == 'info' && !vmReady.isCompleted) {
           final announcedAssetStoreId = m['assetStoreId'];
           final announcedHost = m['host'] ??
@@ -916,6 +940,7 @@ Future<int?> _runSession({
     final f = File(effectivePidFile);
     if (f.existsSync()) f.deleteSync(); // stale pid from a previous session
   }
+  attachPidFile = effectivePidFile;
 
   final proc = await Process.start(
     projectFlutterExecutable(project),
