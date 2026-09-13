@@ -184,6 +184,16 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     return null;
   }
 
+  /// Where a reachable phone actually leaves us. Setup is two steps, and the
+  /// second is easy to skip: several paths arrive at "adb is connected" and
+  /// every one of them has to ask the same question, or the one that forgets
+  /// hands out a target list with no way back out of the target.
+  Future<ConnectorStage> _connectedStage() async {
+    final overlay =
+        await _connector.invokeMethod<bool>('overlayGranted') ?? true;
+    return overlay ? ConnectorStage.ready : ConnectorStage.needsOverlay;
+  }
+
   /// Asks the native side what it can actually do right now, rather than
   /// assuming the last known state still holds.
   Future<void> _refreshSetup() async {
@@ -208,14 +218,14 @@ class _ConnectorScreenState extends State<ConnectorScreen>
           _stage = ConnectorStage.unpaired;
         } else if (!connected) {
           _stage = ConnectorStage.disconnected;
-        } else if (!overlay) {
+        } else {
           // Setup is two things, not one. Pairing gets us to the phone's adbd;
           // the overlay is what gets the tester back out of their own app once
           // a session starts. Showing the target list before both are done
           // offers a session with no exit.
-          _stage = ConnectorStage.needsOverlay;
-        } else {
-          _stage = ConnectorStage.ready;
+          _stage = overlay
+              ? ConnectorStage.ready
+              : ConnectorStage.needsOverlay;
         }
       });
       if (connected) await _loadApps();
@@ -258,13 +268,19 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         _busy = false;
         _message = null;
         if (ok == true) {
-          _stage = ConnectorStage.ready;
+          // Provisional: replaced below once the overlay has been checked.
+          _stage = ConnectorStage.working;
         } else {
           _failure = 'Could not reach this phone. Is Wireless debugging still '
               'switched on in Developer options?';
         }
       });
-      if (ok == true) await _loadApps();
+      if (ok == true) {
+        final stage = await _connectedStage();
+        if (!mounted) return;
+        setState(() => _stage = stage);
+        await _loadApps();
+      }
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -334,7 +350,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() {
-        _stage = ConnectorStage.ready;
+        _stage = ConnectorStage.working;
         _message = null;
         _failure = e.code == 'no_vm'
             ? '${app.label} did not expose a debug connection. Only debug '
@@ -506,7 +522,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
       await _session.invokeMethod('stop');
       if (!mounted) return;
       setState(() {
-        _stage = ConnectorStage.ready;
+        _stage = ConnectorStage.working;
         _tunneledLabel = null;
       });
       await _refreshSetup();
