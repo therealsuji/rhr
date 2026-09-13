@@ -66,6 +66,11 @@ enum ConnectorStage {
   /// switched off, or the phone rebooted and the port moved).
   disconnected,
 
+  /// Talking to adbd, but the overlay permission is still missing. Setup is
+  /// not finished: once a session starts the tester is looking at THEIR app,
+  /// and the bubble is the only way back to this screen.
+  needsOverlay,
+
   /// Talking to adbd; the target list is usable.
   ready,
 
@@ -113,7 +118,6 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   /// Whether the shake-to-open bubble can draw over the tester's own app.
   /// Not required to tunnel — the session works either way — so this is an
   /// offer, never a gate.
-  bool _overlayGranted = true;
   String? _message;
   String? _failure;
 
@@ -194,7 +198,6 @@ class _ConnectorScreenState extends State<ConnectorScreen>
       final overlay =
           await _connector.invokeMethod<bool>('overlayGranted') ?? true;
       if (!mounted) return;
-      _overlayGranted = overlay;
       setState(() {
         _busy = false;
         // A stale failure outliving the condition that caused it is its own
@@ -203,10 +206,16 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         if (connected) _failure = null;
         if (!paired) {
           _stage = ConnectorStage.unpaired;
-        } else if (connected) {
-          _stage = ConnectorStage.ready;
-        } else {
+        } else if (!connected) {
           _stage = ConnectorStage.disconnected;
+        } else if (!overlay) {
+          // Setup is two things, not one. Pairing gets us to the phone's adbd;
+          // the overlay is what gets the tester back out of their own app once
+          // a session starts. Showing the target list before both are done
+          // offers a session with no exit.
+          _stage = ConnectorStage.needsOverlay;
+        } else {
+          _stage = ConnectorStage.ready;
         }
       });
       if (connected) await _loadApps();
@@ -364,14 +373,12 @@ class _ConnectorScreenState extends State<ConnectorScreen>
             if (!_loading && _stage == ConnectorStage.unpaired) _pairingCard(),
             if (!_loading && _stage == ConnectorStage.disconnected)
               _reconnectCard(),
+            if (!_loading && _stage == ConnectorStage.needsOverlay)
+              _overlayOffer(),
             if (!_loading &&
                 (_stage == ConnectorStage.ready ||
                     _stage == ConnectorStage.working)) ...[
               _codeField(),
-              if (!_overlayGranted) ...[
-                const SizedBox(height: 16),
-                _overlayOffer(),
-              ],
               const SizedBox(height: 16),
               _targetList(),
             ],
@@ -435,6 +442,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     final (label, color) = switch (_stage) {
       ConnectorStage.unpaired => ('This phone is not paired yet', _warn),
       ConnectorStage.disconnected => ('Paired, but not connected', _warn),
+      ConnectorStage.needsOverlay => ('One more permission to go', _warn),
       ConnectorStage.ready => ('Connected to this phone', _ok),
       ConnectorStage.working => ('Working…', _warn),
       ConnectorStage.tunneling => (
@@ -472,10 +480,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   Widget _pairingCard() => _card(
     title: 'Pair this phone once',
     body: 'Connector mode talks to this phone\'s own Wireless debugging. '
-        'Pairing is a one-time step and survives reboots.\n\n'
-        'This is separate from any pairing you did in the standalone '
-        'connector app: Android keeps the pairing key private to each app, '
-        'so the player needs its own.',
+        'Pairing is a one-time step and survives reboots.',
     action: 'Start pairing',
     onAction: _startPairing,
   );
@@ -510,44 +515,18 @@ class _ConnectorScreenState extends State<ConnectorScreen>
 
   /// Offered, not enforced: tunneling works without it, you just lose the
   /// shake-to-open bubble once you are inside your own app.
-  Widget _overlayOffer() => Container(
-    padding: const EdgeInsets.all(14),
-    decoration: BoxDecoration(
-      color: _surface,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: _surfaceHi),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Shake to check the session',
-          style: TextStyle(
-            color: _ink,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 6),
-        const Text(
-          'While you are testing your own app, shake the phone to bring up a '
-          'bubble showing the connection — and to disconnect without coming '
-          'back here. Needs permission to draw over other apps.',
-          style: TextStyle(color: _inkDim, fontSize: 12.5, height: 1.4),
-        ),
-        const SizedBox(height: 10),
-        TextButton(
-          style: TextButton.styleFrom(
-            foregroundColor: _violet,
-            padding: EdgeInsets.zero,
-            minimumSize: const Size(0, 0),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          onPressed: () => _connector.invokeMethod('requestOverlay'),
-          child: const Text('Turn it on'),
-        ),
-      ],
-    ),
+  /// The second half of setup. Once a session starts the tester is looking at
+  /// their own app and this screen is gone, so the bubble is their way back —
+  /// which makes this a step to finish, not an extra to offer.
+  Widget _overlayOffer() => _card(
+    title: 'Let rhr show a bubble',
+    body: 'Once you connect, you will be in your own app and this screen is '
+        'out of the way. Shaking the phone brings up a small bubble on top of '
+        'it: that is how you check the session and disconnect without hunting '
+        'for this app again.\n\n'
+        'Android calls this "Display over other apps".',
+    action: 'Turn it on',
+    onAction: () => _connector.invokeMethod('requestOverlay'),
   );
 
   /// Same entry widget the lobby uses, so a scanned QR works here too.
