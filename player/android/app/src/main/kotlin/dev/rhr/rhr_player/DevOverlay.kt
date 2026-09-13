@@ -520,13 +520,8 @@ class DevOverlay(
 	/**
 	 * A shake: bring the bubble up, or keep it up a while longer if it is
 	 * already there. Never opens the panel; that is a tap on the bubble.
-	 *
-	 * Not private so a debug build can reach it from `rhr://shake` — a physical
-	 * phone cannot have accelerometer samples injected, which would otherwise
-	 * leave the bubble, the dev menu and the restart button the only part of
-	 * the player no automated check can drive.
 	 */
-	fun reveal() {
+	private fun reveal() {
 		when (bubble) {
 			Bubble.HIDDEN -> {
 				// Own small window (system overlay) or plain visibility
