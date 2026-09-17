@@ -186,6 +186,16 @@ class SctpAssociation {
   /// Congestion window
   int _cwnd = SctpConstants.initialCwnd;
 
+  /// What the PEER last said it can still receive (a_rwnd, RFC 4960 6.2.1).
+  ///
+  /// Distinct from [advertisedRwnd], which is our own receive window that we
+  /// advertise to them. Sending past this floods a receiver that has already
+  /// said it is full: the phone stops SACKing promptly, its ICE consent checks
+  /// get delayed behind the backlog, and the connection is torn down as dead
+  /// mid-transfer. Seeded from the peer's INIT/INIT-ACK and updated on every
+  /// SACK.
+  int _peerRwnd = SctpConstants.defaultAdvertisedRwnd;
+
   /// Slow start threshold
   int _ssthresh = SctpConstants.initialCwnd;
 
@@ -594,6 +604,16 @@ class SctpAssociation {
         ? 2 * SctpConstants.userDataMaxLength
         : 4 * SctpConstants.userDataMaxLength;
     final cwnd = min(_flightSize + burstSize, _cwnd);
+    // Flow control bounds NEW data only. Retransmits below must go out
+    // regardless: they are already counted in the peer's window, and holding
+    // them back on a full window is how an association stalls permanently.
+    //
+    // RFC 4960 6.1(A): with a zero window, allow exactly one outstanding
+    // packet as a probe, so the peer's next SACK reopens the window instead of
+    // both ends waiting on each other forever.
+    final sendWindow = _peerRwnd > 0
+        ? min(cwnd, _flightSize + _peerRwnd)
+        : (_flightSize == 0 ? SctpConstants.userDataMaxLength : 0);
     _log.fine('[SCTP] _transmit: cwnd=$cwnd, flightSize=$_flightSize');
 
     // First, retransmit marked chunks from sentQueue
@@ -622,9 +642,9 @@ class SctpAssociation {
 
     // Then send new chunks from outboundQueue (with cwnd check)
     while (_outboundQueue.isNotEmpty) {
-      // Check cwnd before sending new data (congestion control)
-      if (_flightSize >= cwnd) {
-        break; // Stop sending, wait for SACKs to free up cwnd
+      // Congestion control AND the peer's advertised receive window.
+      if (_flightSize >= sendWindow) {
+        break; // Wait for SACKs to free up cwnd or reopen the peer's window
       }
 
       final sentChunk = _outboundQueue.removeAt(0);
@@ -708,6 +728,9 @@ class SctpAssociation {
       return;
     }
 
+    // As above, for the side that receives the INIT.
+    _peerRwnd = chunk.advertisedRwnd;
+
     _remoteVerificationTag = chunk.initiateTag;
     _remoteCumulativeTsn = _tsnMinusOne(chunk.initialTsn);
     _lastReceivedTsn = _remoteCumulativeTsn;
@@ -729,6 +752,9 @@ class SctpAssociation {
 
     _t1Cancel();
 
+    // The peer's opening receive window, so the very first burst is already
+    // flow-controlled rather than sent blind.
+    _peerRwnd = chunk.advertisedRwnd;
     _remoteVerificationTag = chunk.initiateTag;
     _remoteCumulativeTsn = _tsnMinusOne(chunk.initialTsn);
     _lastReceivedTsn = _remoteCumulativeTsn;
@@ -863,6 +889,7 @@ class SctpAssociation {
 
     final receivedTime = DateTime.now().millisecondsSinceEpoch / 1000.0;
     _lastSackedTsn = chunk.cumulativeTsnAck;
+    _peerRwnd = chunk.advertisedRwnd;
     final cwndFullyUtilized = _flightSize >= _cwnd;
     var done = 0;
     var doneBytes = 0;

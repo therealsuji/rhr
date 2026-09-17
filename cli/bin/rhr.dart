@@ -871,7 +871,19 @@ Future<int?> _runSession({
     late final StreamSubscription<Uint8List> sub;
     sub = sock.listen(
       (data) {
-        sendPayload(encodeFrame(opData, channel, data));
+        // Split at the SCTP limit. A dart:io read is whatever the kernel had
+        // buffered — often far more than 64 KiB on a fast machine pushing a
+        // kernel — and one oversized message makes libwebrtc close the data
+        // channel while reporting the send as successful. That is the
+        // "spontaneous disconnect" half of a session dying mid-sync.
+        for (var start = 0; start < data.length; start += maxTunnelPayload) {
+          final end = start + maxTunnelPayload < data.length
+              ? start + maxTunnelPayload
+              : data.length;
+          sendPayload(
+            encodeFrame(opData, channel, Uint8List.sublistView(data, start, end)),
+          );
+        }
         // Pause the local reader once the window fills — this is what keeps
         // a fast dev machine from ballooning buffers inside the relay.
         if (flow.sent(channel, data.length)) {

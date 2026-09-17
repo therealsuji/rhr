@@ -34,6 +34,20 @@ const updateTransferIdBase = 0x40000000;
 const opAck = 3;
 const windowBytes = 512 * 1024;
 
+/// Largest payload that may ride in one tunnel frame.
+///
+/// libwebrtc falls back to the 64 KiB default from
+/// draft-ietf-mmusic-sdp-sctp-23 when the answer carries no
+/// a=max-message-size, and a message over that limit makes it close the data
+/// channel itself — after reporting the send as successful, so the sender sees
+/// a spontaneous disconnect rather than an error. The 5 bytes are this
+/// protocol's own header (op + channel), which count toward the limit.
+///
+/// The device has capped its reads at this size since the tunnel defects were
+/// found (TUNNEL_READ_BYTES in RhrSessionService); the CLI never did, and
+/// handed whole dart:io reads to the transport instead.
+const maxTunnelPayload = 64 * 1024 - 5;
+
 Uint8List encodeAck(int channel, int bytes) {
   final b = Uint8List(9);
   b[0] = opAck;
