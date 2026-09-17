@@ -10,9 +10,17 @@ import 'package:webrtc_dart/webrtc_dart.dart';
 import 'relay_race.dart';
 
 final class DirectTransportFailure implements Exception {
-  const DirectTransportFailure(this.message);
+  const DirectTransportFailure(this.message, {this.transient = false});
 
   final String message;
+
+  /// Whether retrying could plausibly succeed.
+  ///
+  /// A relay socket that drops mid-negotiation says nothing about whether a
+  /// direct path is possible — the next attempt usually gets one. A refusal
+  /// from the device, or a payload path that failed after being established,
+  /// is a real answer and retrying only spins.
+  final bool transient;
 
   @override
   String toString() => message;
@@ -25,7 +33,13 @@ final class DirectSessionTransport implements SessionTransport {
     this._relay, {
     this.offerTimeout = const Duration(seconds: 20),
     this.connectionTimeout = const Duration(seconds: 20),
-    this.sendTimeout = const Duration(seconds: 4),
+    // A send waits on the peer's receive window, so this has to outlast a
+    // phone that is briefly full — which is ordinary mid-restart, when a 40 MB
+    // kernel is going out faster than the engine drains it. Four seconds
+    // failed sessions that were about to succeed; the ICE layer already tears
+    // down a genuinely dead path at roughly 30s (six consent misses), so this
+    // sits just inside that and does not mask real loss.
+    this.sendTimeout = const Duration(seconds: 25),
   }) {
     _payloadReady.future.ignore();
     _directZone = Zone.current.fork(
@@ -255,6 +269,7 @@ final class DirectSessionTransport implements SessionTransport {
       _payloadReady.completeError(
         const DirectTransportFailure(
           'signaling relay closed before the direct WebRTC payload path was ready',
+          transient: true,
         ),
       );
     }

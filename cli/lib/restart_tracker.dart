@@ -8,7 +8,12 @@ Future<void> trackHotRestart({
   required Uri vmService,
   required FutureOr<void> Function() trigger,
   required RestartProgress onProgress,
-  Duration timeout = const Duration(seconds: 60),
+  // A restart pushes the whole kernel, and the engine only reports the new
+  // main isolate once it has taken it. On a large project over a slow link
+  // that runs past a minute — a measured run took 97s and succeeded, after
+  // this watchdog had already declared it lost. Failing a restart that is
+  // still working costs the developer the whole session.
+  Duration timeout = const Duration(minutes: 3),
   Duration pollInterval = const Duration(milliseconds: 250),
 }) async {
   final deadline = DateTime.now().add(timeout);

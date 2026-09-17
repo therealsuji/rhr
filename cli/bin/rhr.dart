@@ -1353,8 +1353,17 @@ Future<int> _runAttachProductFlow({
           '[rhr] Flutter attach ended${result == null ? '' : ' ($result)'}.',
         );
       } on DirectTransportFailure catch (failure) {
-        stderr.writeln('[rhr] direct connection failed: $failure');
-        return _directFailureExitCode;
+        // A relay that drops while WebRTC is still negotiating has not told us
+        // a direct path is impossible, only that this attempt lost its
+        // signaling channel. The recovery loop below re-dials, which is what
+        // every other transient failure here already does.
+        if (failure.transient) {
+          failures++;
+          stderr.writeln('[rhr] lost the relay mid-negotiation: $failure');
+        } else {
+          stderr.writeln('[rhr] direct connection failed: $failure');
+          return _directFailureExitCode;
+        }
       } on DeviceBusyException catch (busy) {
         // Reconnecting cannot win a device someone else is holding; it would
         // only spin until they leave. Report and quit so the operator can pick
