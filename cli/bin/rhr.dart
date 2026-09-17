@@ -941,17 +941,16 @@ Future<int?> _runSession({
     return null;
   }
 
-  // For asset sync we need to signal the attach process; make sure we have a
-  // pid file even if the caller didn't ask for one.
+  // Asset sync signals the attach process, and so does a restart the tester
+  // asks for from the phone — which can happen in any session, including a
+  // connector one that never syncs assets. Gating the pid file on syncAssets
+  // meant `rhr attach` refused those with "no flutter attach is running to do
+  // it" while one was running perfectly well.
   final effectivePidFile =
       pidFile ??
-      (syncAssets
-          ? '${Directory.systemTemp.path}/rhr_attach_${DateTime.now().millisecondsSinceEpoch}.pid'
-          : null);
-  if (effectivePidFile != null) {
-    final f = File(effectivePidFile);
-    if (f.existsSync()) f.deleteSync(); // stale pid from a previous session
-  }
+      '${Directory.systemTemp.path}/rhr_attach_${DateTime.now().millisecondsSinceEpoch}.pid';
+  final stalePid = File(effectivePidFile);
+  if (stalePid.existsSync()) stalePid.deleteSync();
   attachPidFile = effectivePidFile;
 
   final proc = await Process.start(
@@ -972,7 +971,7 @@ Future<int?> _runSession({
       // service is already exposed by our tunnel. The tunneled VM service is
       // sufficient for attach/hot reload, so keep DDS out of this path.
       '--no-dds',
-      if (effectivePidFile != null) ...['--pid-file', effectivePidFile],
+      '--pid-file', effectivePidFile,
     ],
     workingDirectory: project,
     mode: ProcessStartMode.inheritStdio,
@@ -983,7 +982,7 @@ Future<int?> _runSession({
       _syncAssetsAfterAttach(
         local,
         project,
-        effectivePidFile!,
+        effectivePidFile,
         assetStoreId: assetStoreId,
         maxConcurrentUploads: 4,
         onProgress: (phase, done, total) {
