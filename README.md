@@ -35,7 +35,7 @@ adb install -r build/app/outputs/flutter-apk/app-debug.apk
 
 Must be a **debug** build — hot reload needs the Dart VM Service (JIT), which release builds don't have.
 
-The beta3 player targets Android `arm64-v8a`, Flutter 3.44.2 stable (Dart 3.12.2, engine `77e2e94772b6eb43759e34ed1ad7da4674e19cab`). The CLI checks framework, engine, Dart, Android plugins, and permissions before streaming. Each release ships `FLUTTER_VERSION.json` and `RELEASE_MANIFEST.txt`.
+The beta5 player targets Android `arm64-v8a`, Flutter 3.44.2 stable (Dart 3.12.2, engine `77e2e94772b6eb43759e34ed1ad7da4674e19cab`). The CLI checks framework, engine, Dart, Android plugins, and permissions before streaming. Each release ships `FLUTTER_VERSION.json` and `RELEASE_MANIFEST.txt`.
 
 **2. Pick a relay.** The player defaults to a public relay (`wss://getrhr.dev`) so you can try it with zero setup. For real work, run your own — session codes and traffic stay on infrastructure you control. Easiest option: deploy the same Cloudflare Worker (free tier is fine for personal use):
 
