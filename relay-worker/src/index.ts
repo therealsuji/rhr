@@ -54,6 +54,10 @@ export interface Env {
 	ACCOUNTS: D1Database;
 }
 
+// This deployment's own WorkOS environment. The /login redirect forwards only
+// here, because authkit.app is shared across every WorkOS tenant.
+const AUTHKIT_HOST = "bright-dandelion-45.authkit.app";
+
 type Role = "device" | "dev";
 
 // The tunnel grants VM-service access (arbitrary code execution in the app),
@@ -524,9 +528,13 @@ export default {
 			} catch {
 				return new Response("bad ?to=", { status: 400 });
 			}
+			// Exact hosts, not a suffix match. authkit.app is shared tenancy:
+			// every WorkOS environment gets a subdomain, so allowing
+			// *.authkit.app would forward to anyone else's login page from a
+			// domain our users trust — a phishing hop wearing our name.
 			const allowed =
 				target.protocol === "https:" &&
-				(target.hostname.endsWith(".authkit.app") ||
+				(target.hostname === AUTHKIT_HOST ||
 					target.hostname === "api.workos.com");
 			if (!allowed) {
 				return new Response("refused: not a WorkOS URL", { status: 400 });
