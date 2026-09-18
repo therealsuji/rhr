@@ -81,6 +81,17 @@ void main() {
     for (final frame in transport.sentFrames) {
       expect(frame.op, opUpdateData);
       expect(frame.channel, id);
+      // The 5-byte header counts toward the SCTP message limit, so a full
+      // 64 KiB payload is five bytes over — and libwebrtc answers that by
+      // closing the data channel while reporting the send as successful. The
+      // sender shipped exactly that, so every player update killed its own
+      // session on the direct path. Measured here because the round-trip
+      // assertion below passes either way.
+      expect(
+        frame.payload.length,
+        lessThanOrEqualTo(maxTunnelPayload),
+        reason: 'a frame over the SCTP limit silently closes the channel',
+      );
       streamed.add(frame.payload);
     }
     expect(streamed.toBytes(), apkBytes);

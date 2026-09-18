@@ -125,7 +125,11 @@ enum UpdateKind { player, app }
 final class PlayerUpdateSender {
   PlayerUpdateSender(
     this._transport, {
-    int chunkBytes = 64 * 1024,
+    // NOT 64 KiB: the 5-byte frame header counts toward the SCTP message
+    // limit, so a full 64 KiB payload is five bytes over and makes libwebrtc
+    // close the data channel — after reporting the send as successful. Every
+    // player update would have killed its own session on the direct path.
+    int chunkBytes = maxTunnelPayload,
     this.kind = UpdateKind.player,
     this.target = '',
   }) : _chunkBytes = chunkBytes,
