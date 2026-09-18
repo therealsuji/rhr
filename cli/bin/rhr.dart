@@ -1557,6 +1557,16 @@ Future<int> _invite() async {
 /// The device grant prints a code rather than opening a browser here, so the
 /// developer can approve it wherever they already have a session — including
 /// from a phone when this is running over SSH.
+/// Wraps a WorkOS device-flow URL in the relay's /login redirect, so the
+/// address a developer is asked to open is ours rather than the environment
+/// name WorkOS generated. Falls back to the raw URL when no login base is
+/// configured, since a self-hosted relay may not run the route.
+String _loginLink(String workosUrl) {
+  const base = String.fromEnvironment('RHR_LOGIN_BASE', defaultValue: defaultLoginBase);
+  if (base.isEmpty) return workosUrl;
+  return '$base?to=${Uri.encodeComponent(workosUrl)}';
+}
+
 Future<int> _login() async {
   final existing = await loadAccountSession();
   if (existing != null) {
@@ -1569,10 +1579,12 @@ Future<int> _login() async {
   try {
     final prompt = await requestDeviceCode();
     stdout.writeln('');
-    stdout.writeln('  Open        ${prompt.verificationUri}');
+    stdout.writeln('  Open        ${_loginLink(prompt.verificationUri)}');
     stdout.writeln('  Enter code  ${prompt.userCode}');
     stdout.writeln('');
-    stdout.writeln('  (or go straight to ${prompt.verificationUriComplete})');
+    stdout.writeln(
+      '  (or go straight to ${_loginLink(prompt.verificationUriComplete)})',
+    );
     stdout.writeln('');
     stdout.writeln('[rhr] waiting for you to approve…');
     final session = await pollForToken(prompt);

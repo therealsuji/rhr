@@ -502,6 +502,37 @@ export default {
 		if (seg.length === 1 && seg[0] === "healthz") {
 			return new Response("ok");
 		}
+		// `rhr login` prints a URL for the developer to open, and WorkOS hands
+		// back one on its own auto-generated environment domain
+		// (bright-dandelion-45.authkit.app) — a random name on someone else's
+		// domain, in front of anyone signing in. A custom AuthKit domain is a
+		// paid feature, but a redirect costs nothing: the CLI prints a URL on
+		// ours, and this hop forwards to whatever WorkOS asked for.
+		//
+		// The destination is carried in ?to= rather than rebuilt here, because
+		// the device-flow URL is issued per attempt and only the CLI has it.
+		// Restricted to WorkOS hosts so this cannot be used as an open
+		// redirect.
+		if (seg.length === 1 && seg[0] === "login") {
+			const to = url.searchParams.get("to");
+			if (to === null) {
+				return new Response("missing ?to=", { status: 400 });
+			}
+			let target: URL;
+			try {
+				target = new URL(to);
+			} catch {
+				return new Response("bad ?to=", { status: 400 });
+			}
+			const allowed =
+				target.protocol === "https:" &&
+				(target.hostname.endsWith(".authkit.app") ||
+					target.hostname === "api.workos.com");
+			if (!allowed) {
+				return new Response("refused: not a WorkOS URL", { status: 400 });
+			}
+			return Response.redirect(target.toString(), 302);
+		}
 		if (
 			seg.length === 3 &&
 			seg[0] === "s" &&
