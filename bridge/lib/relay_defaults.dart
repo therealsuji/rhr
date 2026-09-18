@@ -1,6 +1,6 @@
 /// The relay baked into the debug player and used by the CLI when no private
 /// relay is supplied. Deployments can override it at runtime.
-const defaultPublicRelay = 'wss://rhr-relay.codeforge007.workers.dev';
+const defaultPublicRelay = 'wss://getrhr.dev';
 
 /// Where `rhr login` sends the developer to approve a device code.
 ///
