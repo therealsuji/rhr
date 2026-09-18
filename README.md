@@ -62,7 +62,7 @@ The Dart relay in [`relay/`](relay/) is for dev and single-server self-hosting. 
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.3
+  --git-ref v0.1.0-beta.5
 
 rhr doctor
 ```
@@ -141,7 +141,7 @@ Same one-liner as above — locked to the beta tag:
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.3
+  --git-ref v0.1.0-beta.5
 ```
 
 One-time setup. After that, `rhr run` from any Flutter project. `rhr doctor` checks Flutter and whether the USB asset fast path is available.
