@@ -57,9 +57,8 @@ Future<void> _waitFor(
   String description,
 ) async {
   // These spawn a real relay, CLI and device bridge and wait on actual
-  // sockets, so they are the slowest tests here. A GitHub runner is much
-  // slower than a laptop, and 120s inside a 240s budget left no headroom —
-  // this test was the one intermittently failing CI while passing locally.
+  // sockets, so they are the slowest tests here and a CI runner is much slower
+  // than a laptop.
   final deadline = DateTime.now().add(const Duration(seconds: 200));
   while (DateTime.now().isBefore(deadline)) {
     if (lines.any(pattern.hasMatch)) return;
@@ -108,8 +107,18 @@ void main() {
       );
 
       Future<void> stop(Process process) async {
+        // SIGTERM first so the CLI runs its farewell (it releases the device
+        // claim and tells the phone the developer left), then SIGKILL if it
+        // does not go. Waiting only on SIGTERM made teardown the flakiest part
+        // of this file on CI: the handler does a short flush before exiting,
+        // and a loaded runner can outlast a fixed wait.
         process.kill();
-        await process.exitCode.timeout(const Duration(seconds: 10));
+        try {
+          await process.exitCode.timeout(const Duration(seconds: 10));
+        } on TimeoutException {
+          process.kill(ProcessSignal.sigkill);
+          await process.exitCode.timeout(const Duration(seconds: 10));
+        }
       }
 
       addTearDown(() async {
@@ -193,8 +202,18 @@ void main() {
       );
 
       Future<void> stop(Process process) async {
+        // SIGTERM first so the CLI runs its farewell (it releases the device
+        // claim and tells the phone the developer left), then SIGKILL if it
+        // does not go. Waiting only on SIGTERM made teardown the flakiest part
+        // of this file on CI: the handler does a short flush before exiting,
+        // and a loaded runner can outlast a fixed wait.
         process.kill();
-        await process.exitCode.timeout(const Duration(seconds: 10));
+        try {
+          await process.exitCode.timeout(const Duration(seconds: 10));
+        } on TimeoutException {
+          process.kill(ProcessSignal.sigkill);
+          await process.exitCode.timeout(const Duration(seconds: 10));
+        }
       }
 
       addTearDown(() async {
