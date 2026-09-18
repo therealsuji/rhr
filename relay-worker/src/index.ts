@@ -45,8 +45,8 @@ import {
 	endMembership,
 	hasMembership,
 	installationIsGenuine,
-	rendezvousFor,
 	redeemInvite,
+	rendezvousFor,
 } from "./accounts";
 
 export interface Env {
