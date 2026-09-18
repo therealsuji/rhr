@@ -56,7 +56,11 @@ Future<void> _waitFor(
   RegExp pattern,
   String description,
 ) async {
-  final deadline = DateTime.now().add(const Duration(seconds: 120));
+  // These spawn a real relay, CLI and device bridge and wait on actual
+  // sockets, so they are the slowest tests here. A GitHub runner is much
+  // slower than a laptop, and 120s inside a 240s budget left no headroom —
+  // this test was the one intermittently failing CI while passing locally.
+  final deadline = DateTime.now().add(const Duration(seconds: 200));
   while (DateTime.now().isBefore(deadline)) {
     if (lines.any(pattern.hasMatch)) return;
     await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -146,7 +150,7 @@ void main() {
         client.close(force: true);
       }
     },
-    timeout: const Timeout(Duration(seconds: 240)),
+    timeout: const Timeout(Duration(seconds: 420)),
   );
 
   test(
@@ -219,6 +223,6 @@ void main() {
         client.close(force: true);
       }
     },
-    timeout: const Timeout(Duration(seconds: 240)),
+    timeout: const Timeout(Duration(seconds: 420)),
   );
 }
