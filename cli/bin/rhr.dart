@@ -743,6 +743,16 @@ Future<int?> _runSession({
               exit(78);
             }
             updateAttempted = true;
+            // Tell the phone too: the tester is holding it and otherwise sees
+            // a session that simply stops.
+            transport.sendControl(
+              jsonEncode({
+                't': 'progress',
+                'phase': 'outdated',
+                'done': 0,
+                'total': 0,
+              }),
+            );
             unawaited(
               _updatePlayerOverTheWire(
                 transport: transport,
@@ -751,9 +761,15 @@ Future<int?> _runSession({
                 policy: updatePolicy,
                 deadline: bridgeDeadline,
                 attach: (sender) => updateSender = sender,
-              ).then((updated) {
+              ).then((updated) async {
                 updateSender = null;
-                if (!updated) exit(78);
+                if (updated) return;
+                // The failure reason was just handed to the transport, whose
+                // send is async. Exiting here truncates it, and the tester is
+                // left on a card that never explains itself — give the socket
+                // a beat to flush before the process goes.
+                await Future<void>.delayed(const Duration(milliseconds: 750));
+                exit(78);
               }),
             );
             return;
@@ -1105,6 +1121,21 @@ Future<Uri?> _waitForDeviceBridge(
 /// project's SDK, stream it over [transport], and hand it to the on-device
 /// installer. Returns false when the user declined or the update failed
 /// (the caller keeps the hard block).
+/// Clears the phone's update phase. Every exit from the update path goes
+/// through this: a tester holding the device otherwise sits on "building…"
+/// long after the developer's terminal gave up.
+void _clearUpdatePhase(SessionTransport transport, {String? failure}) {
+  transport.sendControl(
+    jsonEncode({
+      't': 'progress',
+      'phase': failure == null ? '' : 'update_failed',
+      'done': 0,
+      'total': 0,
+      if (failure != null) 'message': failure,
+    }),
+  );
+}
+
 Future<bool> _updatePlayerOverTheWire({
   required SessionTransport transport,
   required String project,
@@ -1113,17 +1144,44 @@ Future<bool> _updatePlayerOverTheWire({
   required _DeadlineHolder deadline,
   required void Function(PlayerUpdateSender) attach,
 }) async {
+  // Which payload fixes this? A generic player cannot carry project-owned
+  // Android sources, so a project with its own platform channels is never
+  // fixed by rebuilding the player — it needs its own debug APK, which the
+  // player installs and then tunnels. See notes/UPDATE_SCENARIOS.md.
+  final unsupported = readUnsupportedAndroidInputs(project);
+  final needsOwnApk = unsupported.isNotEmpty;
+
+  if (needsOwnApk) {
+    stderr.writeln(
+      '[rhr] this project has its own Android code, which a generic player '
+      'cannot run:',
+    );
+    for (final input in unsupported.take(5)) {
+      stderr.writeln('  - $input');
+    }
+    if (unsupported.length > 5) {
+      stderr.writeln('  … ${unsupported.length} files total');
+    }
+    stderr.writeln(
+      '[rhr] building your own app instead; the player will install it and '
+      'connect to it.',
+    );
+  }
+
   if (policy == PlayerUpdatePolicy.prompt) {
     if (!stdin.hasTerminal) {
       stderr.writeln(
         '[rhr] no terminal to confirm a player update '
         '(pass --update-player to update without asking).',
       );
+      _clearUpdatePhase(transport);
       return false;
     }
     stderr.write(
-      '[rhr] update the player over the wire to Flutter '
-      '${local.frameworkVersion}? [Y/n] ',
+      needsOwnApk
+          ? '[rhr] build and install your app on the device? [Y/n] '
+          : '[rhr] update the player over the wire to Flutter '
+                '${local.frameworkVersion}? [Y/n] ',
     );
     final answer = (await stdin
             .transform(utf8.decoder)
@@ -1132,24 +1190,48 @@ Future<bool> _updatePlayerOverTheWire({
             .catchError((_) => 'n'))
         .trim()
         .toLowerCase();
-    if (answer.isNotEmpty && answer != 'y' && answer != 'yes') return false;
+    if (answer.isNotEmpty && answer != 'y' && answer != 'yes') {
+      _clearUpdatePhase(transport);
+      return false;
+    }
   }
 
-  final template = await resolvePlayerTemplate();
-  final sender = PlayerUpdateSender(transport);
+  final sender = needsOwnApk
+      ? PlayerUpdateSender(
+          transport,
+          kind: UpdateKind.app,
+          target: readProjectApplicationId(project),
+        )
+      : PlayerUpdateSender(transport);
   attach(sender);
   try {
+    // The build takes minutes. Say so on the phone, which is otherwise
+    // staring at a session that has gone quiet.
+    transport.sendControl(
+      jsonEncode({
+        't': 'progress',
+        'phase': 'building',
+        'done': 0,
+        'total': 0,
+      }),
+    );
     // Building can take minutes and the install needs the tester to reopen
     // the player; keep the bridge wait from expiring under either.
     deadline.value = DateTime.now().add(const Duration(minutes: 20));
-    final apk = await buildUpdatePlayerApk(
-      project: project,
-      template: template,
-      frameworkRevision: local.frameworkRevision,
-      flutterExecutable: projectFlutterExecutable(project),
-    );
+    final flutterExecutable = projectFlutterExecutable(project);
+    final apk = needsOwnApk
+        ? await buildUpdateProjectApk(
+            project: project,
+            flutterExecutable: flutterExecutable,
+          )
+        : await buildUpdatePlayerApk(
+            project: project,
+            template: await resolvePlayerTemplate(),
+            frameworkRevision: local.frameworkRevision,
+            flutterExecutable: flutterExecutable,
+          );
     stderr.writeln(
-      '[rhr] streaming player update '
+      '[rhr] streaming ${needsOwnApk ? 'your app' : 'player update'} '
       '(${(apk.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB)…',
     );
     var lastReported = 0;
@@ -1184,9 +1266,11 @@ Future<bool> _updatePlayerOverTheWire({
     return true;
   } on PlayerUpdateFailure catch (failure) {
     stderr.writeln('[rhr] $failure');
+    _clearUpdatePhase(transport, failure: failure.message);
     return false;
   } catch (error) {
     stderr.writeln('[rhr] player update failed: $error');
+    _clearUpdatePhase(transport, failure: '$error');
     return false;
   } finally {
     sender.close();

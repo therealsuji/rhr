@@ -21,6 +21,12 @@ final class PlayerBuildProfile {
   };
 }
 
+/// Builds a player carrying this project's plugins, permissions and Flutter
+/// SDK. It does NOT transplant project-owned Android sources: a project with
+/// its own platform channels cannot be hosted by a generic player at all, and
+/// is routed to a build of its own debug APK instead. Callers gate on
+/// [readUnsupportedAndroidInputs] before choosing this path — see
+/// notes/UPDATE_SCENARIOS.md.
 Future<File> buildProjectPlayer({
   required String project,
   required String template,
@@ -37,15 +43,24 @@ Future<File> buildProjectPlayer({
     throw StateError('player template not found at ${templateDirectory.path}');
   }
 
-  final unsupported = readUnsupportedAndroidInputs(projectDirectory.path);
-  if (unsupported.isNotEmpty) {
-    throw UnsupportedError(
-      'Automatic player generation cannot transplant these project-specific '
-      'Android inputs yet:\n  - ${unsupported.join('\n  - ')}',
+  // A debug APK build writes several GB of Gradle intermediates. On Linux
+  // /tmp is routinely a tmpfs a fraction of that size, where the build dies
+  // deep inside Gradle's cache writer with an I/O error that names neither
+  // the disk nor the directory. Say it plainly instead, and point at the
+  // variable that moves the build somewhere with room.
+  final temp = Directory.systemTemp;
+  final freeBytes = _freeSpaceBytes(temp.path);
+  const requiredBytes = 6 * 1024 * 1024 * 1024;
+  if (freeBytes != null && freeBytes < requiredBytes) {
+    throw StateError(
+      'not enough space in ${temp.path} to build a player: '
+      '${(freeBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GiB free, '
+      'about ${requiredBytes ~/ (1024 * 1024 * 1024)} GiB needed. '
+      'Set TMPDIR to a directory with more room and retry.',
     );
   }
 
-  final workspace = await Directory.systemTemp.createTemp('rhr_player_build_');
+  final workspace = await temp.createTemp('rhr_player_build_');
   try {
     await _copyTemplate(templateDirectory, workspace);
     absolutizeTemplatePathDeps(
@@ -259,4 +274,72 @@ String _fnv1a64(String value) {
     hash = (hash * 0x100000001b3) & 0xffffffffffffffff;
   }
   return hash.toRadixString(16).padLeft(16, '0');
+}
+
+/// The project's own debug APK, for a project the generic player cannot host
+/// (see [readUnsupportedAndroidInputs]). The player installs it as a foreign
+/// package and tunnels its VM service instead of running the Dart itself,
+/// so the app keeps its own native code and its own Flutter engine.
+Future<File> buildProjectDebugApk({
+  required String project,
+  required String output,
+  String flutterExecutable = 'flutter',
+  String? targetPlatform,
+}) async {
+  final projectDirectory = Directory(project).absolute;
+  if (!File('${projectDirectory.path}/pubspec.yaml').existsSync()) {
+    throw StateError('${projectDirectory.path} is not a Flutter project');
+  }
+
+  await _runChecked(flutterExecutable, [
+    'build',
+    'apk',
+    '--debug',
+    if (targetPlatform != null) ...['--target-platform', targetPlatform],
+  ], projectDirectory.path);
+
+  final built = File(
+    '${projectDirectory.path}/build/app/outputs/flutter-apk/app-debug.apk',
+  );
+  if (!built.existsSync()) {
+    throw StateError('Flutter completed without producing ${built.path}');
+  }
+  final destination = File(output).absolute;
+  destination.parent.createSync(recursive: true);
+  return built.copy(destination.path);
+}
+
+/// The applicationId the project's debug APK installs as. The player
+/// validates the streamed APK against this before installing it.
+String readProjectApplicationId(String project) {
+  for (final name in ['build.gradle.kts', 'build.gradle']) {
+    final gradle = File('$project/android/app/$name');
+    if (!gradle.existsSync()) continue;
+    final match = RegExp(
+      r'''applicationId\s*=?\s*["']([^"']+)["']''',
+    ).firstMatch(gradle.readAsStringSync());
+    if (match != null) return match.group(1)!;
+  }
+  throw StateError(
+    'could not read applicationId from $project/android/app/build.gradle'
+    '[.kts] — the project debug APK cannot be targeted without it',
+  );
+}
+
+/// Free bytes on the filesystem holding [path], or null when it cannot be
+/// determined (an unexpected `df` layout, or a platform without it) — an
+/// unknown figure must not block a build that would have succeeded.
+int? _freeSpaceBytes(String path) {
+  try {
+    final result = Process.runSync('df', ['-Pk', path]);
+    if (result.exitCode != 0) return null;
+    final lines = const LineSplitter().convert('${result.stdout}');
+    if (lines.length < 2) return null;
+    final columns = lines[1].split(RegExp(r'\s+'));
+    if (columns.length < 4) return null;
+    final availableKiB = int.tryParse(columns[3]);
+    return availableKiB == null ? null : availableKiB * 1024;
+  } on ProcessException {
+    return null;
+  }
 }

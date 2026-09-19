@@ -141,12 +141,10 @@ class MainActivity : FlutterActivity() {
 	/**
 	 * Connector mode: instead of hosting a guest project, tunnel an ALREADY
 	 * INSTALLED debug app on this phone. The heavy lifting (pairing, mDNS
-	 * port discovery, shell) lives in the shared adb-android module, so this
-	 * app and the standalone connector run identical code.
+	 * port discovery, shell) lives in the adb-android module.
 	 *
 	 * Pairing is per-app by design: the RSA key adbd trusts sits in this
-	 * app's private storage, so the player pairs once on its own even if the
-	 * connector was paired earlier on the same phone.
+	 * app's private storage, so the player pairs once on its own.
 	 */
 	private fun configureConnectorChannel(flutterEngine: FlutterEngine) {
 		connector = MethodChannel(

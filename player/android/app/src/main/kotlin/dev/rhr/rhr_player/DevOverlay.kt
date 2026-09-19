@@ -1053,9 +1053,45 @@ class DevOverlay(
 				// ~80 MB transfer overflows Int.
 				val pct = if (total > 0) (done.toLong() * 1000 / total).toInt() else 0
 				bar.progress = pct
-				cardLabel.text = "Updating player"
+				cardLabel.text = if (RhrSessionService.updatingForeignApp)
+					"Installing your app"
+				else
+					"Updating player"
 				cardPct.text = "${pct / 10}%"
 				cardPct.visibility = View.VISIBLE
+			}
+			"outdated" -> {
+				// The dev's CLI found a mismatch. The tester is holding the
+				// phone; without this the session just goes quiet.
+				showCard()
+				bar.isIndeterminate = true
+				cardLabel.text = "Out of date — waiting for the developer"
+				cardPct.visibility = View.GONE
+			}
+			"building" -> {
+				// Minutes, not seconds: a player or app APK is compiling on
+				// the dev's machine. Say so rather than look hung.
+				showCard()
+				bar.isIndeterminate = true
+				cardLabel.text = if (RhrSessionService.phaseStalled)
+					"Still building — check the developer's terminal"
+				else
+					"Developer is building an update…"
+				cardPct.visibility = View.GONE
+			}
+			"update_failed" -> {
+				// The developer's side gave up. Say so, with their reason —
+				// otherwise the bar simply freezes and the tester waits on
+				// a build that is never coming.
+				showCard()
+				bar.isIndeterminate = false
+				bar.progress = 0
+				val why = RhrSessionService.progressMessage
+				cardLabel.text = if (why.isEmpty())
+					"Update failed — check the developer's terminal"
+				else
+					"Update failed: $why"
+				cardPct.visibility = View.GONE
 			}
 			"syncing" -> {
 				showCard()

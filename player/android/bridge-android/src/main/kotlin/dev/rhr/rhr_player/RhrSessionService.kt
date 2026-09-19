@@ -182,7 +182,8 @@ class RhrSessionService : Service() {
 		// must be native because a guest kernel owns the Flutter UI after boot.
 		//
 		// phase: "" (idle) | "assets" | "syncing" | "awaiting_restart" |
-		//        "restarting" | "reloading"
+		//        "restarting" | "reloading" | "outdated" | "building" |
+		//        "updating" | "update_failed"
 		@Volatile var progressPhase: String = ""
 			private set
 		@Volatile var progressDone: Int = 0
@@ -196,6 +197,16 @@ class RhrSessionService : Service() {
 				field = value
 				onUpdate?.invoke()
 			}
+
+		// Why the last phase ended, when the developer's side failed. Carried
+		// on the progress message so the tester reads the actual reason
+		// instead of watching a bar sit still.
+		@Volatile var progressMessage: String = ""
+
+		// True while the in-flight transfer is the developer's OWN app
+		// (kind=app) rather than a player self-update, so the overlay can
+		// name what is actually being installed.
+		@Volatile var updatingForeignApp: Boolean = false
 
 		// When the current progress phase began, used for stall detection.
 		@Volatile private var phaseSetAt = 0L
@@ -705,6 +716,7 @@ class RhrSessionService : Service() {
 							// native overlay renders it above the Flutter surface.
 							try {
 								val o = JSONObject(text)
+								progressMessage = o.optString("message", "")
 								setProgress(
 									o.optString("phase", ""),
 									o.optInt("done", 0),
@@ -857,7 +869,16 @@ class RhrSessionService : Service() {
 					// Flag it honestly instead of leaving the card frozen.
 					val setAt = RhrSessionService.Companion.phaseSetAt
 					if (setAt != 0L) {
-						val budget = if (progressPhase == "reloading") 60_000L else 180_000L
+						// A build is minutes of honest work, not a stall: a
+						// cold player build measured over 4 minutes. Anything
+						// shorter flags every normal update as stuck.
+						val budget = when (progressPhase) {
+							"reloading" -> 60_000L
+							"building" -> 900_000L
+							// Both wait on a human, not on work in flight.
+							"outdated", "update_failed" -> Long.MAX_VALUE
+							else -> 180_000L
+						}
 						val stalled = System.currentTimeMillis() - setAt > budget
 						if (stalled != phaseStalled) phaseStalled = stalled
 					}

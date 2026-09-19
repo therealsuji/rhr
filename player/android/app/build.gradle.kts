@@ -155,8 +155,7 @@ dependencies {
     // the library now; the app provides the update handler and UI).
     implementation(project(":bridge-android"))
     // Connector mode: pair with this phone's own Wireless Debugging, find an
-    // installed debug app's VM service, and tunnel it. Shared with the
-    // standalone connector so the ADB logic has one implementation.
+    // installed debug app's VM service, and tunnel it.
     implementation(project(":adb-android"))
     // Core library desugaring (see compileOptions above)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")

@@ -8,8 +8,7 @@
 // points the native session service at that instead.
 //
 // Pairing is per-app, not per-phone: the RSA key adbd trusts lives in this
-// app's private storage. A user who paired the standalone connector still
-// pairs the player once — the trust cannot be shared.
+// app's private storage, so the player pairs once on its own.
 
 import 'dart:async';
 

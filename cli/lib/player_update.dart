@@ -91,6 +91,29 @@ Future<File> buildUpdatePlayerApk({
   );
 }
 
+/// Builds the project's own debug APK, for a project whose native code the
+/// generic player cannot carry. Unlike the player APK this is never cached:
+/// it is the developer's own app, and its Dart changes every edit.
+Future<File> buildUpdateProjectApk({
+  required String project,
+  String flutterExecutable = 'flutter',
+  String? cacheDir,
+  void Function(String line)? onLog,
+}) async {
+  final log = onLog ?? stderr.writeln;
+  final home =
+      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '.';
+  final cache = Directory(cacheDir ?? '$home/.rhr/player-cache');
+  cache.createSync(recursive: true);
+  log('[rhr] building your app\'s debug APK (this takes a few minutes)…');
+  return buildProjectDebugApk(
+    project: project,
+    output: '${cache.path}/project-debug-arm64.apk',
+    flutterExecutable: flutterExecutable,
+    targetPlatform: 'android-arm64',
+  );
+}
+
 final class PlayerUpdateFailure implements Exception {
   PlayerUpdateFailure(this.message);
   final String message;

@@ -58,6 +58,13 @@ class RhrPlayerUpdater(
 	private var expectedSize = 0L
 	private var expectedSha256 = ""
 	private var installKind = "player"
+		set(value) {
+			field = value
+			// The overlay labels the transfer from this: replacing the player
+			// and installing the developer's own app read very differently to
+			// whoever is holding the phone.
+			RhrSessionService.updatingForeignApp = value == "app"
+		}
 	private var installTarget = ""
 	private var file: File? = null
 	private var output: FileOutputStream? = null
@@ -172,6 +179,21 @@ class RhrPlayerUpdater(
 
 	private fun install(apk: File) {
 		try {
+			// Declaring REQUEST_INSTALL_PACKAGES is not enough: on Android 8+
+			// the user grants it per-app, and a freshly installed player does
+			// not have it. Without this check the commit below is refused by
+			// the system AFTER we have already reported "committed" (that
+			// order is forced — a silent self-update kills this process during
+			// commit), so a blocked install reads to the developer as a
+			// finished one. Fail honestly instead, and say where to fix it.
+			if (!context.packageManager.canRequestPackageInstalls()) {
+				fail(
+					"this phone does not allow the player to install apps — " +
+						"grant \"Install unknown apps\" for RHR Player in " +
+						"Settings, then retry",
+				)
+				return
+			}
 			val foreign = installKind == "app" && installTarget.isNotEmpty()
 			val installer = context.packageManager.packageInstaller
 			val params = PackageInstaller.SessionParams(
