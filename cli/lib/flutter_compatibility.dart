@@ -7,6 +7,7 @@ final class FlutterCompatibility {
     required this.frameworkRevision,
     required this.engineRevision,
     required this.dartSdkVersion,
+    this.channel,
   });
 
   factory FlutterCompatibility.fromJson(Map<String, dynamic> json) {
@@ -18,11 +19,15 @@ final class FlutterCompatibility {
       return value;
     }
 
+    final channel = json['channel'];
     return FlutterCompatibility(
       frameworkVersion: field('frameworkVersion'),
       frameworkRevision: field('frameworkRevision'),
       engineRevision: field('engineRevision'),
       dartSdkVersion: field('dartSdkVersion'),
+      // Players predating channel reporting stay on the conservative
+      // exact-identity gate below rather than failing to parse.
+      channel: channel is String && channel.isNotEmpty ? channel : null,
     );
   }
 
@@ -31,19 +36,195 @@ final class FlutterCompatibility {
   final String engineRevision;
   final String dartSdkVersion;
 
-  List<String> differencesFrom(FlutterCompatibility player) {
-    final differences = <String>[];
+  /// Release channel ("stable", "beta", …) or null when unreported.
+  final String? channel;
+
+  /// Patch-level skew inside one stable series is supported: the kernel
+  /// format and VM service protocol only move across minors, and Flutter's
+  /// release branches routinely re-pin Dart patches mid-series (the release
+  /// manifest shows e.g. 3.44.0 pins Dart 3.12.0 while 3.44.2 pins 3.12.2).
+  /// Pairs we cannot prove are tagged stable builds of the same series —
+  /// missing channels, beta/main, forks, cross-minor — fall back to exact
+  /// identity matching.
+  CompatibilityReport differencesFrom(FlutterCompatibility player) {
+    if (_sameStableSeries(player)) {
+      final skewed =
+          frameworkVersion != player.frameworkVersion ||
+          dartSdkVersion != player.dartSdkVersion ||
+          frameworkRevision != player.frameworkRevision ||
+          engineRevision != player.engineRevision;
+      final warnings = <String>[
+        if (skewed)
+          'version skew: local Flutter $frameworkVersion '
+              '(Dart $dartSdkVersion), player Flutter '
+              '${player.frameworkVersion} (Dart ${player.dartSdkVersion}) — '
+              'same stable series, supported',
+      ];
+      return CompatibilityReport(const [], warnings);
+    }
+
+    final blockers = <String>[];
     void compare(String label, String local, String installed) {
       if (local != installed) {
-        differences.add('$label: local $local, player $installed');
+        blockers.add('$label: local $local, player $installed');
       }
     }
 
+    compare('Flutter version', frameworkVersion, player.frameworkVersion);
     compare('Flutter revision', frameworkRevision, player.frameworkRevision);
     compare('engine revision', engineRevision, player.engineRevision);
     compare('Dart SDK', dartSdkVersion, player.dartSdkVersion);
-    return differences;
+    return CompatibilityReport(List.unmodifiable(blockers), const []);
   }
+
+  bool _sameStableSeries(FlutterCompatibility player) {
+    if (channel != 'stable' || player.channel != 'stable') return false;
+    return _isSameMinor(frameworkVersion, player.frameworkVersion) &&
+        _isSameMinor(dartSdkVersion, player.dartSdkVersion);
+  }
+}
+
+/// Blockers stop the session; warnings are printed but allowed through.
+final class CompatibilityReport {
+  const CompatibilityReport(this.blockers, this.warnings);
+
+  final List<String> blockers;
+  final List<String> warnings;
+
+  bool get isCompatible => blockers.isEmpty;
+}
+
+bool _isSameMinor(String a, String b) {
+  final left = _sdkVersionParts(a);
+  final right = _sdkVersionParts(b);
+  if (left == null || right == null) return a == b;
+  return left.$1 == right.$1 && left.$2 == right.$2;
+}
+
+/// Leading numeric semver of an SDK version string; tolerates suffixes like
+/// "3.10.0 (build 3.10.0-290.4.beta)" and two-part "3.9" forms.
+(int, int, int)? _sdkVersionParts(String version) {
+  final match = RegExp(
+    r'^v?(\d+)\.(\d+)(?:\.(\d+))?',
+  ).firstMatch(version.trim());
+  if (match == null) return null;
+  return (
+    int.parse(match.group(1)!),
+    int.parse(match.group(2)!),
+    int.parse(match.group(3) ?? '0'),
+  );
+}
+
+/// The compatibility inputs captured from one Flutter project. Both CLI
+/// entrypoints use this same snapshot so their gates cannot drift apart.
+final class ProjectCompatibilityProfile {
+  const ProjectCompatibilityProfile({
+    required this.flutter,
+    required this.androidPlugins,
+    required this.androidPermissions,
+    required this.unsupportedAndroidInputs,
+  });
+
+  final FlutterCompatibility flutter;
+  final Map<String, String> androidPlugins;
+  final Set<String> androidPermissions;
+  final List<String> unsupportedAndroidInputs;
+
+  CompatibilityReport differencesFrom(Map<String, dynamic> player) {
+    final report = flutter.differencesFrom(
+      FlutterCompatibility.fromJson(player),
+    );
+    final blockers = [...report.blockers];
+    blockers.addAll(
+      androidPluginDifferences(
+        required: androidPlugins,
+        available: parseAndroidPluginProfile(player['androidPlugins']),
+      ),
+    );
+    blockers.addAll(
+      androidPermissionDifferences(
+        required: androidPermissions,
+        available: parseAndroidPermissionProfile(player['androidPermissions']),
+      ),
+    );
+    blockers.addAll(unsupportedAndroidInputs);
+    return CompatibilityReport(
+      List.unmodifiable(blockers),
+      report.warnings,
+    );
+  }
+}
+
+ProjectCompatibilityProfile readProjectCompatibilityProfile(String project) {
+  return ProjectCompatibilityProfile(
+    flutter: readProjectFlutterCompatibility(project),
+    androidPlugins: readAndroidPluginProfile(project),
+    androidPermissions: readAndroidPermissionProfile(project),
+    unsupportedAndroidInputs: readUnsupportedAndroidInputs(project),
+  );
+}
+
+/// The Flutter SDK root a project is pinned to via fvm, or null when the
+/// project has no pin. The `.fvm/flutter_sdk` symlink (created by `fvm use`)
+/// is authoritative; a bare `.fvmrc` falls back to fvm's version cache.
+String? projectPinnedFlutterSdk(String project) {
+  final link = Link('$project/.fvm/flutter_sdk');
+  if (link.existsSync()) {
+    try {
+      return link.resolveSymbolicLinksSync();
+    } on FileSystemException {
+      // Dangling symlink (SDK removed): fall through to .fvmrc.
+    }
+  }
+  final fvmrc = File('$project/.fvmrc');
+  if (!fvmrc.existsSync()) return null;
+  try {
+    final decoded = jsonDecode(fvmrc.readAsStringSync());
+    final version = decoded is Map<String, dynamic> ? decoded['flutter'] : null;
+    if (version is! String || version.isEmpty) return null;
+    final home = Platform.environment['HOME'] ?? '';
+    for (final root in [
+      Platform.environment['FVM_CACHE_PATH'],
+      '$home/fvm/versions',
+      '$home/.fvm/versions',
+    ]) {
+      if (root == null) continue;
+      final sdk = Directory('$root/$version');
+      if (sdk.existsSync()) return sdk.path;
+    }
+  } on FormatException {
+    // Malformed .fvmrc: behave as unpinned.
+  }
+  return null;
+}
+
+/// The `flutter` command that matches [readProjectFlutterCompatibility] for
+/// this project: the fvm-pinned SDK's binary when there is a pin, otherwise
+/// whatever `flutter` resolves to on PATH.
+String projectFlutterExecutable(String project) {
+  final sdk = projectPinnedFlutterSdk(project);
+  return sdk == null ? 'flutter' : '$sdk/bin/flutter';
+}
+
+/// The Flutter identity streaming into this project's player must match: the
+/// project's fvm-pinned SDK when present, else the SDK that launched the CLI.
+/// Keying off the pin matters — `flutter attach` and the kernel compiler run
+/// with the project's SDK, not the CLI's.
+FlutterCompatibility readProjectFlutterCompatibility(String project) {
+  final sdk = projectPinnedFlutterSdk(project);
+  if (sdk == null) return readLocalFlutterCompatibility();
+  final versionFile = File('$sdk/bin/cache/flutter.version.json');
+  if (!versionFile.existsSync()) {
+    throw StateError(
+      'the fvm-pinned Flutter SDK at $sdk has no bin/cache/'
+      'flutter.version.json — run a flutter command with it once',
+    );
+  }
+  final json = jsonDecode(versionFile.readAsStringSync());
+  if (json is! Map<String, dynamic>) {
+    throw const FormatException('invalid Flutter version metadata');
+  }
+  return FlutterCompatibility.fromJson(json);
 }
 
 final class AndroidPluginSource {
@@ -205,17 +386,19 @@ List<String> androidPermissionDifferences({
   required Set<String> required,
   required Set<String> available,
 }) {
-  final missing = required
-      .difference(available)
-      .map((permission) => '$permission: required, missing from player')
-      .toList()
-    ..sort();
+  final missing =
+      required
+          .difference(available)
+          .map((permission) => '$permission: required, missing from player')
+          .toList()
+        ..sort();
   // WRITE_EXTERNAL_STORAGE is a maxSdkVersion=28 legacy permission: modern
   // Androids filter it out of the player's requestedPermissions list entirely,
   // and on API 29+ it is functionally inert anyway. A project that "requires"
   // it still runs fine on the player, so never block on it.
-  missing.removeWhere((line) =>
-      line.startsWith('android.permission.WRITE_EXTERNAL_STORAGE:'));
+  missing.removeWhere(
+    (line) => line.startsWith('android.permission.WRITE_EXTERNAL_STORAGE:'),
+  );
   return missing;
 }
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/relay_race.dart';
@@ -69,7 +70,40 @@ void main() {
     final received = device.stream.firstWhere(
       (message) => message is List<int>,
     );
-    race.send([4, 5, 6]);
+    await race.sendPayload(Uint8List.fromList([4, 5, 6]));
     expect(await received, [4, 5, 6]);
   });
+
+  test(
+    'replaced relay sockets do not retain completed subscriptions',
+    () async {
+      final relay = await LocalRelay.start(
+        'rhr-test-replacements',
+        advertisedAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(() => relay?.close());
+      expect(relay, isNotNull);
+      final runningRelay = relay!;
+
+      final sockets = <IOWebSocketChannel>[];
+      for (var i = 0; i < 4; i++) {
+        final device = IOWebSocketChannel.connect(
+          '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/device',
+        );
+        final dev = IOWebSocketChannel.connect(
+          '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/dev',
+        );
+        sockets.addAll([device, dev]);
+        await Future.wait([device.ready, dev.ready]);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(runningRelay.activeSubscriptionCount, 2);
+      }
+
+      for (final socket in sockets) {
+        await socket.sink.close();
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(runningRelay.activeSubscriptionCount, 0);
+    },
+  );
 }

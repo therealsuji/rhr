@@ -148,7 +148,7 @@ final class RhrSessionService: NSObject, URLSessionWebSocketDelegate {
 			c?.write(Data(payload))
 			ws?.send(.data(Data(encodeAck(channel, payload.count)))) { _ in }
 		case opAck:
-			let n = Int(payload[0]) << 24 | Int(payload[1]) << 16 | Int(payload[2]) << 8 | Int(payload[3])
+			guard let n = Self.decodeAckCount(payload) else { return }
 			lock.lock()
 			unacked[channel] = max(0, (unacked[channel] ?? 0) - n)
 			lock.unlock()
@@ -187,6 +187,13 @@ final class RhrSessionService: NSObject, URLSessionWebSocketDelegate {
 		[opAck] + beBytes(ch) + beBytes(UInt32(n))
 	}
 	private func encodeClose(_ ch: UInt32) -> [UInt8] { [opClose] + beBytes(ch) }
+
+	static func decodeAckCount(_ payload: [UInt8]) -> Int? {
+		guard payload.count >= 4 else { return nil }
+		return Int(payload[0]) << 24 | Int(payload[1]) << 16 |
+			Int(payload[2]) << 8 | Int(payload[3])
+	}
+
 	private func beBytes(_ v: UInt32) -> [UInt8] {
 		[UInt8(v >> 24 & 0xff), UInt8(v >> 16 & 0xff), UInt8(v >> 8 & 0xff), UInt8(v & 0xff)]
 	}

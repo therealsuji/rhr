@@ -247,11 +247,12 @@ OFFLINE offline transport_id:6
     );
   });
 
-  test('USB range writer invokes dd directly under run-as', () {
+  test('USB range writer waits for remote dd completion without a PTY', () {
     expect(
       usbRangeWriteAdbArguments('/data/player/assets/kernel_blob.bin', 3),
       [
-        'exec-in',
+        'shell',
+        '-T',
         'run-as',
         'dev.rhr.rhr_player',
         'dd',
@@ -261,6 +262,20 @@ OFFLINE offline transport_id:6
         'conv=notrunc',
       ],
     );
+  });
+
+  test('USB archive writer waits for remote tar completion without a PTY', () {
+    expect(usbArchiveWriteAdbArguments('/data/player/assets/flutter_assets'), [
+      'shell',
+      '-T',
+      'run-as',
+      'dev.rhr.rhr_player',
+      'tar',
+      '-xf',
+      '-',
+      '-C',
+      '/data/player/assets/flutter_assets',
+    ]);
   });
 
   test('USB inventory rejects missing and corrupt remote files', () {

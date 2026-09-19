@@ -30,7 +30,10 @@ Future<void> syncAssets({
   int maxConcurrentUploads = 4,
   AssetTransport? transport,
   AssetProgress? onProgress,
-  FutureOr<void> Function()? afterSync,
+  /// Called when the push is done. The flag says whether anything actually
+  /// changed, so a caller that only needs to act on new assets — a hot
+  /// restart, say — can skip the work when there are none.
+  FutureOr<void> Function({required bool changed})? afterSync,
 }) async {
   void report(String phase, int done, int total) =>
       onProgress?.call(phase, done, total);
@@ -141,7 +144,7 @@ Future<void> syncAssets({
   if (files.isEmpty) {
     saveManifest();
     stderr.writeln('[rhr] assets already in sync.');
-    await afterSync?.call();
+    await afterSync?.call(changed: false);
     return;
   }
 
@@ -224,7 +227,7 @@ Future<void> syncAssets({
     '${throughput.toStringAsFixed(1)} MB/s, '
     '${result.compressionMilliseconds}ms aggregate compression.',
   );
-  await afterSync?.call();
+  await afterSync?.call(changed: true);
 }
 
 void _applyFingerprints(

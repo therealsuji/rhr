@@ -1,11 +1,12 @@
 // Desktop stand-in for a phone: run with --enable-vm-service so the bridge
 // has a real VM service to tunnel.
-//   dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8787 test
+//   dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8123 test
 //
 // Reports the LOCAL Flutter SDK's compatibility profile (same machine as the
 // dev CLI, so the CLI's compatibility gate passes) plus a stable per-process
 // asset-store id.
 import 'dart:convert';
+import 'dart:developer' show Service;
 import 'dart:io';
 
 import 'package:rhr_bridge/rhr_bridge.dart';
@@ -27,24 +28,49 @@ Map<String, dynamic> _localCompatibility() {
   if (versionFile == null) {
     throw StateError('could not locate flutter.version.json');
   }
-  final json = jsonDecode(versionFile.readAsStringSync()) as Map<String, dynamic>;
+  final json =
+      jsonDecode(versionFile.readAsStringSync()) as Map<String, dynamic>;
   return {
     'frameworkVersion': json['frameworkVersion'],
     'frameworkRevision': json['frameworkRevision'],
     'engineRevision': json['engineRevision'],
     'dartSdkVersion': json['dartSdkVersion'],
+    'channel': json['channel'],
     'androidPlugins': <String, dynamic>{},
     'androidPermissions': <String>[],
   };
 }
 
 Future<void> main(List<String> args) async {
-  RhrBridge.start(
-    relayUrl: args[0],
-    sessionCode: args[1],
-    assetStoreId: 'fake-${DateTime.now().millisecondsSinceEpoch}',
-    compatibility: _localCompatibility(),
-  );
+  final preferDirect = args.contains('--direct');
+  // --connector stands in for the player tunneling a THIRD-party app: it
+  // announces host "connector" and deliberately omits the identity block,
+  // because the identity would describe the player rather than the target.
+  final connectorMode = args.contains('--connector');
+  if (connectorMode) {
+    // On a phone this URI is discovered out of the target's log. Here the
+    // isolate's own service door stands in for it: what the test cares about
+    // is the SHAPE of the hello, not whose VM answers.
+    final own = (await Service.getInfo()).serverUri;
+    if (own == null) {
+      stderr.writeln('run with --enable-vm-service to use --connector');
+      exit(2);
+    }
+    RhrBridge.startExternal(
+      relayUrl: args[0],
+      sessionCode: args[1],
+      vmUri: own,
+      preferDirect: preferDirect,
+    );
+  } else {
+    RhrBridge.start(
+      relayUrl: args[0],
+      sessionCode: args[1],
+      assetStoreId: 'fake-${DateTime.now().millisecondsSinceEpoch}',
+      compatibility: _localCompatibility(),
+      preferDirect: preferDirect,
+    );
+  }
   // A clean close on termination so the local relay's device-death handling
   // (drop the dev connection) is exercised in tests.
   Future<void> shutDown() async {

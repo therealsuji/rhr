@@ -12,22 +12,30 @@
 // guest in place of this lobby.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:developer' show Service;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:rhr_bridge/session_code.dart';
+import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'account_join.dart';
+import 'connector.dart';
+import 'session_code_field.dart';
 
 const _relayUrl = String.fromEnvironment(
   'RHR_RELAY',
-  defaultValue: 'wss://rhr-relay.codeforge007.workers.dev',
+  defaultValue: defaultPublicRelay,
 );
+// In direct mode, the relay carries control messages only. Set RHR_DIRECT=false
+// only when using an explicitly private or local relay for payload transport.
+const _preferDirect = bool.fromEnvironment('RHR_DIRECT', defaultValue: true);
 
 const _session = MethodChannel('rhr/session');
+const _violetColor = Color(0xFF7C4DFF);
+const _hintColor = Color(0xFF5A4E80);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,7 +52,7 @@ class PlayerApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF7C4DFF),
+          seedColor: _violetColor,
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
@@ -76,8 +84,15 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   // Hidden QA entry: tap the footer 7× to open the fault-injection sheet.
   int _debugTaps = 0;
 
+  /// Whether the code field is on screen.
+  ///
+  /// Joining is how this is used now, so the code is a way in round the back:
+  /// still there for a LAN with no account service, or a phone nobody wants
+  /// joined to anything, but no longer the first thing a tester reads.
+  bool _showCodeEntry = false;
+
   // Design tokens matching the native DevOverlay.
-  static const _violet = Color(0xFF7C4DFF);
+  static const _violet = _violetColor;
   static const _ink = Color(0xFFF3F1FA);
   static const _inkDim = Color(0xFFA79FC4);
   static const _surface = Color(0xFF1A1330);
@@ -114,8 +129,15 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         if (autoResume && saved.length >= 16) {
           _connect(auto: true);
         }
+        return;
       }
+      // No saved code, but this phone may have joined an account — then it
+      // waits on its own rendezvous instead, so a developer who picks it from
+      // their device list finds it already there. A phone that has joined
+      // nothing stays on the lobby, which is what keeps the code path whole.
+      _waitOnAccountRendezvous();
     });
+    _collectLinkInvite();
   }
 
   @override
@@ -191,39 +213,142 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Open the camera, scan the dev's QR ({"relay":..,"code":..}), fill the
-  /// fields, and connect — the Expo Go flow. Falls back gracefully if the QR
-  /// isn't ours.
-  Future<void> _scan() async {
-    final result = await Navigator.of(
-      context,
-    ).push<String>(MaterialPageRoute(builder: (_) => const _ScannerScreen()));
-    if (result == null) return;
-    String code = result;
-    String relay = _relay;
-    var fallbackRelays = _fallbackRelays;
-    // Prefer the structured payload; tolerate a bare code string too.
-    try {
-      final m = jsonDecode(result) as Map<String, dynamic>;
-      if (m['code'] is String) code = m['code'] as String;
-      final encodedRelays = m['relays'];
-      if (encodedRelays is List) {
-        final parsed = encodedRelays.whereType<String>().toList();
-        if (parsed.isNotEmpty) {
-          relay = parsed.first;
-          fallbackRelays = parsed.skip(1).toList(growable: false);
-        }
-      } else if (m['relay'] is String) {
-        relay = m['relay'] as String;
-        fallbackRelays = const [];
-      }
-    } catch (_) {
-      /* bare code */
-    }
+  /// Handles what the native side pushes to the lobby.
+  Future<dynamic> lobbyChannelHandler(MethodCall call) async {
+    if (call.method != 'inviteArrived' || !mounted) return null;
+    final invite = parseAccountInvite('${call.arguments}');
+    if (invite != null) await _onInvite(invite);
+    return null;
+  }
+
+  /// Picks up an invitation that arrived as an `rhr://` link.
+  ///
+  /// Same payload a QR carries, so it lands on the same consent screen: the
+  /// difference is only how it reached the phone. A link can travel however a
+  /// team already talks, where a QR needs both people in one room.
+  Future<void> _collectLinkInvite() async {
+    const channel = MethodChannel('rhr/connector');
+    // A link that arrives while the player is already open is pushed rather
+    // than polled, since there is no launch to read it from. Named so the
+    // connector screen can put it back when it leaves — it takes this same
+    // channel over while it is open.
+    channel.setMethodCallHandler(lobbyChannelHandler);
+    final payload = await channel.invokeMethod<String>('pendingInvite');
+    if (payload == null || !mounted) return;
+    final invite = parseAccountInvite(payload);
+    if (invite != null) await _onInvite(invite);
+  }
+
+  /// Waits on this phone's own rendezvous, when it belongs to an account.
+  ///
+  /// Nobody types anything for this: the name comes from the installation
+  /// identity, and a developer who was invited computes the same one. Doing
+  /// nothing when no account has been joined is deliberate — a phone that has
+  /// joined nothing must still reach the code path.
+  Future<void> _waitOnAccountRendezvous() async {
+    if (!mounted) return;
+    final accounts = await joinedAccounts();
+    if (accounts.isEmpty || !mounted) return;
+    final rendezvous = await ownRendezvous();
+    if (rendezvous == null || !mounted) return;
+    setState(() => _code.text = rendezvous);
+    await _connect(auto: true);
+    if (!mounted) return;
     setState(() {
-      _relay = relay;
-      _fallbackRelays = fallbackRelays;
-      _code.text = code;
+      _status = accounts.length == 1
+          ? 'Waiting for ${accounts.first.email}.'
+          : 'Waiting for any of ${accounts.length} accounts.';
+    });
+  }
+
+  /// Asks before joining, then joins.
+  ///
+  /// This phone usually belongs to the tester rather than the developer, so a
+  /// scan must not quietly attach it to someone's account: the sheet names
+  /// whose account it is and what joining allows, and does nothing until they
+  /// accept.
+  Future<void> _onInvite(AccountInvite invite) async {
+    final accepted = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: _surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                invite.account.isEmpty
+                    ? 'Join this account?'
+                    : 'Join ${invite.account}?',
+                style: const TextStyle(
+                  color: _ink,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 10),
+              // Two facts decide this: what they get, and that it is
+              // reversible. Everything else was reassurance the tester has to
+              // read before they can answer.
+              const Text(
+                'They can connect to this phone to test their app. '
+                'Leave any time.',
+                style: TextStyle(color: _inkDim, fontSize: 13.5, height: 1.4),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.of(sheetContext).pop(false),
+                      style: TextButton.styleFrom(foregroundColor: _inkDim),
+                      child: const Text('Not now'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(sheetContext).pop(true),
+                      style: FilledButton.styleFrom(backgroundColor: _violet),
+                      child: const Text('Join'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (accepted != true || !mounted) return;
+
+    final outcome = await redeemInvite(invite);
+    if (!mounted) return;
+    setState(() {
+      _status = switch (outcome) {
+        JoinAccepted(:final account, alreadyJoined: true) =>
+          'Already joined ${account.email}.',
+        JoinAccepted(:final account) =>
+          'Joined ${account.email}. They can now connect to this phone.',
+        JoinRejected(:final reason) => reason,
+      };
+    });
+  }
+
+  /// A scan carries its own relay when the dev's QR named one; a typed code
+  /// leaves whatever relay we already had in place.
+  Future<void> _onScanned(SessionCodeEntry entry) async {
+    setState(() {
+      if (entry.relay != null) {
+        _relay = entry.relay!;
+        _fallbackRelays = entry.fallbackRelays;
+      }
     });
     await _connect();
   }
@@ -247,7 +372,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
 
   Future<void> _connect({bool auto = false}) async {
     final code = _code.text.trim();
-    if (!isValidRhrSessionCode(code)) {
+    // A rendezvous is a session name too, just not a typed one: it is derived
+    // from the installation identity and never looks like `rhr-xxxx-…`.
+    // Validating it as a code rejected the account path outright.
+    if (!isValidRhrSessionCode(code) && !isRendezvousName(code)) {
       if (!auto) {
         setState(
           () => _status =
@@ -278,18 +406,19 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       'relayUrls': [_relay, ..._fallbackRelays],
       'code': code,
       'vmUri': (vm ?? Uri.parse('http://127.0.0.1:0/')).toString(),
+      'preferDirect': _preferDirect,
     });
-    setState(() => _active = true);
-    setState(
-      () => _status = auto
+    setState(() {
+      _active = true;
+      _status = auto
           ? 'Session restored — waiting for developer.\n'
                 'Start rhr run on your machine and it will reconnect.'
           : 'Session service running — "$code". Waiting for developer.\n'
                 'On your machine:\n'
                 'rhr attach --sync-assets --relay $_relay --code $code\n'
                 'then press R (hot restart) to boot your app here.\n'
-                'The tunnel survives hot restarts and backgrounding.',
-    );
+                'The tunnel survives hot restarts and backgrounding.';
+    });
   }
 
   @override
@@ -352,9 +481,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 12),
                         const Text(
-                          'rhr plays any Flutter project over the internet. '
-                          'Scan the QR from your terminal (rhr run) or enter a '
-                          'code, then hot reload like the phone is plugged in.',
+                          'Scan the QR from your developer to let them test on '
+                          'this phone. You stay in control — leave any time.',
                           style: TextStyle(
                             color: _inkDim,
                             fontSize: 14,
@@ -362,13 +490,38 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                           ),
                         ),
                         const SizedBox(height: 26),
-                        _scanButton(),
-                        const SizedBox(height: 18),
-                        _divider(),
-                        const SizedBox(height: 18),
-                        _codeEntry(),
+                        _scanToJoin(),
+                        const SizedBox(height: 14),
+                        // Still one tap away, and deliberately so: this is the
+                        // only way in when the account service cannot be
+                        // reached, which is exactly when a buried alternative
+                        // would hurt most.
+                        if (_showCodeEntry)
+                          SessionCodeField(
+                            controller: _code,
+                            actionLabel: 'Connect',
+                            onSubmit: _connect,
+                            onScanned: _onScanned,
+                            onInvite: _onInvite,
+                          )
+                        else
+                          Center(
+                            child: TextButton(
+                              onPressed: () =>
+                                  setState(() => _showCodeEntry = true),
+                              style: TextButton.styleFrom(
+                                foregroundColor: _inkDim,
+                              ),
+                              child: const Text(
+                                'Enter a session code instead',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          ),
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
+                        const SizedBox(height: 18),
+                        _connectorEntry(),
                         const SizedBox(height: 20),
                         Center(
                           child: Row(
@@ -379,7 +532,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                                 child: const Text(
                                   'rhr player · debug build',
                                   style: TextStyle(
-                                    color: Color(0xFF5A4E80),
+                                    color: _hintColor,
                                     fontSize: 11,
                                   ),
                                 ),
@@ -387,7 +540,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                               const Text(
                                 ' · ',
                                 style: TextStyle(
-                                  color: Color(0xFF5A4E80),
+                                  color: _hintColor,
                                   fontSize: 11,
                                 ),
                               ),
@@ -396,7 +549,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                                 child: const Text(
                                   'Licenses',
                                   style: TextStyle(
-                                    color: Color(0xFF5A4E80),
+                                    color: _hintColor,
                                     fontSize: 11,
                                     decoration: TextDecoration.underline,
                                   ),
@@ -416,6 +569,86 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       ),
     );
   }
+
+  /// The front door: scan an invitation and this phone joins an account.
+  Widget _scanToJoin() => FilledButton.icon(
+    onPressed: () async {
+      final raw = await Navigator.of(context).push<String>(
+        MaterialPageRoute(builder: (_) => const ScannerScreen()),
+      );
+      if (raw == null || !mounted) return;
+      final invite = parseAccountInvite(raw);
+      if (invite != null) {
+        await _onInvite(invite);
+        return;
+      }
+      // A session-code QR scanned here still works rather than being
+      // rejected for arriving at the wrong button.
+      final entry = parseSessionPayload(raw);
+      _code.text = formatSessionCodeInput(entry.code);
+      await _onScanned(entry);
+    },
+    icon: const Icon(Icons.qr_code_scanner_rounded, size: 22),
+    label: const Text('Scan to connect'),
+    style: FilledButton.styleFrom(
+      backgroundColor: _violet,
+      foregroundColor: Colors.white,
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      textStyle: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
+    ),
+  );
+
+  /// The second way to use the player: leave an already-installed app where
+  /// it is and tunnel that instead of hosting a guest project here. Presented
+  /// as a peer of the code entry above, not buried in a menu, because a user
+  /// arriving with their own debug build has no reason to guess it exists.
+  Widget _connectorEntry() => GestureDetector(
+    onTap: () => Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ConnectorScreen(
+          relay: _relay,
+          fallbackRelays: _fallbackRelays,
+          restoreHandler: lobbyChannelHandler,
+        ),
+      ),
+    ),
+    child: Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _surfaceHi),
+      ),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Connect an installed app',
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Hot reload a debug build already on this phone, instead '
+                  'of hosting a project here.',
+                  style: TextStyle(color: _inkDim, fontSize: 12.5, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          const Icon(Icons.chevron_right, color: _inkDim),
+        ],
+      ),
+    ),
+  );
 
   Widget _chip(String text, Color color) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -437,85 +670,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     width: 8,
     height: 8,
     decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-  );
-
-  Widget _scanButton() => FilledButton.icon(
-    onPressed: _scan,
-    icon: const Icon(Icons.qr_code_scanner_rounded, size: 22),
-    label: const Text('Scan QR to connect'),
-    style: FilledButton.styleFrom(
-      backgroundColor: _violet,
-      foregroundColor: Colors.white,
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      textStyle: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
-    ),
-  );
-
-  Widget _divider() => const Row(
-    children: [
-      Expanded(child: Divider(color: _surfaceHi)),
-      Padding(
-        padding: EdgeInsets.symmetric(horizontal: 12),
-        child: Text(
-          'or enter code',
-          style: TextStyle(color: _inkDim, fontSize: 12.5),
-        ),
-      ),
-      Expanded(child: Divider(color: _surfaceHi)),
-    ],
-  );
-
-  Widget _codeEntry() => Row(
-    children: [
-      Expanded(
-        child: TextField(
-          controller: _code,
-          autocorrect: false,
-          enableSuggestions: false,
-          style: const TextStyle(color: _ink, fontSize: 14),
-          decoration: InputDecoration(
-            hintText: 'rhr-xxxx-xxxx-xxxx',
-            hintStyle: const TextStyle(color: Color(0xFF5A4E80)),
-            prefixIcon: const Icon(Icons.tag, color: _inkDim, size: 18),
-            filled: true,
-            fillColor: _surface,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 16,
-            ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide.none,
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: _surfaceHi),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: _violet, width: 1.5),
-            ),
-          ),
-        ),
-      ),
-      const SizedBox(width: 10),
-      FilledButton(
-        onPressed: _connect,
-        style: FilledButton.styleFrom(
-          backgroundColor: _violet,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-          ),
-        ),
-        child: const Text(
-          'Connect',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
-      ),
-    ],
   );
 
   /// Live session card: code, status, and next step, plus Disconnect.
@@ -651,6 +805,28 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
+            // The installation identity is minted lazily and lives only in
+            // native storage, so this is the one place a tester can read it
+            // back — useful when an account says it does not recognise this
+            // phone.
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.fingerprint, color: _violet, size: 20),
+              title: const Text(
+                'Show installation id',
+                style: TextStyle(color: _ink, fontSize: 14),
+              ),
+              onTap: () async {
+                final id = await const MethodChannel(
+                  'rhr/connector',
+                ).invokeMethod<String>('installationId');
+                if (!context.mounted) return;
+                Navigator.of(context).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(id ?? 'unavailable')),
+                );
+              },
+            ),
             for (final (icon, label, name) in _faults)
               ListTile(
                 dense: true,
@@ -714,61 +890,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           height: 1.4,
           fontFamily: 'monospace',
         ),
-      ),
-    );
-  }
-}
-
-/// Full-screen camera QR scanner. Pops with the raw scanned string (the caller
-/// parses {relay, code}); returns null if the user backs out.
-class _ScannerScreen extends StatefulWidget {
-  const _ScannerScreen();
-
-  @override
-  State<_ScannerScreen> createState() => _ScannerScreenState();
-}
-
-class _ScannerScreenState extends State<_ScannerScreen> {
-  bool _handled = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Scan the dev QR')),
-      body: Stack(
-        alignment: Alignment.center,
-        children: [
-          MobileScanner(
-            onDetect: (capture) {
-              if (_handled) return;
-              final raw = capture.barcodes
-                  .map((b) => b.rawValue)
-                  .firstWhere(
-                    (v) => v != null && v.isNotEmpty,
-                    orElse: () => null,
-                  );
-              if (raw == null) return;
-              _handled = true;
-              Navigator.of(context).pop(raw);
-            },
-          ),
-          // Simple viewfinder.
-          Container(
-            width: 240,
-            height: 240,
-            decoration: BoxDecoration(
-              border: Border.all(color: const Color(0xFF7C4DFF), width: 3),
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-          const Positioned(
-            bottom: 48,
-            child: Text(
-              'Point at the QR in the dev’s terminal',
-              style: TextStyle(color: Colors.white70),
-            ),
-          ),
-        ],
       ),
     );
   }
