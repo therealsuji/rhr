@@ -172,6 +172,10 @@ final class PlayerUpdateSender {
   Completer<void>? _stateArrived;
   var _closed = false;
 
+  /// The last status [_awaitState] accepted, for fields beyond `state`
+  /// (the encoding the player chose out of what we offered).
+  Map<String, dynamic>? _lastStatus;
+
   /// Feed one decoded text message from the transport stream. Returns true
   /// when the message belonged to this transfer (callers skip their own
   /// handling for those). opAck binary frames for the transfer id must also
@@ -208,6 +212,11 @@ final class PlayerUpdateSender {
         'size': size,
         'sha256': digest.toString(),
         'kind': kind.name,
+        // An APK keeps its native libraries STORED so Android can mmap them,
+        // which leaves roughly a third of the bytes compressible. Offered,
+        // not assumed: a player that does not answer with an encoding gets
+        // the raw stream exactly as before.
+        'encodings': ['gzip'],
         if (target.isNotEmpty) 'target': target,
       }),
     );
@@ -218,8 +227,20 @@ final class PlayerUpdateSender {
           'self-update; reinstall it manually once',
     );
 
+    // size and sha256 above describe the APK itself; the player verifies
+    // them after decoding, so compression never changes what is checked.
+    final useGzip = _lastStatus?['encoding'] == 'gzip';
+    final source = useGzip
+        ? apk.openRead().transform(gzip.encoder)
+        : apk.openRead();
+    if (useGzip) {
+      stderr.writeln('[rhr] compressing the transfer (gzip)');
+    }
+
     var sent = 0;
-    await for (final chunk in apk.openRead()) {
+    // With gzip the wire total is not known until the stream ends, so
+    // progress is reported against the APK size and simply arrives early.
+    await for (final chunk in source) {
       final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
       var offset = 0;
       while (offset < bytes.length) {
@@ -291,7 +312,10 @@ final class PlayerUpdateSender {
       final status = _pendingStates.removeAt(0);
       final state = status['state'];
       if (state is! String) continue;
-      if (accepted.contains(state)) return state;
+      if (accepted.contains(state)) {
+        _lastStatus = status;
+        return state;
+      }
       if (state == 'failure') {
         throw PlayerUpdateFailure(
           'player update failed on the device: '

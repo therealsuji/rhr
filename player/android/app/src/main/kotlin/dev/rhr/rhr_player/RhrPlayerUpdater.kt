@@ -9,6 +9,7 @@ import android.os.Build
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import org.json.JSONObject
@@ -67,12 +68,20 @@ class RhrPlayerUpdater(
 		}
 	private var installTarget = ""
 	private var file: File? = null
-	private var output: FileOutputStream? = null
+	// OutputStream, not FileOutputStream: a gzip transfer inflates through
+	// GzipSink on the way to the file.
+	private var output: OutputStream? = null
+
+	/** Tail of the write chain, counting and hashing the decoded APK. */
+	private var sink: CountingSink? = null
 	private var digest: MessageDigest? = null
 	private var received = 0L
 	private var commitRequested = false
 	private var finished = false
 	private var lastDataAt = 0L
+
+	/** Wire encoding agreed for this transfer: "gzip" or "identity". */
+	private var encoding = "identity"
 
 	override fun handleBegin(message: JSONObject) {
 		val id = message.optInt("id")
@@ -92,16 +101,32 @@ class RhrPlayerUpdater(
 			received = 0
 			commitRequested = false
 			finished = false
+			// An APK stores its native libraries uncompressed so Android can
+			// mmap them, which leaves ~a third of the transfer compressible.
+			// The dev offers what it can encode; we pick gzip when offered
+			// and otherwise stay on the raw stream, so either side can be
+			// older than the other.
+			val offered = message.optJSONArray("encodings")
+			encoding = if (offered != null &&
+				(0 until offered.length()).any { offered.optString(it) == "gzip" }
+			) "gzip" else "identity"
 			val dir = File(context.filesDir, "updates").apply { mkdirs() }
 			// One in-flight update at a time; a stale file from a dead
 			// transfer is simply overwritten.
 			file = File(dir, "player-update.apk")
-			output = FileOutputStream(file)
+			// size and sha256 describe the APK, never the wire bytes, so the
+			// digest and the byte count both sit AFTER decompression and the
+			// verification below is identical either way.
 			digest = MessageDigest.getInstance("SHA-256")
+			// Counting/hashing sits at the FILE end of the chain, so an
+			// identity transfer and a gzip transfer verify identically.
+			val counting = CountingSink(FileOutputStream(file), digest!!)
+			sink = counting
+			output = if (encoding == "gzip") GzipSink(counting) else counting
 		}
 		active = this
-		Log.i(TAG, "update transfer $id started ($size bytes)")
-		status(id, "ready")
+		Log.i(TAG, "update transfer $id started ($size bytes, $encoding)")
+		status(id, "ready", encoding = encoding)
 	}
 
 	override fun handleData(frame: ByteArray) {
@@ -110,15 +135,19 @@ class RhrPlayerUpdater(
 			if (id != transferId || finished) return
 			val n = frame.size - 5
 			try {
+				// expectedSize and expectedSha256 describe the APK, so both
+				// must be measured on the decoded bytes. Under gzip the wire
+				// frame is neither the right length nor the right content —
+				// the sink reports what actually reached the file.
 				output?.write(frame, 5, n)
-				digest?.update(frame, 5, n)
+				received = sink?.written ?: (received + n)
 			} catch (e: Exception) {
 				Log.w(TAG, "update write failed: $e")
 				fail("could not write the APK on the device: $e")
 				return
 			}
-			received += n
 			lastDataAt = System.currentTimeMillis()
+			// Flow control is a wire-level window, so it acks wire bytes.
 			sendBinary(encodeAck(id, n))
 			if (commitRequested && received >= expectedSize) finishTransfer()
 		}
@@ -161,9 +190,12 @@ class RhrPlayerUpdater(
 		finished = true
 		val apk = file ?: return
 		try {
+			// Closing flushes the inflater's tail, so the final count is only
+			// authoritative afterwards.
 			output?.close()
 			output = null
 		} catch (_: Exception) {}
+		received = sink?.written ?: received
 		if (received != expectedSize) {
 			fail("size mismatch: got $received, expected $expectedSize")
 			return
@@ -271,13 +303,21 @@ class RhrPlayerUpdater(
 	private fun closeQuietly() {
 		try { output?.close() } catch (_: Exception) {}
 		output = null
+		sink = null
 		file?.delete()
 	}
 
-	private fun status(id: Int, state: String, message: String? = null) {
+	private fun status(
+		id: Int,
+		state: String,
+		message: String? = null,
+		encoding: String? = null,
+	) {
 		val payload = JSONObject().put("t", "update_status").put("id", id)
 			.put("state", state)
 		if (message != null) payload.put("message", message)
+		// The dev only compresses once we have said we can decode it.
+		if (encoding != null) payload.put("encoding", encoding)
 		try {
 			sendText(payload.toString())
 		} catch (e: Exception) {
@@ -326,4 +366,133 @@ class UpdateResultReceiver : BroadcastReceiver() {
 			}
 		}
 	}
+}
+
+/**
+ * Inflates a gzip stream as it is written.
+ *
+ * `GZIPInputStream` is the usual way to read one, but it pulls from a source
+ * and the transfer pushes frames at us as they arrive off the tunnel. Rather
+ * than park a thread on a piped stream, this inflates in place: each write
+ * feeds the Inflater and drains whatever comes out to the file.
+ *
+ * Gzip framing is handled by `Inflater(nowrap = false)`... except that Java's
+ * Inflater speaks zlib, not gzip, so the 10-byte header is skipped by hand and
+ * the trailer is simply never fed (we stop at the Inflater's own end marker).
+ */
+private class GzipSink(private val sink: OutputStream) : OutputStream() {
+    private val inflater = java.util.zip.Inflater(true)
+    private val buffer = ByteArray(64 * 1024)
+    private val header = java.io.ByteArrayOutputStream()
+    private var headerDone = false
+
+    override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        var start = off
+        var count = len
+        if (!headerDone) {
+            // Buffer until the whole header is in hand. It is 10 bytes plus
+            // whatever the FLG byte adds, and frames split anywhere, so this
+            // cannot assume one write holds it.
+            header.write(b, start, count)
+            val consumed = consumeHeader(header.toByteArray()) ?: return
+            val pending = header.toByteArray()
+            headerDone = true
+            header.reset()
+            start = consumed
+            count = pending.size - consumed
+            if (count <= 0) return
+            inflate(pending, start, count)
+            return
+        }
+        inflate(b, start, count)
+    }
+
+    /**
+     * Length of a complete gzip header in [bytes], or null while more is
+     * needed. Parsed rather than assumed: Dart writes FLG=0 today, but a
+     * header carrying FNAME or an EXTRA field would otherwise be fed to the
+     * Inflater as if it were deflate data and corrupt the APK silently.
+     */
+    private fun consumeHeader(bytes: ByteArray): Int? {
+        if (bytes.size < 10) return null
+        if (bytes[0] != 0x1f.toByte() || bytes[1] != 0x8b.toByte()) {
+            throw java.io.IOException("not a gzip stream")
+        }
+        val flg = bytes[2 + 1].toInt()
+        var at = 10
+        if (flg and 0x04 != 0) { // FEXTRA
+            if (bytes.size < at + 2) return null
+            val xlen = (bytes[at].toInt() and 0xff) or
+                ((bytes[at + 1].toInt() and 0xff) shl 8)
+            at += 2 + xlen
+        }
+        if (flg and 0x08 != 0) { // FNAME
+            at = skipZeroTerminated(bytes, at) ?: return null
+        }
+        if (flg and 0x10 != 0) { // FCOMMENT
+            at = skipZeroTerminated(bytes, at) ?: return null
+        }
+        if (flg and 0x02 != 0) at += 2 // FHCRC
+        return if (bytes.size < at) null else at
+    }
+
+    private fun skipZeroTerminated(bytes: ByteArray, from: Int): Int? {
+        var i = from
+        while (i < bytes.size) {
+            if (bytes[i] == 0.toByte()) return i + 1
+            i++
+        }
+        return null
+    }
+
+    private fun inflate(b: ByteArray, off: Int, len: Int) {
+        inflater.setInput(b, off, len)
+        while (!inflater.finished()) {
+            val n = inflater.inflate(buffer)
+            if (n == 0) {
+                if (inflater.needsInput() || inflater.needsDictionary()) break
+            } else {
+                sink.write(buffer, 0, n)
+            }
+        }
+    }
+
+    override fun flush() = sink.flush()
+
+    override fun close() {
+        try {
+            inflater.end()
+        } finally {
+            sink.close()
+        }
+    }
+}
+
+/**
+ * Counts and hashes what actually reaches the file.
+ *
+ * Under a compressed transfer the bytes arriving off the tunnel are neither
+ * the APK's length nor its content, but `size`/`sha256` describe the APK. So
+ * verification hangs off this, the last link in the chain, and is identical
+ * whether or not the transfer was compressed.
+ */
+private class CountingSink(
+    private val sink: OutputStream,
+    private val digest: MessageDigest,
+) : OutputStream() {
+    var written = 0L
+        private set
+
+    override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        sink.write(b, off, len)
+        digest.update(b, off, len)
+        written += len
+    }
+
+    override fun flush() = sink.flush()
+    override fun close() = sink.close()
 }
