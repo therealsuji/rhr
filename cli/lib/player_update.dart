@@ -229,8 +229,7 @@ final class PlayerUpdateSender {
 
     // size and sha256 above describe the APK itself; the player verifies
     // them after decoding, so compression never changes what is checked.
-    final useGzip = _lastStatus?['encoding'] == 'gzip' &&
-        Platform.environment['RHR_NO_GZIP'] == null;
+    final useGzip = _lastStatus?['encoding'] == 'gzip';
     final source = useGzip
         ? apk.openRead().transform(gzip.encoder)
         : apk.openRead();
