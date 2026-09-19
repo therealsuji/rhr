@@ -54,6 +54,15 @@ val androidPluginProfile = androidPlugins.associate { plugin ->
     name to version
 }.toSortedMap()
 
+// Which ABIs this player ships. It is streamed to a real device over a
+// session, so anything it cannot load is pure transfer cost. Override for an
+// emulator build with -Prhr.abis=arm64-v8a,x86_64.
+val keptAbis: List<String> = (project.findProperty("rhr.abis") as String?)
+    ?.split(",")
+    ?.map(String::trim)
+    ?.filter(String::isNotEmpty)
+    ?: listOf("arm64-v8a")
+
 android {
     namespace = "dev.rhr.rhr_player"
     compileSdk = flutter.compileSdkVersion
@@ -137,6 +146,22 @@ android {
             // than fail the merge. Pulled in via adb-android's pairing code.
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
+        jniLibs {
+            // The debug engine bundles the Vulkan validation layer for
+            // Impeller work. It is a graphics-debugging tool nothing here
+            // loads, and it is 15 MB of every player we stream to a phone.
+            excludes += "**/libVkLayer_khronos_validation.so"
+            // Drop the ABIs this build can never load. abiFilters does not
+            // cover these: the .so files arrive prebuilt inside plugin AARs
+            // and are merged in whole, so they survive the filter and only a
+            // packaging exclude removes them. x86_64 is 24 MB and
+            // armeabi-v7a 11 MB of pure wire time on a phone update.
+            for (abi in keptAbis.let { kept ->
+                listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") - kept.toSet()
+            }) {
+                excludes += "lib/$abi/**"
+            }
+        }
     }
 }
 
@@ -162,4 +187,18 @@ dependencies {
     // JVM tests for the pure-Kotlin shake gesture (sensors cannot be faked on
     // a physical device).
     testImplementation("junit:junit:4.13.2")
+}
+
+// --target-platform picks the Dart AOT target, but plugins still contribute
+// native libs for every ABI they ship, so a phone build carried x86_64
+// (24 MB) and armeabi-v7a (11 MB) it can never load. The player is streamed
+// to a device over a session, where every megabyte is wire time.
+//
+// This runs in afterEvaluate because the Flutter Gradle plugin assigns
+// abiFilters itself during evaluation; a value set in defaultConfig is
+// overwritten before the build sees it. Pass -Prhr.abis=... for an emulator
+// build (e.g. "arm64-v8a,x86_64").
+afterEvaluate {
+    android.defaultConfig.ndk.abiFilters.clear()
+    android.defaultConfig.ndk.abiFilters.addAll(keptAbis)
 }
