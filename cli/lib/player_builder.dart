@@ -49,7 +49,7 @@ Future<File> buildProjectPlayer({
   // the disk nor the directory. Say it plainly instead, and point at the
   // variable that moves the build somewhere with room.
   final temp = Directory.systemTemp;
-  final freeBytes = _freeSpaceBytes(temp.path);
+  final freeBytes = freeSpaceBytes(temp.path);
   const requiredBytes = 6 * 1024 * 1024 * 1024;
   if (freeBytes != null && freeBytes < requiredBytes) {
     throw StateError(
@@ -329,7 +329,7 @@ String readProjectApplicationId(String project) {
 /// Free bytes on the filesystem holding [path], or null when it cannot be
 /// determined (an unexpected `df` layout, or a platform without it) — an
 /// unknown figure must not block a build that would have succeeded.
-int? _freeSpaceBytes(String path) {
+int? freeSpaceBytes(String path) {
   try {
     final result = Process.runSync('df', ['-Pk', path]);
     if (result.exitCode != 0) return null;

@@ -40,6 +40,7 @@ const _usage = '''
 rhr — Expo Go for Flutter, over the internet.
 
 Usage:
+  rhr setup [--relay <url>]   register the "rhr" Flutter device (run once)
   rhr run [options]           run Flutter with automatic initial launch
   rhr attach [options]        connect to a session and hot reload into it
   rhr doctor                  check the local Flutter/RHR setup
@@ -226,6 +227,17 @@ Future<void> main(List<String> args) async {
   }
 
   // Terminal-first product flow: build for Android, attach to the relayed VM,
+  // Both `run` and `attach` end at `flutter attach -d rhr`, which needs the
+  // custom device to exist. Registering here means a fresh machine works
+  // without a separate step; making the developer discover it by way of "No
+  // supported devices found with name or id matching 'rhr'" — printed under
+  // a list of whatever else is installed, which on a Linux box is the
+  // desktop — is a bad trade for a call that is free when it is already
+  // there.
+  if (args[0] == 'run' || args[0] == 'attach') {
+    await ensureRhrDevice();
+  }
+
   // sync assets, and automatically launch the guest app.
   if (args[0] == 'run') {    String project = '.';
     String? relay;
@@ -500,6 +512,42 @@ Future<int> _doctor() async {
   } on ProcessException {
     stdout.writeln(
       '[INFO] adb is not on PATH; wireless sync remains available',
+    );
+  }
+
+  // Without the custom device, `flutter attach` has nothing named "rhr" to
+  // target and silently picks whatever else is registered — on a Linux box
+  // that is the desktop, and the session dies with "No supported devices
+  // found" buried under a device list. Cheap to check, invisible to debug.
+  try {
+    final devices = await Process.run('flutter', ['custom-devices', 'list']);
+    if ('${devices.stdout}'.contains('id: rhr')) {
+      stdout.writeln('[OK] the "rhr" Flutter device is registered');
+    } else {
+      healthy = false;
+      stdout.writeln('[FAIL] the "rhr" Flutter device is not registered');
+      stdout.writeln('       run `rhr setup` once on this machine');
+    }
+  } on ProcessException {
+    stdout.writeln('[INFO] could not list Flutter custom devices');
+  }
+
+  // Building a player writes several GB of Gradle intermediates into the
+  // system temp dir, which on Linux is routinely a tmpfs a fraction of that.
+  final temp = Directory.systemTemp;
+  final free = freeSpaceBytes(temp.path);
+  if (free == null) {
+    stdout.writeln('[INFO] could not measure free space in ${temp.path}');
+  } else if (free < 6 * 1024 * 1024 * 1024) {
+    stdout.writeln(
+      '[INFO] ${temp.path} has ${(free / (1 << 30)).toStringAsFixed(1)} GiB '
+      'free; building a player needs about 6 GiB',
+    );
+    stdout.writeln('       set TMPDIR to a directory with more room');
+  } else {
+    stdout.writeln(
+      '[OK] ${temp.path} has ${(free / (1 << 30)).toStringAsFixed(1)} GiB '
+      'free for player builds',
     );
   }
 
@@ -1687,18 +1735,40 @@ Future<int> _login() async {
 /// `rhr setup`: enable Flutter custom devices and register the `rhr` device so
 /// the QA phone appears in the device picker. Idempotent — re-running refreshes
 /// the entry.
-Future<void> _setup(String? relay) async {
+/// Registers the `rhr` Flutter device when it is missing, so a session on a
+/// fresh machine works without a separate `rhr setup` step. Quiet when the
+/// device is already there, and never fatal: if registration fails, the
+/// attach below reports the real problem with Flutter's own message.
+Future<void> ensureRhrDevice() async {
+  try {
+    final listed = await Process.run('flutter', ['custom-devices', 'list']);
+    if ('${listed.stdout}'.contains('id: rhr')) return;
+  } on ProcessException {
+    return;
+  }
+  stderr.writeln('[rhr] registering the "rhr" Flutter device (first run)…');
+  try {
+    await _setup(null, quiet: true);
+  } on Object catch (error) {
+    stderr.writeln('[rhr] could not register the device automatically: $error');
+    stderr.writeln('[rhr] run `rhr setup` if the attach below fails.');
+  }
+}
+
+Future<void> _setup(String? relay, {bool quiet = false}) async {
   relay ??= const String.fromEnvironment(
     'RHR_RELAY',
     defaultValue: defaultPublicRelay,
   );
 
-  stderr.writeln('[rhr] enabling Flutter custom devices…');
+  if (!quiet) stderr.writeln('[rhr] enabling Flutter custom devices…');
   final en = await Process.run('flutter', [
     'config',
     '--enable-custom-devices',
   ]);
   if (en.exitCode != 0) {
+    // Called from a live session, exiting would take the session with it.
+    if (quiet) throw StateError('could not enable custom devices');
     stderr.writeln('[rhr] could not enable custom devices:\n${en.stderr}');
     exit(1);
   }
@@ -1745,8 +1815,14 @@ Future<void> _setup(String? relay) async {
     jsonEncode(device),
   ]);
   if (add.exitCode != 0) {
+    if (quiet) throw StateError('failed to register device');
     stderr.writeln('[rhr] failed to register device:\n${add.stderr}');
     exit(1);
+  }
+
+  if (quiet) {
+    stderr.writeln('[rhr] "rhr" device registered.');
+    return;
   }
 
   stderr.writeln('''
