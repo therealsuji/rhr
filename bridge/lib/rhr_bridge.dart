@@ -17,6 +17,9 @@ import 'package:webrtc_dart/webrtc_dart.dart';
 import 'direct_signaling.dart';
 import 'direct_webrtc.dart';
 import 'tunnel.dart';
+import 'update_handler.dart';
+
+export 'update_handler.dart';
 
 class RhrBridge {
   RhrBridge._(
@@ -57,6 +60,16 @@ class RhrBridge {
 
   /// The running bridge, if [start] has been called.
   static RhrBridge? get instance => _instance;
+
+  /// Host-provided hook for over-the-wire APK updates, matching the Android
+  /// player's `RhrSessionService.updateHandlerFactory`. Left null, update
+  /// frames are ignored and the dev side surfaces its "did not acknowledge"
+  /// timeout — which is the correct behaviour for a host that ships no
+  /// updater, and the downgrade path the CLI already documents.
+  static RhrUpdateHandlerFactory? updateHandlerFactory;
+
+  /// The handler for the current session, built on the first update message.
+  RhrUpdateHandler? _updater;
 
   /// Gracefully closes the relay connection and stops reconnecting. Used by
   /// the desktop fake device on SIGTERM so the relay sees a clean close
@@ -199,6 +212,14 @@ class RhrBridge {
               }
               // Ack on receipt: buffered bytes are bounded by the window.
               unawaited(sendFrame(encodeAck(f.channel, f.payload.length)));
+            case opUpdateData:
+              // The payload of an APK transfer, not tunnel traffic. Ack it
+              // here rather than in the handler: the dev side's flow-control
+              // window is what keeps a ~60 MB stream from outrunning the
+              // device, and it must not depend on an implementation
+              // remembering to open it.
+              _updater?.handleData(f.payload);
+              unawaited(sendFrame(encodeAck(f.channel, f.payload.length)));
             case opAck:
               _flow.acked(f.channel, decodeAckCount(f.payload));
             case opClose:
@@ -300,6 +321,7 @@ class RhrBridge {
                 // Other text is the normal application-level control channel.
               }
             }
+            _handleUpdateControl(msg, ws, sendFrame);
             continue;
           }
           if (preferDirect) {
@@ -328,6 +350,9 @@ class RhrBridge {
       }
       _subs.clear();
       _flow.clear();
+      // The handler holds this session's send functions and half a transfer.
+      // A reconnect starts a new one.
+      _updater = null;
       if (_stopped) break;
       // Backoff, but let kick() cut it short (e.g. app came back to
       // foreground after Android froze us — reconnect immediately).
@@ -338,6 +363,51 @@ class RhrBridge {
       if (backoff > const Duration(seconds: 30)) {
         backoff = const Duration(seconds: 30);
       }
+    }
+  }
+
+  /// Routes `update_begin` / `update_commit` to the host's update handler,
+  /// building one on the first message of a transfer.
+  ///
+  /// Anything else — hello, ping, progress, dev_gone — is not ours; the
+  /// session's other machinery handles it and this returns quietly. A host
+  /// with no [updateHandlerFactory] ignores update messages entirely, which
+  /// the dev side reads as "this device predates self-update".
+  void _handleUpdateControl(
+    String message,
+    IOWebSocketChannel ws,
+    Future<void> Function(Uint8List frame) sendFrame,
+  ) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(message);
+    } on FormatException {
+      return;
+    }
+    if (decoded is! Map<String, dynamic>) return;
+    final kind = decoded['t'];
+    if (kind != 'update_begin' && kind != 'update_commit') return;
+
+    final updater =
+        _updater ??= updateHandlerFactory?.call(
+          sendText: (text) {
+            try {
+              ws.sink.add(text);
+            } on StateError {
+              // The socket closed under us; the reconnect loop owns this.
+            }
+          },
+          sendBinary: (frame) => unawaited(sendFrame(frame)),
+        );
+    if (updater == null) return;
+    try {
+      if (kind == 'update_begin') {
+        updater.handleBegin(decoded);
+      } else {
+        updater.handleCommit(decoded);
+      }
+    } catch (error) {
+      _log('update message failed: $error');
     }
   }
 

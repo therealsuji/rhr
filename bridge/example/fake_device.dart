@@ -5,11 +5,56 @@
 // Reports the LOCAL Flutter SDK's compatibility profile (same machine as the
 // dev CLI, so the CLI's compatibility gate passes) plus a stable per-process
 // asset-store id.
+//
+// Flags:
+//   --direct            negotiate the WebRTC path instead of relaying
+//   --connector         announce as a connector tunneling a third-party app
+//   --outdated          report a Flutter version the CLI's gate will refuse,
+//                       which is what makes it offer an update at all
+//   --install=<how>     what to do once a transfer verifies:
+//                       committed (default) | pending-user | installed | fail
+//   --no-gzip           decline the dev's gzip offer and take the raw stream
+//
+// The update flags are what make the CLI's whole update path runnable
+// without a phone: with --outdated the gate blocks, the CLI builds and
+// streams an APK, and this answers as the player would — so the phases, the
+// flow-control window, the gzip negotiation and every terminal state get
+// exercised in CI rather than only on hardware.
 import 'dart:convert';
 import 'dart:developer' show Service;
 import 'dart:io';
 
+import 'package:rhr_bridge/fake_updater.dart';
 import 'package:rhr_bridge/rhr_bridge.dart';
+
+/// With `--outdated`, reports a Flutter revision that cannot match the
+/// developer's, so the CLI's compatibility gate blocks and offers an update.
+///
+/// The gate compares revisions for equality, so a made-up one is enough and
+/// is honest about being made up — the alternative is pinning a real old
+/// SDK, which rots the moment the version in it stops being interesting.
+Map<String, dynamic> _outdated(Map<String, dynamic> local, List<String> args) {
+  if (!args.contains('--outdated')) return local;
+  return {
+    ...local,
+    'frameworkVersion': '0.0.0-fake-outdated',
+    'frameworkRevision': 'fake0outdated0revision',
+  };
+}
+
+/// Parses `--install=<how>` into the outcome the fake phone will report.
+FakeInstallOutcome _installOutcome(List<String> args) {
+  final flag = args.firstWhere(
+    (a) => a.startsWith('--install='),
+    orElse: () => '',
+  );
+  return switch (flag.split('=').last) {
+    'pending-user' => FakeInstallOutcome.pendingUser,
+    'installed' => FakeInstallOutcome.installed,
+    'fail' => FakeInstallOutcome.fail,
+    _ => FakeInstallOutcome.committed,
+  };
+}
 
 Map<String, dynamic> _localCompatibility() {
   final candidates = <File>[];
@@ -43,6 +88,17 @@ Map<String, dynamic> _localCompatibility() {
 
 Future<void> main(List<String> args) async {
   final preferDirect = args.contains('--direct');
+
+  // Answer update transfers as the player does. Installed unconditionally:
+  // a session that is never offered an update never builds a handler, so
+  // this costs nothing until the CLI actually starts one.
+  RhrBridge.updateHandlerFactory = ({required sendText, required sendBinary}) =>
+      FakeUpdater(
+        sendText: sendText,
+        outcome: _installOutcome(args),
+        acceptGzip: !args.contains('--no-gzip'),
+        onEvent: (event) => stderr.writeln('[fake_updater] $event'),
+      );
   // --connector stands in for the player tunneling a THIRD-party app: it
   // announces host "connector" and deliberately omits the identity block,
   // because the identity would describe the player rather than the target.
@@ -67,7 +123,7 @@ Future<void> main(List<String> args) async {
       relayUrl: args[0],
       sessionCode: args[1],
       assetStoreId: 'fake-${DateTime.now().millisecondsSinceEpoch}',
-      compatibility: _localCompatibility(),
+      compatibility: _outdated(_localCompatibility(), args),
       preferDirect: preferDirect,
     );
   }
