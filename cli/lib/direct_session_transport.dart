@@ -110,6 +110,13 @@ final class DirectSessionTransport implements SessionTransport {
   Future<void>? _negotiation;
   var _remoteCandidatesComplete = false;
   var _directReady = false;
+
+  /// How far direct negotiation got. A direct path that dies silently is the
+  /// hardest failure here to act on — "direct WebRTC connection failed" says
+  /// nothing about whether the offer never arrived, candidates never
+  /// finished gathering, or DTLS never completed — so every failure names
+  /// the last stage reached.
+  var _stage = 'waiting for the device to announce itself';
   var _closed = false;
   DirectTransportFailure? _failure;
 
@@ -210,6 +217,7 @@ final class DirectSessionTransport implements SessionTransport {
           );
         }
         _offerTimer?.cancel();
+        _stage = 'offer received, gathering remote ICE candidates';
         _pendingOffer = signal;
         _candidateTimer ??= Timer(
           connectionTimeout,
@@ -219,6 +227,7 @@ final class DirectSessionTransport implements SessionTransport {
       case DirectCandidateSignal():
         await _peer.addCandidate(signal);
       case DirectEndSignal():
+        _stage = 'remote candidates complete, negotiating';
         _remoteCandidatesComplete = true;
         _candidateTimer?.cancel();
         await _startNegotiationWhenReady();
@@ -236,16 +245,20 @@ final class DirectSessionTransport implements SessionTransport {
 
   Future<void> _negotiate(DirectDescriptionSignal offer) async {
     await _peer.acceptOffer(offer);
+    _stage = 'offer accepted, waiting for the data channel to open';
     await _peer.waitUntilOpen(timeout: connectionTimeout);
     if (_closed || _failure != null) return;
     _directReady = true;
+    _stage = 'open';
     if (!_payloadReady.isCompleted) _payloadReady.complete();
     stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
   }
 
   void _fail(String message, [StackTrace? stack, bool notifyPeer = true]) {
     if (_closed || _failure != null) return;
-    final failure = _failure = DirectTransportFailure(message);
+    final failure = _failure = DirectTransportFailure(
+      _stage == 'open' ? message : '$message (stage: $_stage)',
+    );
     _directReady = false;
     _offerTimer?.cancel();
     _candidateTimer?.cancel();
