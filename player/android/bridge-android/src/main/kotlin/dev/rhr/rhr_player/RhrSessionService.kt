@@ -677,6 +677,14 @@ class RhrSessionService : Service() {
 							devLeft = true
 							if (status in DEV_PRESENT_STATES) status = "waiting_dev"
 							setProgress("", 0, 0)
+							// The peer belonged to the developer who just left; it
+							// can only decay to ICE failed from here, and while it
+							// exists the next developer's hello does not start a
+							// fresh offer (that hello then waits on a corpse and
+							// inherits its failure). Drop it now.
+							directTransport?.close()
+							directTransport = null
+							directFailureReported = false
 							return
 						}
 						// Anything else is developer traffic (hello, ping, progress,
