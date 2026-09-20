@@ -125,6 +125,31 @@ class MainActivity : FlutterActivity() {
 						result.success(null)
 					}
 					"status" -> result.success(RhrSessionService.status)
+					// The lobby used to render the raw status and nothing
+					// else, so it had no idea phases existed: a build that
+					// takes minutes left it saying "Connecting…", and so did
+					// a session that had been deliberately stopped. It asks
+					// for the decided banner now — the same one the native
+					// overlay paints, from the same pure function.
+					"banner" -> {
+						val banner = SessionBanner.of(
+							phase = RhrSessionService.progressPhase,
+							status = RhrSessionService.status,
+							done = RhrSessionService.progressDone.toLong(),
+							total = RhrSessionService.progressTotal.toLong(),
+							message = RhrSessionService.progressMessage,
+							stalled = RhrSessionService.phaseStalled,
+							foreignApp = RhrSessionService.updatingForeignApp,
+						)
+						result.success(
+							mapOf(
+								"label" to banner.label,
+								"progress" to banner.progress,
+								"style" to banner.style.name,
+								"visible" to banner.isVisible,
+								"status" to RhrSessionService.status,
+							))
+					}
 					"debug/fault" -> {
 						// QA fault injection. Hidden behind the
 						// lobby's debug sheet; no-op names are harmless.

@@ -1337,6 +1337,25 @@ Future<bool> _updatePlayerOverTheWire({
       },
     );
     deadline.value = DateTime.now().add(const Duration(minutes: 10));
+    // Report the ending, not just the middle. Every failure path already
+    // says something; success said nothing at all, so the phone kept the
+    // last percentage the transfer happened to reach and wore it through
+    // the install and into whatever screen came next. A phase that goes up
+    // has to come down.
+    transport.sendControl(
+      jsonEncode({
+        't': 'progress',
+        'phase': switch (outcome) {
+          // Android is showing the install sheet: the tester has to tap.
+          PlayerUpdateOutcome.pendingUser => 'install_confirm',
+          // Handed to PackageInstaller, or already on disk.
+          PlayerUpdateOutcome.committed ||
+          PlayerUpdateOutcome.installed => 'installed',
+        },
+        'done': 0,
+        'total': 0,
+      }),
+    );
     stderr.writeln(switch (outcome) {
       PlayerUpdateOutcome.committed =>
         '[rhr] update installing — reopen the rhr player on the device; '

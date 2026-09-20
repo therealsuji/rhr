@@ -1033,130 +1033,35 @@ class DevOverlay(
 	// ---- render -----------------------------------------------------------
 
 	private fun render() {
-		val phase = RhrSessionService.progressPhase
-		val done = RhrSessionService.progressDone
-		val total = RhrSessionService.progressTotal
-		when (phase) {
-			"assets" -> {
-				showCard()
-				bar.isIndeterminate = false
-				val pct = if (total > 0) (done * 1000 / total) else 0
-				bar.progress = pct
-				cardLabel.text = "Syncing assets"
-				cardPct.text = "${pct / 10}%"
-				cardPct.visibility = View.VISIBLE
-			}
-			"updating" -> {
-				showCard()
-				bar.isIndeterminate = false
-				// done/total are APK byte counts — multiply as Long or an
-				// ~80 MB transfer overflows Int.
-				val pct = if (total > 0) (done.toLong() * 1000 / total).toInt() else 0
-				bar.progress = pct
-				cardLabel.text = if (RhrSessionService.updatingForeignApp)
-					"Installing your app"
-				else
-					"Updating player"
-				cardPct.text = "${pct / 10}%"
-				cardPct.visibility = View.VISIBLE
-			}
-			"outdated" -> {
-				// The dev's CLI found a mismatch. The tester is holding the
-				// phone; without this the session just goes quiet.
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = "Out of date — waiting for the developer"
-				cardPct.visibility = View.GONE
-			}
-			"building" -> {
-				// Minutes, not seconds: a player or app APK is compiling on
-				// the dev's machine. Say so rather than look hung.
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"Still building — check the developer's terminal"
-				else
-					"Developer is building an update…"
-				cardPct.visibility = View.GONE
-			}
-			"update_failed" -> {
-				// The developer's side gave up. Say so, with their reason —
-				// otherwise the bar simply freezes and the tester waits on
-				// a build that is never coming.
-				showCard()
-				bar.isIndeterminate = false
-				bar.progress = 0
-				val why = RhrSessionService.progressMessage
-				cardLabel.text = if (why.isEmpty())
-					"Update failed — check the developer's terminal"
-				else
-					"Update failed: $why"
-				cardPct.visibility = View.GONE
-			}
-			"syncing" -> {
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = "Syncing your app…"
-				cardPct.visibility = View.GONE
-			}
-			"awaiting_restart" -> {
-				showCard()
-				bar.isIndeterminate = false
-				bar.progress = bar.max
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"App synced — awaiting Hot Restart (taking a while — check the developer's terminal)"
-				else
-					"App synced — awaiting Hot Restart"
-				cardPct.visibility = View.GONE
-			}
-			"restarting" -> {
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"Restart is taking a while — check the developer's terminal"
-				else
-					"Restarting your app…"
-				cardPct.visibility = View.GONE
-			}
-			"reloading" -> {
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"Reload is taking a while — check the developer's terminal"
-				else
-					"Reloading…"
-				cardPct.visibility = View.GONE
-			}
-			else -> {
-				val st = RhrSessionService.status
-				when (st) {
-					// Waiting for a developer is the RESTING state, not an
-					// event: a phone sits in it for hours between sessions. A
-					// card here covered the tester's own app the whole time,
-					// which is the opposite of what an overlay is for. The
-					// bubble still carries the status for anyone who wants it.
-					"connected", "idle", "waiting_dev" -> hideCard()
-					"rejected" -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Session not found — check the code, retrying…"
-						cardPct.visibility = View.GONE
-					}
-					"retrying", "closed" -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Can't reach relay — retrying…"
-						cardPct.visibility = View.GONE
-					}
-					else -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Connection: $st…"
-						cardPct.visibility = View.GONE
-					}
-				}
-			}
+		// What to say is decided by [SessionBanner], which is pure and unit
+		// tested; this only paints it. The two used to be one `when` block
+		// here and a second, differently-wrong one in the Flutter lobby.
+		val banner = SessionBanner.of(
+			phase = RhrSessionService.progressPhase,
+			status = RhrSessionService.status,
+			done = RhrSessionService.progressDone.toLong(),
+			total = RhrSessionService.progressTotal.toLong(),
+			message = RhrSessionService.progressMessage,
+			stalled = RhrSessionService.phaseStalled,
+			foreignApp = RhrSessionService.updatingForeignApp,
+		)
+		if (!banner.isVisible) {
+			hideCard()
+			return
 		}
+		showCard()
+		cardLabel.text = banner.label
+		val pct = banner.progress
+		bar.isIndeterminate = pct == null
+		if (pct != null) bar.progress = pct
+		// The number is only worth showing while it is still moving. On a
+		// finished or failed transfer it is noise beside a label that
+		// already says what happened.
+		val showPct = pct != null &&
+			banner.style == SessionBanner.Style.DETERMINATE &&
+			pct < 1000
+		cardPct.text = if (pct != null) "${pct / 10}%" else ""
+		cardPct.visibility = if (showPct) View.VISIBLE else View.GONE
 	}
 
 	// The card only ever shows in hosted mode, with the player's Activity in

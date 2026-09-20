@@ -214,6 +214,24 @@ class RhrSessionService : Service() {
 		// changes, so the overlay redraws without polling. Called on any thread.
 		@Volatile var onUpdate: (() -> Unit)? = null
 
+		/**
+		 * The install steps, which only this phone can see.
+		 *
+		 * Everything else on the progress card is relayed from the
+		 * developer's CLI, but the CLI's view ends at the last byte it
+		 * sent: it cannot know when PackageInstaller took the APK, or that
+		 * Android is holding an install sheet in front of the tester. Those
+		 * are minutes where the phone would otherwise still be showing a
+		 * finished transfer, so the updater reports them locally.
+		 */
+		fun setInstallPhase(phase: String) = setProgress(phase, 0, 0)
+
+		/** An install that died on this phone, with the reason it died. */
+		fun setInstallFailed(message: String) {
+			progressMessage = message
+			setProgress("update_failed", 0, 0)
+		}
+
 		private fun setProgress(phase: String, done: Int, total: Int) {
 			progressPhase = phase
 			progressDone = done
@@ -408,6 +426,12 @@ class RhrSessionService : Service() {
 				reconnectThread?.interrupt()
 				vmWatchThread?.interrupt()
 				presenceWatchThread?.interrupt()
+				// A stop during an update left the phase behind, and the
+				// phase outranks the status on both surfaces — so the card
+				// kept showing a transfer for a session that no longer
+				// existed. Nothing is in flight after this.
+				setProgress("", 0, 0)
+				updatingForeignApp = false
 				status = "idle"
 				stopSelf()
 			}

@@ -230,38 +230,68 @@ final class PlayerUpdateSender {
     // size and sha256 above describe the APK itself; the player verifies
     // them after decoding, so compression never changes what is checked.
     final useGzip = _lastStatus?['encoding'] == 'gzip';
-    final source = useGzip
-        ? apk.openRead().transform(gzip.encoder)
-        : apk.openRead();
+    // Compress to a file before sending rather than straight down the wire.
+    // Streaming through gzip.encoder means the wire length is unknown until
+    // the last byte, so progress had to be reported as wire-bytes-so-far
+    // against the UNCOMPRESSED apk size — two different currencies. An APK
+    // compresses to roughly half, so the bar stopped near 55% and stayed
+    // there: the tester watched a finished transfer claim to be half done.
+    // Compressing first costs one pass over a file that was just written
+    // (so it is in page cache) and buys a total the bar can actually reach.
+    File? compressed;
     if (useGzip) {
       stderr.writeln('[rhr] compressing the transfer (gzip)');
+      compressed = File(
+        '${Directory.systemTemp.createTempSync('rhr_update').path}/payload.gz',
+      );
+      final sink = compressed.openWrite();
+      await apk.openRead().transform(gzip.encoder).pipe(sink);
+    }
+    final payload = compressed ?? apk;
+    // What the bar measures: the bytes that actually cross the wire.
+    final wireSize = payload.lengthSync();
+    if (useGzip) {
+      stderr.writeln(
+        '[rhr] compressed ${(size / (1024 * 1024)).toStringAsFixed(1)} MB to '
+        '${(wireSize / (1024 * 1024)).toStringAsFixed(1)} MB',
+      );
     }
 
     var sent = 0;
-    // With gzip the wire total is not known until the stream ends, so
-    // progress is reported against the APK size and simply arrives early.
-    await for (final chunk in source) {
-      final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
-      var offset = 0;
-      while (offset < bytes.length) {
-        final end = (offset + _chunkBytes).clamp(0, bytes.length);
-        final piece = Uint8List.sublistView(bytes, offset, end);
-        await _transport.sendPayload(
-          encodeFrame(opUpdateData, _transferId, piece),
-        );
-        sent += piece.length;
-        onProgress?.call(sent, size);
-        if (_flow.sent(_transferId, piece.length)) {
-          final window = Completer<void>();
-          _flow.onWindowOpen(_transferId, window.complete);
-          await window.future.timeout(
-            const Duration(seconds: 60),
-            onTimeout: () => throw PlayerUpdateFailure(
-              'update transfer stalled — the device stopped acking',
-            ),
+    try {
+      await for (final chunk in payload.openRead()) {
+        final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+        var offset = 0;
+        while (offset < bytes.length) {
+          final end = (offset + _chunkBytes).clamp(0, bytes.length);
+          final piece = Uint8List.sublistView(bytes, offset, end);
+          await _transport.sendPayload(
+            encodeFrame(opUpdateData, _transferId, piece),
           );
+          sent += piece.length;
+          onProgress?.call(sent, wireSize);
+          if (_flow.sent(_transferId, piece.length)) {
+            final window = Completer<void>();
+            _flow.onWindowOpen(_transferId, window.complete);
+            await window.future.timeout(
+              const Duration(seconds: 60),
+              onTimeout: () => throw PlayerUpdateFailure(
+                'update transfer stalled — the device stopped acking',
+              ),
+            );
+          }
+          offset = end;
         }
-        offset = end;
+      }
+    } finally {
+      // The payload can be ~60 MB; a failed transfer must not leave it in
+      // the system temp directory.
+      if (compressed != null) {
+        try {
+          compressed.parent.deleteSync(recursive: true);
+        } on FileSystemException {
+          // Nothing actionable: the OS cleans its own temp directory.
+        }
       }
     }
 

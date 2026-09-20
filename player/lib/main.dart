@@ -76,6 +76,11 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   // Live native service status, polled over the MethodChannel so the lobby
   // shows the same truth as the native overlay.
   String? _nativeStatus;
+  // The decided banner from the native side. The lobby used to map the raw
+  // status to words itself, which meant it knew nothing about update phases:
+  // a build ran for minutes behind a line reading "Connecting…". Both
+  // surfaces ask SessionBanner now, so they cannot drift apart again.
+  ({String label, int? progress, bool visible})? _banner;
   Timer? _statusTimer;
   // When the current "waiting for developer" stretch began (used to surface a
   // stale-saved-code hint after a grace period with no developer).
@@ -154,8 +159,18 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     _statusTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (!mounted) return;
       try {
-        final s = await _session.invokeMethod<String>('status');
+        final decided = await _session.invokeMapMethod<String, Object?>(
+          'banner',
+        );
         if (!mounted) return;
+        final s = decided?['status'] as String?;
+        final banner = decided == null
+            ? null
+            : (
+                label: decided['label'] as String? ?? '',
+                progress: decided['progress'] as int?,
+                visible: decided['visible'] as bool? ?? false,
+              );
         final waiting = _active && s == 'waiting_dev';
         if (waiting) {
           _waitingSince ??= DateTime.now();
@@ -167,9 +182,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
             _waitingSince != null &&
             DateTime.now().difference(_waitingSince!) >=
                 const Duration(seconds: 90);
-        if (s != _nativeStatus || showHint != _showWaitingHint) {
+        if (s != _nativeStatus ||
+            showHint != _showWaitingHint ||
+            banner?.label != _banner?.label ||
+            banner?.progress != _banner?.progress) {
           setState(() {
             _nativeStatus = s;
+            _banner = banner;
             _showWaitingHint = showHint;
           });
         }
@@ -180,21 +199,21 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   }
 
   /// Live status label + dot color for the brand row and session card.
+  ///
+  /// The words come from the native [SessionBanner], so an update in flight
+  /// reads as an update here and not as a connection being made. Only the
+  /// colour is decided locally — it is presentation, and the banner's style
+  /// does not need to know this screen's palette.
   (String, Color) get _statusDisplay {
     if (!_active) return ('Ready to connect', _inkDim);
-    switch (_nativeStatus) {
-      case 'connected':
-        return ('Developer attached', _ok);
-      case 'waiting_dev':
-        return ('Waiting for developer', _warn);
-      case 'rejected':
-        return ('Session not found', _err);
-      case 'retrying':
-      case 'closed':
-        return ("Can't reach relay", _warn);
-      default:
-        return ('Connecting…', _warn);
-    }
+    return (
+      _banner?.label ?? 'Connecting…',
+      switch (_nativeStatus) {
+        'connected' => _ok,
+        'rejected' => _err,
+        _ => _warn,
+      },
+    );
   }
 
   @override
@@ -718,6 +737,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
             _activeStatusCopy(),
             style: const TextStyle(color: _ink, fontSize: 13.5, height: 1.35),
           ),
+          ..._updateProgress(),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -746,6 +766,31 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         ],
       ),
     );
+  }
+
+  /// The bar for an update in flight, or nothing.
+  ///
+  /// A player or app build runs for minutes on the developer's machine, and
+  /// the transfer for a minute more. The lobby showed none of it — the phone
+  /// had the phase all along and only the native overlay ever drew it, so a
+  /// tester looking at this screen saw a session that had simply gone quiet.
+  List<Widget> _updateProgress() {
+    final banner = _banner;
+    if (banner == null || !banner.visible) return const [];
+    final progress = banner.progress;
+    return [
+      const SizedBox(height: 12),
+      ClipRRect(
+        borderRadius: BorderRadius.circular(3),
+        child: LinearProgressIndicator(
+          // A known size gives a real bar; a build gives a moving one.
+          value: progress == null ? null : progress / 1000,
+          minHeight: 4,
+          backgroundColor: _surfaceHi,
+          valueColor: const AlwaysStoppedAnimation(_violet),
+        ),
+      ),
+    ];
   }
 
   /// Recoverable failures (can't reach relay / session not found) get an

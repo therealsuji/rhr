@@ -206,6 +206,10 @@ class RhrPlayerUpdater(
 			return
 		}
 		Log.i(TAG, "update transfer $transferId verified; installing")
+		// The bytes are all here. Stop showing a transfer and start showing
+		// the install — the tester was reading "54%" at this point, because
+		// the transfer's last number was the last thing anyone had said.
+		RhrSessionService.setInstallPhase("installing")
 		install(apk)
 	}
 
@@ -279,11 +283,15 @@ class RhrPlayerUpdater(
 	}
 
 	fun onPendingUser() {
+		// Android is holding a sheet in front of the tester. Say what it
+		// wants, or the phone reads as busy while it is actually waiting.
+		RhrSessionService.setInstallPhase("install_confirm")
 		status(transferId, "pending_user")
 	}
 
 	fun onInstalled() {
 		finished = true
+		RhrSessionService.setInstallPhase("installed")
 		status(transferId, "installed")
 		Log.i(TAG, "foreign package install confirmed")
 	}
@@ -296,6 +304,11 @@ class RhrPlayerUpdater(
 	// way (send goes straight to the socket, file deletion is idempotent).
 	private fun fail(message: String) {
 		finished = true
+		// The developer's CLI normally echoes a failure back as the
+		// "update_failed" phase, but a failure whose cause IS the socket
+		// would never make that round trip — and the phone would sit on a
+		// half-drawn bar with the reason in its own hand. Show it here.
+		RhrSessionService.setInstallFailed(message)
 		status(transferId, "failure", message)
 		closeQuietly()
 	}
