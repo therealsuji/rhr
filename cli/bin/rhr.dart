@@ -931,7 +931,16 @@ Future<int?> _runSession({
   stderr.writeln('[rhr] waiting for device bridge...');
   Uri? vm;
   try {
-    vm = await _waitForDeviceBridge(vmReady, wsDied, code, bridgeDeadline);
+    vm = await _waitForDeviceBridge(
+      vmReady,
+      wsDied,
+      code,
+      bridgeDeadline,
+      // An update in flight IS the player, busy. Without this the wait
+      // loop told the developer to check whether the phone was connected,
+      // every 30 seconds, while it was streaming an APK to that phone.
+      updating: () => updateSender != null,
+    );
   } on _WaitTimedOut {
     keepalive.cancel();
     await transport.close();
@@ -1178,8 +1187,12 @@ Future<Uri?> _waitForDeviceBridge(
   Completer<Uri> vmReady,
   Completer<void> wsDied,
   String code,
-  _DeadlineHolder deadline,
-) async {
+  _DeadlineHolder deadline, {
+  /// Whether an update is streaming to the device right now. The reminder
+  /// below asks the developer to check that the player is connected, which
+  /// is unhelpful advice while we are mid-transfer to it.
+  bool Function()? updating,
+}) async {
   while (true) {
     final remaining = deadline.value.difference(DateTime.now());
     var wait = const Duration(seconds: 30);
@@ -1194,6 +1207,7 @@ Future<Uri?> _waitForDeviceBridge(
     if (result is Uri) return result;
     if (result is _RelayEnded) return null;
     if (DateTime.now().isAfter(deadline.value)) throw const _WaitTimedOut();
+    if (updating?.call() ?? false) continue;
     stderr.writeln(
       '[rhr] still waiting for the player on code "$code" — '
       'make sure it is connected (scan the QR or enter this code).',
