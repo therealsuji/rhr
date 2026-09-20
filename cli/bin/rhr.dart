@@ -101,6 +101,15 @@ flags override the file.
 // correct the code and start a fresh attach instead.
 const _noDeviceExitCode = 75;
 const _directFailureExitCode = 69;
+// How many direct negotiations may fail in a row before the CLI stops
+// re-dialing. One retry recovers a one-off ICE miss; a network where STUN
+// alone never finds a path fails every time, and looping there hides the
+// real answer (a TURN server, or a different network).
+const _maxDirectRetries = 3;
+const _directGaveUp =
+    'direct WebRTC could not be negotiated after $_maxDirectRetries attempts. '
+    'This network needs a TURN server or a different route between the '
+    'phone and this machine.';
 // The device is reachable but another developer is holding it. Distinct from
 // "no device joined" so a caller can tell "wait, or pick another phone" apart
 // from "check the code".
@@ -411,6 +420,7 @@ Future<void> main(List<String> args) async {
   // by re-dialing, respawning flutter attach, and re-running the asset sync —
   // the manifest makes that seconds. flutter exiting on its own (q) ends us.
   var failures = 0;
+  var directRetries = 0;
   while (true) {
     try {
       final result = await _runSession(
@@ -437,6 +447,7 @@ Future<void> main(List<String> args) async {
         RelayRace.releaseClaim(code);
         exit(result!);
       }
+      directRetries = 0;
       if (result != null) {
         failures++;
         stderr.writeln('[rhr] flutter attach exited ($result)');
@@ -447,9 +458,12 @@ Future<void> main(List<String> args) async {
       // Same rule as `run` below: a direct path lost while the device is
       // replacing its session or its relay socket is re-dialed, only a
       // refusal or a dead established path ends the attach.
-      if (failure.transient) {
+      if (failure.transient && ++directRetries < _maxDirectRetries) {
         failures++;
         stderr.writeln('[rhr] direct path dropped: $failure');
+      } else if (failure.transient) {
+        stderr.writeln('[rhr] $_directGaveUp');
+        exit(_directFailureExitCode);
       } else {
         stderr.writeln('[rhr] direct connection failed: $failure');
         exit(_directFailureExitCode);
@@ -1488,6 +1502,7 @@ Future<int> _runAttachProductFlow({
     }
 
     var failures = 0;
+    var directRetries = 0;
     while (true) {
       try {
         final result = await _runSession(
@@ -1500,6 +1515,7 @@ Future<int> _runAttachProductFlow({
           preferDirect: preferDirect,
           updatePolicy: updatePolicy,
         );
+        directRetries = 0;
         if (result == 0) return 0;
         if (result == _noDeviceExitCode || result == _relayBinaryExitCode) {
           return result!;
@@ -1513,9 +1529,12 @@ Future<int> _runAttachProductFlow({
         // a direct path is impossible, only that this attempt lost its
         // signaling channel. The recovery loop below re-dials, which is what
         // every other transient failure here already does.
-        if (failure.transient) {
+        if (failure.transient && ++directRetries < _maxDirectRetries) {
           failures++;
-          stderr.writeln('[rhr] lost the relay mid-negotiation: $failure');
+          stderr.writeln('[rhr] direct path dropped: $failure');
+        } else if (failure.transient) {
+          stderr.writeln('[rhr] $_directGaveUp');
+          return _directFailureExitCode;
         } else {
           stderr.writeln('[rhr] direct connection failed: $failure');
           return _directFailureExitCode;

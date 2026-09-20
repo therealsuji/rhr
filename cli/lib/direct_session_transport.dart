@@ -94,7 +94,15 @@ final class DirectSessionTransport implements SessionTransport {
             transient: true,
           );
         } else if (state == PeerConnectionState.failed) {
-          _fail('direct WebRTC connection failed');
+          // Before the data channel ever opened this is ICE finding no
+          // pair, which on the same network and candidates succeeds on the
+          // next offer often enough to be worth one (seen on the SM-A566B:
+          // one failure between runs that connected in under a second).
+          // After it opened it is a path that was working and died.
+          _fail(
+            'direct WebRTC connection failed',
+            transient: _stage != 'open',
+          );
         }
       });
       _relaySubscription = _relay.controlStream.listen(
@@ -244,7 +252,13 @@ final class DirectSessionTransport implements SessionTransport {
         _candidateTimer?.cancel();
         await _startNegotiationWhenReady();
       case DirectErrorSignal(:final message):
-        _fail('device direct transport failed: $message', notifyPeer: false);
+        // The device reports the same ICE verdict from its side; before the
+        // channel opened it is the same retryable negotiation failure.
+        _fail(
+          'device direct transport failed: $message',
+          notifyPeer: false,
+          transient: _stage != 'open',
+        );
     }
   }
 

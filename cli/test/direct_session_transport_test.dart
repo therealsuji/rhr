@@ -115,11 +115,14 @@ void main() {
     await expectLater(
       transport.payloadReady,
       throwsA(
-        isA<DirectTransportFailure>().having(
-          (failure) => failure.message,
-          'message',
-          contains('ICE failed'),
-        ),
+        isA<DirectTransportFailure>()
+            .having(
+              (failure) => failure.message,
+              'message',
+              contains('ICE failed'),
+            )
+            // Nothing was ever open, so a fresh offer may well succeed.
+            .having((failure) => failure.transient, 'transient', isTrue),
       ),
     );
     expect(relay.sent, isEmpty, reason: 'remote errors must not be echoed');
