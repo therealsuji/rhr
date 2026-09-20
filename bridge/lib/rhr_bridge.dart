@@ -71,6 +71,19 @@ class RhrBridge {
   /// The handler for the current session, built on the first update message.
   RhrUpdateHandler? _updater;
 
+  /// Notified whenever the developer reports a progress phase.
+  ///
+  /// On a phone the equivalent state drives the overlay's progress card. A
+  /// desktop host can use it to assert the sequence the CLI really sends,
+  /// which is how the banner wording is checked without a phone in hand.
+  static void Function({
+    required String phase,
+    required int done,
+    required int total,
+    required String message,
+  })?
+  onProgress;
+
   /// Gracefully closes the relay connection and stops reconnecting. Used by
   /// the desktop fake device on SIGTERM so the relay sees a clean close
   /// (equivalent to a phone process dying, minus the abrupt TCP drop).
@@ -386,6 +399,19 @@ class RhrBridge {
     }
     if (decoded is! Map<String, dynamic>) return;
     final kind = decoded['t'];
+    // The phase the developer wants shown. The bridge has no screen, but a
+    // host does — on Android this is what draws the progress card — and a
+    // desktop stand-in can assert the sequence, which is the only way the
+    // banner wording gets checked without someone holding a phone.
+    if (kind == 'progress') {
+      onProgress?.call(
+        phase: decoded['phase'] as String? ?? '',
+        done: decoded['done'] as int? ?? 0,
+        total: decoded['total'] as int? ?? 0,
+        message: decoded['message'] as String? ?? '',
+      );
+      return;
+    }
     if (kind != 'update_begin' && kind != 'update_commit') return;
 
     final updater =

@@ -147,6 +147,29 @@ class RhrSessionService : Service() {
 				"phase-restarting" -> setProgress("restarting", 0, 0)
 				"phase-awaiting-restart" -> setProgress("awaiting_restart", 0, 0)
 				"phase-reloading" -> setProgress("reloading", 0, 0)
+				// The update phases, which otherwise cost a multi-minute
+				// build and a real transfer to see once. Checking the
+				// wording on a real screen should not be that expensive —
+				// and the bugs these replaced were all wording.
+				"phase-outdated" -> setProgress("outdated", 0, 0)
+				"phase-building" -> setProgress("building", 0, 0)
+				// Mid-transfer, at a number that is not a round one.
+				"phase-updating" -> setProgress("updating", 37, 100)
+				"phase-installing" -> setProgress("installing", 0, 0)
+				"phase-install-confirm" -> setProgress("install_confirm", 0, 0)
+				"phase-installed" -> setProgress("installed", 0, 0)
+				"phase-update-failed" -> {
+					progressMessage = "Gradle: no space left on device"
+					setProgress("update_failed", 0, 0)
+				}
+				"update-foreign" -> {
+					updatingForeignApp = true
+					onUpdate?.invoke()
+				}
+				"update-player" -> {
+					updatingForeignApp = false
+					onUpdate?.invoke()
+				}
 				"clear-cache" -> clearAssetCaches()
 			}
 			Log.i(TAG, "debug fault injected: $name")

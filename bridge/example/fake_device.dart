@@ -89,6 +89,28 @@ Map<String, dynamic> _localCompatibility() {
 Future<void> main(List<String> args) async {
   final preferDirect = args.contains('--direct');
 
+  // Print the phase sequence the developer sends. This is what the phone's
+  // progress card is drawn from, so seeing it here is how the banner
+  // wording gets checked without holding a phone. Percentages are only
+  // printed when they move, or a 60 MB transfer buries the log.
+  var lastPercent = -1;
+  RhrBridge.onProgress =
+      ({
+        required String phase,
+        required int done,
+        required int total,
+        required String message,
+      }) {
+        final percent = total > 0 ? (done * 100 / total).round() : -1;
+        if (phase == 'updating' && percent == lastPercent) return;
+        lastPercent = percent;
+        stderr.writeln(
+          '[phase] ${phase.isEmpty ? '(cleared)' : phase}'
+          '${total > 0 ? ' $done/$total = $percent%' : ''}'
+          '${message.isEmpty ? '' : ' — $message'}',
+        );
+      };
+
   // Answer update transfers as the player does. Installed unconditionally:
   // a session that is never offered an update never builds a handler, so
   // this costs nothing until the CLI actually starts one.

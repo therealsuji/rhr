@@ -592,9 +592,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// The front door: scan an invitation and this phone joins an account.
   Widget _scanToJoin() => FilledButton.icon(
     onPressed: () async {
-      final raw = await Navigator.of(context).push<String>(
-        MaterialPageRoute(builder: (_) => const ScannerScreen()),
-      );
+      final raw = await Navigator.of(
+        context,
+      ).push<String>(MaterialPageRoute(builder: (_) => const ScannerScreen()));
       if (raw == null || !mounted) return;
       final invite = parseAccountInvite(raw);
       if (invite != null) {
@@ -824,6 +824,23 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     (Icons.warning_amber_rounded, 'Force retrying', 'status-retrying'),
     (Icons.block_rounded, 'Force rejected', 'status-rejected'),
     (Icons.motion_photos_on_rounded, 'Stall reload phase', 'phase-reloading'),
+    // The update phases. Seeing one for real costs a multi-minute build and
+    // a transfer, which is too expensive for checking what a line of text
+    // says — and every bug these replaced was what a line of text said.
+    // "Payload: app" switches the wording between the two payload kinds.
+    (Icons.schedule_rounded, 'Phase: outdated', 'phase-outdated'),
+    (Icons.build_rounded, 'Phase: building', 'phase-building'),
+    (Icons.cloud_upload_rounded, 'Phase: updating 37%', 'phase-updating'),
+    (Icons.download_rounded, 'Phase: installing', 'phase-installing'),
+    (
+      Icons.touch_app_rounded,
+      'Phase: confirm install',
+      'phase-install-confirm',
+    ),
+    (Icons.check_circle_rounded, 'Phase: installed', 'phase-installed'),
+    (Icons.error_rounded, 'Phase: update failed', 'phase-update-failed'),
+    (Icons.phone_android_rounded, 'Payload: app', 'update-foreign'),
+    (Icons.system_update_rounded, 'Payload: player', 'update-player'),
     (Icons.cleaning_services_rounded, 'Clear cached apps', 'clear-cache'),
     (Icons.refresh_rounded, 'Reset state', 'clear'),
   ];
@@ -832,61 +849,70 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: _surface,
+      // The phase entries make this taller than a short phone, and a sheet
+      // that cannot reach its last row is a sheet missing those faults.
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text(
-                'Test faults',
-                style: TextStyle(
-                  color: _ink,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Test faults',
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
-            // The installation identity is minted lazily and lives only in
-            // native storage, so this is the one place a tester can read it
-            // back — useful when an account says it does not recognise this
-            // phone.
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.fingerprint, color: _violet, size: 20),
-              title: const Text(
-                'Show installation id',
-                style: TextStyle(color: _ink, fontSize: 14),
-              ),
-              onTap: () async {
-                final id = await const MethodChannel(
-                  'rhr/connector',
-                ).invokeMethod<String>('installationId');
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(id ?? 'unavailable')),
-                );
-              },
-            ),
-            for (final (icon, label, name) in _faults)
+              // The installation identity is minted lazily and lives only in
+              // native storage, so this is the one place a tester can read it
+              // back — useful when an account says it does not recognise this
+              // phone.
               ListTile(
                 dense: true,
-                leading: Icon(icon, color: _violet, size: 20),
-                title: Text(
-                  label,
-                  style: const TextStyle(color: _ink, fontSize: 14),
+                leading: const Icon(
+                  Icons.fingerprint,
+                  color: _violet,
+                  size: 20,
                 ),
-                onTap: () {
-                  _session.invokeMethod('debug/fault', {'name': name});
+                title: const Text(
+                  'Show installation id',
+                  style: TextStyle(color: _ink, fontSize: 14),
+                ),
+                onTap: () async {
+                  final id = await const MethodChannel(
+                    'rhr/connector',
+                  ).invokeMethod<String>('installationId');
+                  if (!context.mounted) return;
                   Navigator.of(context).pop();
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(id ?? 'unavailable')));
                 },
               ),
-            const SizedBox(height: 8),
-          ],
+              for (final (icon, label, name) in _faults)
+                ListTile(
+                  dense: true,
+                  leading: Icon(icon, color: _violet, size: 20),
+                  title: Text(
+                    label,
+                    style: const TextStyle(color: _ink, fontSize: 14),
+                  ),
+                  onTap: () {
+                    _session.invokeMethod('debug/fault', {'name': name});
+                    Navigator.of(context).pop();
+                  },
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
         ),
       ),
     );
