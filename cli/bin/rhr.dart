@@ -433,7 +433,7 @@ Future<void> main(List<String> args) async {
         RelayRace.releaseClaim(code);
         exit(0);
       }
-      if (result == _noDeviceExitCode) {
+      if (result == _noDeviceExitCode || result == _relayBinaryExitCode) {
         RelayRace.releaseClaim(code);
         exit(result!);
       }
@@ -681,6 +681,10 @@ Future<int?> _runSession({
 
   final vmReady = Completer<Uri>();
   final wsDied = Completer<void>();
+  // Set when the relay's close is final for this session: the reconnect loop
+  // must return it instead of re-dialing. It rides the ordinary wsDied
+  // teardown so the flutter child and the listener are cleaned up first.
+  int? fatalExit;
   final sockets = <int, Socket>{};
   final flow = FlowControl();
   DirectTransportFailure? directFailure;
@@ -870,7 +874,7 @@ Future<int?> _runSession({
       // the requirement once and stop.
       if (reason.contains(relayBinaryRefusal)) {
         stderr.writeln('[rhr] $relayBinaryUnsupported');
-        exit(_relayBinaryExitCode);
+        fatalExit = _relayBinaryExitCode;
       }
       stderr.writeln('[rhr] relay connection closed');
       if (!wsDied.isCompleted) wsDied.complete();
@@ -922,7 +926,7 @@ Future<int?> _runSession({
       await transport.close();
       throw failure;
     }
-    return null; // relay died while waiting
+    return fatalExit; // relay died while waiting
   }
   stderr.writeln('[rhr] device VM service: $vm');
 
@@ -1013,7 +1017,7 @@ Future<int?> _runSession({
     await cleanup();
     final failure = directFailure;
     if (failure != null) throw failure;
-    return null;
+    return fatalExit;
   }
 
   // Asset sync signals the attach process, and so does a restart the tester
@@ -1096,7 +1100,7 @@ Future<int?> _runSession({
     await cleanup();
     final failure = directFailure;
     if (failure != null) throw failure;
-    return null;
+    return fatalExit;
   }
   // flutter exited. But if the relay dropped at nearly the same moment (e.g.
   // the relay died mid-hot-restart), flutter's exit is collateral, not a user
@@ -1111,7 +1115,7 @@ Future<int?> _runSession({
       await cleanup();
       final failure = directFailure;
       if (failure != null) throw failure;
-      return null; // reconnect
+      return fatalExit; // null: reconnect
     }
   }
   // Flutter ended on its own and the relay is still up, so this is a person
@@ -1489,7 +1493,9 @@ Future<int> _runAttachProductFlow({
           updatePolicy: updatePolicy,
         );
         if (result == 0) return 0;
-        if (result == _noDeviceExitCode) return result!;
+        if (result == _noDeviceExitCode || result == _relayBinaryExitCode) {
+          return result!;
+        }
         failures++;
         stderr.writeln(
           '[rhr] Flutter attach ended${result == null ? '' : ' ($result)'}.',
