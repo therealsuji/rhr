@@ -208,7 +208,14 @@ internal class RhrDirectTransport(
 				PeerConnection.IceConnectionState.CONNECTED,
 				PeerConnection.IceConnectionState.COMPLETED -> Log.i(TAG, "ICE connected")
 				PeerConnection.IceConnectionState.FAILED -> fail("ICE failed")
-				PeerConnection.IceConnectionState.DISCONNECTED -> fail("ICE disconnected")
+				// DISCONNECTED is one missed consent check (RFC 7675): a single
+				// STUN binding with no reply, cleared by the next success. During
+				// a bulk APK push over Wi-Fi that happens (seen 77 s into a 72 MB
+				// transfer on the SM-A566B) and treating it as fatal tore down a
+				// session that was still moving. Real loss arrives as FAILED
+				// after libwebrtc's consecutive misses, roughly 30 s. The CLI end
+				// tolerates `disconnected` the same way.
+				PeerConnection.IceConnectionState.DISCONNECTED -> Log.w(TAG, "ICE disconnected (transient)")
 				else -> Unit
 			}
 		}
