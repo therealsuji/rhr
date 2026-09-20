@@ -183,6 +183,14 @@ class MainActivity : FlutterActivity() {
 						val state = mapOf(
 							"paired" to AdbConnection.paired(this),
 							"connected" to AdbConnection.connected(this),
+							// Connector mode talks to this phone's own adbd,
+							// which only listens while Wireless debugging is
+							// on — and the tester turns it off by rebooting,
+							// or by Android turning it off for them. Without
+							// this the screen could only say "Paired, but not
+							// connected", which names the symptom and not the
+							// one switch that fixes it.
+							"wirelessDebugging" to wirelessDebuggingEnabled(),
 						)
 						main.post { result.success(state) }
 					}.start()
@@ -412,6 +420,26 @@ class MainActivity : FlutterActivity() {
 			}
 		}
 		return apkContainsFlutterLib(appInfo.sourceDir)
+	}
+
+	/**
+	 * Whether Wireless debugging is on, which connector mode needs.
+	 *
+	 * `adb_wifi_enabled` is the setting the Developer options toggle writes.
+	 * It is readable without a permission, but it is not a documented
+	 * constant, so treat an unreadable value as "no answer" rather than as
+	 * "off" — claiming the switch is off when it might be on sends the
+	 * tester somewhere that looks already correct.
+	 */
+	private fun wirelessDebuggingEnabled(): Boolean? = try {
+		when (Settings.Global.getInt(contentResolver, "adb_wifi_enabled", -1)) {
+			1 -> true
+			0 -> false
+			else -> null
+		}
+	} catch (e: Exception) {
+		Log.w(AdbConnection.TAG, "could not read adb_wifi_enabled: $e")
+		null
 	}
 
 	/** Scans an APK's entry names for a bundled libflutter.so. */

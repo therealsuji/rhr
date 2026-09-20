@@ -127,6 +127,12 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   String? _tunneledLabel;
   bool _busy = false;
 
+  /// Whether this phone's Wireless debugging is on, or null when the setting
+  /// could not be read. Connector mode talks to this phone's own adbd, which
+  /// only listens while it is on — so when it is off, that is the answer,
+  /// and "Paired, but not connected" is only the symptom.
+  bool? _wirelessDebugging;
+
   /// True until the first setupState + listApps pair has landed. `_busy` alone
   /// only spins a dot in the banner, which left the screen blank and looking
   /// hung while the very first read was in flight; a refresh keeps whatever is
@@ -204,11 +210,13 @@ class _ConnectorScreenState extends State<ConnectorScreen>
       if (!mounted) return;
       final paired = state?['paired'] == true;
       final connected = state?['connected'] == true;
+      final wireless = state?['wirelessDebugging'] as bool?;
       final overlay =
           await _connector.invokeMethod<bool>('overlayGranted') ?? true;
       if (!mounted) return;
       setState(() {
         _busy = false;
+        _wirelessDebugging = wireless;
         // A stale failure outliving the condition that caused it is its own
         // small lie: the user fixes wireless debugging, comes back, and still
         // reads "could not reach this phone".
@@ -456,7 +464,12 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   Widget _stageBanner() {
     final (label, color) = switch (_stage) {
       ConnectorStage.unpaired => ('This phone is not paired yet', _warn),
-      ConnectorStage.disconnected => ('Paired, but not connected', _warn),
+      ConnectorStage.disconnected => (
+        _wirelessDebugging == false
+            ? 'Wireless debugging is off'
+            : 'Paired, but not connected',
+        _warn,
+      ),
       ConnectorStage.needsOverlay => ('One more permission to go', _warn),
       ConnectorStage.ready => ('Connected to this phone', _ok),
       ConnectorStage.working => ('Working…', _warn),
@@ -500,13 +513,32 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     onAction: _startPairing,
   );
 
-  Widget _reconnectCard() => _card(
-    title: 'Reconnect to this phone',
-    body: 'Pairing is already done. If Wireless debugging is switched on, '
-        'reconnecting takes a moment and needs no code.',
-    action: 'Reconnect',
-    onAction: _busy ? null : _connectAdb,
-  );
+  /// Paired but not reachable. Almost always one switch.
+  ///
+  /// Wireless debugging is off after every reboot, and Android turns it off
+  /// on its own too. The card used to describe that as a conditional — "if
+  /// Wireless debugging is switched on" — which left the tester to guess
+  /// whether it was. Now the phone reads the setting and says.
+  Widget _reconnectCard() => switch (_wirelessDebugging) {
+    false => _card(
+      title: 'Wireless debugging is off',
+      body: 'Connector mode talks to this phone over its own Wireless '
+          'debugging, and it is switched off right now — that is why this '
+          'phone cannot be reached.\n\n'
+          'Turn it on in Developer options, then come back. Pairing is '
+          'already done and survives, so there is no code to type.',
+      action: 'Open Developer options',
+      onAction: () => _connector.invokeMethod('openWirelessDebugging'),
+    ),
+    // On, or unreadable: reconnecting is the thing to try either way.
+    _ => _card(
+      title: 'Reconnect to this phone',
+      body: 'Pairing is already done. If Wireless debugging is switched on, '
+          'reconnecting takes a moment and needs no code.',
+      action: 'Reconnect',
+      onAction: _busy ? null : _connectAdb,
+    ),
+  };
 
   Widget _tunnelingCard() => _card(
     title: 'Tunneling ${_tunneledLabel ?? 'the app'}',
