@@ -444,8 +444,16 @@ Future<void> main(List<String> args) async {
         failures = 0;
       }
     } on DirectTransportFailure catch (failure) {
-      stderr.writeln('[rhr] direct connection failed: $failure');
-      exit(_directFailureExitCode);
+      // Same rule as `run` below: a direct path lost while the device is
+      // replacing its session or its relay socket is re-dialed, only a
+      // refusal or a dead established path ends the attach.
+      if (failure.transient) {
+        failures++;
+        stderr.writeln('[rhr] direct path dropped: $failure');
+      } else {
+        stderr.writeln('[rhr] direct connection failed: $failure');
+        exit(_directFailureExitCode);
+      }
     } on DeviceBusyException catch (busy) {
       // Reconnecting cannot win a device someone else is holding; it would
       // only spin until they leave. Report and quit so the operator can pick

@@ -45,7 +45,7 @@ final class DirectSessionTransport implements SessionTransport {
     _directZone = Zone.current.fork(
       specification: ZoneSpecification(
         handleUncaughtError: (self, parent, zone, error, stack) {
-          _fail('direct WebRTC runtime failure: $error', stack);
+          _fail('direct WebRTC runtime failure: $error', stack: stack);
         },
       ),
     );
@@ -55,7 +55,7 @@ final class DirectSessionTransport implements SessionTransport {
           try {
             _relay.sendControl(signal.encode());
           } on Object catch (error, stack) {
-            _fail('direct signaling failed: $error', stack);
+            _fail('direct signaling failed: $error', stack: stack);
           }
         },
       );
@@ -68,7 +68,7 @@ final class DirectSessionTransport implements SessionTransport {
           if (!_events.isClosed) _events.add(frame);
         },
         onError: (Object error, StackTrace stack) {
-          _fail('direct WebRTC receive failed: $error', stack);
+          _fail('direct WebRTC receive failed: $error', stack: stack);
         },
       );
       _peer.connectionStates.listen((state) {
@@ -80,16 +80,28 @@ final class DirectSessionTransport implements SessionTransport {
         // fatal tore down healthy sessions. Real loss still arrives as
         // `failed`, which the ICE layer raises only after six consecutive
         // misses, roughly the 30s RFC 7675 allows before consent expires.
-        if (state == PeerConnectionState.failed ||
-            state == PeerConnectionState.closed) {
-          _fail('direct WebRTC connection ${state.name}');
+        // `closed` is the device tearing its peer down on purpose: it does
+        // that when it replaces the session (connector mode adopting a new
+        // target VM), when the tester taps Disconnect, or when its own relay
+        // socket drops — and in all but the second case it redials within a
+        // second. That is a reason to re-dial and renegotiate, not to quit.
+        // No direct_error goes back either: it would land on the device's
+        // replacement session and fail that one too.
+        if (state == PeerConnectionState.closed) {
+          _fail(
+            'direct WebRTC connection closed by the device',
+            notifyPeer: false,
+            transient: true,
+          );
+        } else if (state == PeerConnectionState.failed) {
+          _fail('direct WebRTC connection failed');
         }
       });
       _relaySubscription = _relay.controlStream.listen(
         _onRelayControl,
         onDone: _relayClosed,
         onError: (Object error, StackTrace stack) {
-          _fail('direct-only relay protocol failed: $error', stack);
+          _fail('direct-only relay protocol failed: $error', stack: stack);
         },
       );
     });
@@ -162,7 +174,7 @@ final class DirectSessionTransport implements SessionTransport {
       final failure = DirectTransportFailure(
         'direct WebRTC payload send failed: $error',
       );
-      _fail(failure.message, stack);
+      _fail(failure.message, stack: stack);
       throw failure;
     }
   }
@@ -192,7 +204,7 @@ final class DirectSessionTransport implements SessionTransport {
       case DirectSignal signal:
         unawaited(
           _handleSignal(signal).catchError((Object error, StackTrace stack) {
-            _fail('direct WebRTC negotiation failed: $error', stack);
+            _fail('direct WebRTC negotiation failed: $error', stack: stack);
           }),
         );
       case _DeviceInfo():
@@ -232,7 +244,7 @@ final class DirectSessionTransport implements SessionTransport {
         _candidateTimer?.cancel();
         await _startNegotiationWhenReady();
       case DirectErrorSignal(:final message):
-        _fail('device direct transport failed: $message', null, false);
+        _fail('device direct transport failed: $message', notifyPeer: false);
     }
   }
 
@@ -254,10 +266,16 @@ final class DirectSessionTransport implements SessionTransport {
     stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
   }
 
-  void _fail(String message, [StackTrace? stack, bool notifyPeer = true]) {
+  void _fail(
+    String message, {
+    StackTrace? stack,
+    bool notifyPeer = true,
+    bool transient = false,
+  }) {
     if (_closed || _failure != null) return;
     final failure = _failure = DirectTransportFailure(
       _stage == 'open' ? message : '$message (stage: $_stage)',
+      transient: transient,
     );
     _directReady = false;
     _offerTimer?.cancel();
