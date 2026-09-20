@@ -13,12 +13,16 @@ abstract interface class RelayControlTransport {
   Future<void> close();
 }
 
-/// Why a bulk transfer cannot ride the relay.
+/// The reason a relay gives when it closes a socket that sent a binary
+/// frame (close code 4002). The public relay carries signalling text only;
+/// bulk data (the VM tunnel, player and app updates) rides direct WebRTC.
+const relayBinaryRefusal = 'binary payload disabled';
+
+/// What to tell the developer when [relayBinaryRefusal] ends a session.
 const relayBinaryUnsupported =
-    'this session has no direct connection, and bulk transfers (player and '
-    'app updates) cannot use the relay — it carries signalling only. Remove '
-    '--no-direct, or connect the phone to a network where a direct WebRTC '
-    'connection can be established.';
+    'this relay does not carry tunnel or update payloads, only signalling. '
+    'Remove --no-direct so bulk data rides the direct WebRTC path, or use a '
+    'private relay started with RHR_ALLOW_BINARY_PAYLOADS=1.';
 
 abstract interface class SessionTransport {
   Stream<Object> get stream;
@@ -100,11 +104,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     );
   });
   Future<String> get selectedRelay => _selected.future;
-
-  /// Never ready: the relay carries control text only. See [sendPayload].
-  Future<void> get payloadReady => Future<void>.error(
-    StateError(relayBinaryUnsupported),
-  )..ignore();
+  Future<void> get payloadReady => Future.value();
   String? get closeReason => _winner?.channel.closeReason;
 
   static Future<RelayRace> connect({
@@ -245,14 +245,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
 
   void sendControl(String message) => _send(message);
 
-  /// Always throws. The relay is a signalling channel: it rejects binary
-  /// frames outright (close 4002), so a payload sent here does not fail at
-  /// this call — it kills the whole session a moment later, and the caller
-  /// reconnects and tries again forever. Refusing here turns that loop into
-  /// one honest error naming the real requirement.
-  Future<void> sendPayload(Uint8List message) async {
-    throw StateError(relayBinaryUnsupported);
-  }
+  Future<void> sendPayload(Uint8List message) async => _send(message);
 
   void _send(Object message) {
     final winner = _winner;

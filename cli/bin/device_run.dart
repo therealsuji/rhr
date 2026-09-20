@@ -298,6 +298,11 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
         );
         exit(3);
       }
+      // Same payload, same refusal, forever — say why once and stop.
+      if ((transport.closeReason ?? '').contains(relayBinaryRefusal)) {
+        stderr.writeln('[rhr] $relayBinaryUnsupported');
+        exit(77);
+      }
       if (!wsDied.isCompleted) wsDied.complete();
     },
     onError: (Object error) {

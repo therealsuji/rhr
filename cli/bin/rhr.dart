@@ -106,6 +106,10 @@ const _directFailureExitCode = 69;
 // from "check the code".
 const _deviceBusyExitCode = 76;
 
+/// The relay refused a binary frame: the session ran --no-direct against a
+/// relay that carries signalling only, so its payloads can never get through.
+const _relayBinaryExitCode = 77;
+
 Future<void> main(List<String> args) async {
   if (args.length == 1 &&
       (args.first == '--version' || args.first == 'version')) {
@@ -860,6 +864,13 @@ Future<int?> _runSession({
           'exiting (only one dev can attach to a session at a time).',
         );
         exit(3);
+      }
+      // The relay killed the socket for carrying binary. Reconnecting would
+      // only send the same payload into the same refusal, forever, so name
+      // the requirement once and stop.
+      if (reason.contains(relayBinaryRefusal)) {
+        stderr.writeln('[rhr] $relayBinaryUnsupported');
+        exit(_relayBinaryExitCode);
       }
       stderr.writeln('[rhr] relay connection closed');
       if (!wsDied.isCompleted) wsDied.complete();

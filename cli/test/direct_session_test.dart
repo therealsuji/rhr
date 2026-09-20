@@ -244,4 +244,77 @@ void main() {
     },
     timeout: const Timeout(Duration(seconds: 420)),
   );
+
+  test(
+    '--no-direct against a signalling-only relay fails once instead of '
+    'reconnecting forever',
+    () async {
+      final port = await _freePort();
+      final code = 'refuse-${DateTime.now().millisecondsSinceEpoch}';
+      final relayLines = <String>[];
+      final cliLines = <String>[];
+      final deviceLines = <String>[];
+      final relay = await _spawn(
+        ['bin/relay.dart', '$port'],
+        workDir: '$_repo/relay',
+        lines: relayLines,
+      );
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--no-direct',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          code,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      final device = await _spawn(
+        [
+          '--enable-vm-service=0',
+          'example/fake_device.dart',
+          'ws://127.0.0.1:$port',
+          code,
+        ],
+        workDir: '$_repo/bridge',
+        lines: deviceLines,
+      );
+      addTearDown(() async {
+        device.kill(ProcessSignal.sigkill);
+        cli.kill(ProcessSignal.sigkill);
+        relay.kill(ProcessSignal.sigkill);
+      });
+
+      await _waitFor(
+        cliLines,
+        RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
+        'relay-only tunnel',
+      );
+      final tunnelLine = cliLines.firstWhere(
+        (line) => line.contains('tunneled VM service:'),
+      );
+      final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
+      // The first tunnel frame is binary; the relay closes the socket for it.
+      final client = HttpClient();
+      try {
+        await client
+            .getUrl(uri.resolve('getVMInfo'))
+            .then((request) => request.close())
+            .timeout(const Duration(seconds: 10));
+      } on Object {
+        // The tunnel dying under the request is the expected outcome.
+      } finally {
+        client.close(force: true);
+      }
+
+      expect(await cli.exitCode.timeout(const Duration(seconds: 30)), 77);
+      expect(cliLines, contains(contains('Remove --no-direct')));
+      expect(cliLines, isNot(contains(contains('reconnecting in'))));
+    },
+    timeout: const Timeout(Duration(seconds: 420)),
+  );
 }
