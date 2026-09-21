@@ -99,10 +99,7 @@ final class DirectSessionTransport implements SessionTransport {
           // next offer often enough to be worth one (seen on the SM-A566B:
           // one failure between runs that connected in under a second).
           // After it opened it is a path that was working and died.
-          _fail(
-            'direct WebRTC connection failed',
-            transient: _stage != 'open',
-          );
+          _fail('direct WebRTC connection failed', transient: _stage != 'open');
         }
       });
       _relaySubscription = _relay.controlStream.listen(
@@ -212,7 +209,11 @@ final class DirectSessionTransport implements SessionTransport {
       case DirectSignal signal:
         unawaited(
           _handleSignal(signal).catchError((Object error, StackTrace stack) {
-            _fail('direct WebRTC negotiation failed: $error', stack: stack);
+            _fail(
+              'direct WebRTC negotiation failed: $error',
+              stack: stack,
+              transient: error is TimeoutException,
+            );
           }),
         );
       case _DeviceInfo():
@@ -309,15 +310,12 @@ final class DirectSessionTransport implements SessionTransport {
   }
 
   void _relayClosed() {
+    final failure = _failure ??= const DirectTransportFailure(
+      'signaling relay closed; reconnect to the phone',
+      transient: true,
+    );
     _directReady = false;
-    if (!_payloadReady.isCompleted) {
-      _payloadReady.completeError(
-        const DirectTransportFailure(
-          'signaling relay closed before the direct WebRTC payload path was ready',
-          transient: true,
-        ),
-      );
-    }
+    if (!_payloadReady.isCompleted) _payloadReady.completeError(failure);
     if (!_events.isClosed) unawaited(_events.close());
   }
 

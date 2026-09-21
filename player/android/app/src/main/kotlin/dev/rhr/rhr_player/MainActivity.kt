@@ -51,6 +51,7 @@ class MainActivity : FlutterActivity() {
 		RhrSessionService.updateHandlerFactory = { ctx, sendText, sendBinary ->
 			RhrPlayerUpdater(ctx, sendText, sendBinary)
 		}
+		RhrSessionService.runRequestHandler = RunPreparation::handle
 		registerDebugFaultReceiver()
 	}
 
@@ -147,6 +148,11 @@ class MainActivity : FlutterActivity() {
 								.putExtra("preferDirect", call.argument<Boolean>("preferDirect") ?: true))
 						result.success(null)
 					}
+					"installSettings" -> {
+						startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+							android.net.Uri.parse("package:$packageName")))
+						result.success(null)
+					}
 					"kick" -> {
 						startService(
 							Intent(this, RhrSessionService::class.java)
@@ -185,6 +191,8 @@ class MainActivity : FlutterActivity() {
 								"style" to banner.style.name,
 								"visible" to banner.isVisible,
 								"status" to RhrSessionService.status,
+								"setupAction" to RunPreparation.setupAction,
+								"setupMessage" to RunPreparation.setupMessage,
 							))
 					}
 					"debug/fault" -> {

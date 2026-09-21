@@ -66,6 +66,11 @@ data class SessionBanner(
 			stalled: Boolean = false,
 			foreignApp: Boolean = false,
 		): SessionBanner = when (phase) {
+			"ready" -> SessionBanner("Your app is running", null, Style.HIDDEN)
+			"checking", "launching" -> SessionBanner(message, null, Style.BUSY)
+			"setup", "approval" -> SessionBanner(message, null, Style.WAITING)
+			"preparation_failed" -> SessionBanner(message, null, Style.FAILED, failure = message)
+
 			"assets" -> SessionBanner(
 				"Syncing assets", perMille(done, total), Style.DETERMINATE)
 
@@ -100,7 +105,7 @@ data class SessionBanner(
 
 			"building" -> SessionBanner(
 				if (stalled) "Still building — check the developer's terminal"
-				else "Developer is building an update…",
+				else message.ifEmpty { "Developer is building an update…" },
 				null,
 				Style.BUSY)
 
@@ -173,7 +178,7 @@ data class SessionBanner(
 		 * decides whether a card appears; this is only what it would say.
 		 */
 		private fun restingLabel(status: String): String = when (status) {
-			"connected" -> "Developer attached"
+			"connected" -> "Phone connected"
 			"waiting_dev" -> "Waiting for developer"
 			"idle" -> "Not connected"
 			else -> "Ready to connect"

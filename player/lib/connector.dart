@@ -86,6 +86,7 @@ class ConnectorScreen extends StatefulWidget {
     required this.relay,
     required this.fallbackRelays,
     this.restoreHandler,
+    this.setupOnly = false,
   });
 
   /// Put back when this screen closes.
@@ -95,6 +96,7 @@ class ConnectorScreen extends StatefulWidget {
   /// out left the lobby deaf for the rest of the run.
   final Future<dynamic> Function(MethodCall)? restoreHandler;
 
+  final bool setupOnly;
   final String relay;
   final List<String> fallbackRelays;
 
@@ -179,7 +181,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         if (!ok) {
           setState(() {
             _stage = ConnectorStage.unpaired;
-            _failure = 'Pairing did not complete. Check the six-digit code '
+            _failure =
+                'Pairing did not complete. Check the six-digit code '
                 'and try again.';
           });
           return null;
@@ -220,7 +223,10 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         // A stale failure outliving the condition that caused it is its own
         // small lie: the user fixes wireless debugging, comes back, and still
         // reads "could not reach this phone".
-        if (connected) _failure = null;
+        if (connected) {
+          _failure = null;
+          _message = null;
+        }
         if (!paired) {
           _stage = ConnectorStage.unpaired;
         } else if (!connected) {
@@ -230,12 +236,10 @@ class _ConnectorScreenState extends State<ConnectorScreen>
           // the overlay is what gets the tester back out of their own app once
           // a session starts. Showing the target list before both are done
           // offers a session with no exit.
-          _stage = overlay
-              ? ConnectorStage.ready
-              : ConnectorStage.needsOverlay;
+          _stage = overlay ? ConnectorStage.ready : ConnectorStage.needsOverlay;
         }
       });
-      if (connected) await _loadApps();
+      if (connected && !widget.setupOnly) await _loadApps();
       if (mounted) setState(() => _loading = false);
     } on PlatformException catch (e) {
       if (!mounted) return;
@@ -250,7 +254,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   Future<void> _startPairing() async {
     setState(() {
       _failure = null;
-      _message = 'Open Wireless debugging, tap "Pair device with pairing '
+      _message =
+          'Open Wireless debugging, tap "Pair device with pairing '
           'code", then type the six digits into the notification.';
     });
     try {
@@ -278,7 +283,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
           // Provisional: replaced below once the overlay has been checked.
           _stage = ConnectorStage.working;
         } else {
-          _failure = 'Could not reach this phone. Is Wireless debugging still '
+          _failure =
+              'Could not reach this phone. Is Wireless debugging still '
               'switched on in Developer options?';
         }
       });
@@ -286,7 +292,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         final stage = await _connectedStage();
         if (!mounted) return;
         setState(() => _stage = stage);
-        await _loadApps();
+        if (!widget.setupOnly) await _loadApps();
       }
     } on PlatformException catch (e) {
       if (!mounted) return;
@@ -325,9 +331,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
       setState(() => _codeError = null);
       return true;
     }
-    setState(
-      () => _codeError = 'Codes look like rhr-xxxx-xxxx-xxxx.',
-    );
+    setState(() => _codeError = 'Codes look like rhr-xxxx-xxxx-xxxx.');
     return false;
   }
 
@@ -375,7 +379,9 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         backgroundColor: Colors.transparent,
         foregroundColor: _ink,
         elevation: 0,
-        title: const Text('Connect an installed app'),
+        title: Text(
+          widget.setupOnly ? 'Set up this phone' : 'Connect an installed app',
+        ),
         actions: [
           if (_stage == ConnectorStage.ready ||
               _stage == ConnectorStage.disconnected)
@@ -398,7 +404,13 @@ class _ConnectorScreenState extends State<ConnectorScreen>
               _reconnectCard(),
             if (!_loading && _stage == ConnectorStage.needsOverlay)
               _overlayOffer(),
-            if (!_loading &&
+            if (widget.setupOnly && !_loading && _stage == ConnectorStage.ready)
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Setup complete · Return to RHR'),
+              ),
+            if (!widget.setupOnly &&
+                !_loading &&
                 (_stage == ConnectorStage.ready ||
                     _stage == ConnectorStage.working)) ...[
               _codeField(),
@@ -410,7 +422,11 @@ class _ConnectorScreenState extends State<ConnectorScreen>
               const SizedBox(height: 16),
               Text(
                 _message!,
-                style: const TextStyle(color: _inkDim, fontSize: 13, height: 1.4),
+                style: const TextStyle(
+                  color: _inkDim,
+                  fontSize: 13,
+                  height: 1.4,
+                ),
               ),
             ],
             if (_failure != null) ...[
@@ -473,10 +489,7 @@ class _ConnectorScreenState extends State<ConnectorScreen>
       ConnectorStage.needsOverlay => ('One more permission to go', _warn),
       ConnectorStage.ready => ('Connected to this phone', _ok),
       ConnectorStage.working => ('Working…', _warn),
-      ConnectorStage.tunneling => (
-        'Tunneling ${_tunneledLabel ?? 'app'}',
-        _ok,
-      ),
+      ConnectorStage.tunneling => ('Tunneling ${_tunneledLabel ?? 'app'}', _ok),
     };
     final (bannerLabel, bannerColor) = _loading
         ? ('Checking this phone…', _warn)
@@ -507,7 +520,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
 
   Widget _pairingCard() => _card(
     title: 'Pair this phone once',
-    body: 'Connector mode talks to this phone\'s own Wireless debugging. '
+    body:
+        'Connector mode talks to this phone\'s own Wireless debugging. '
         'Pairing is a one-time step and survives reboots.',
     action: 'Start pairing',
     onAction: _startPairing,
@@ -522,7 +536,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   Widget _reconnectCard() => switch (_wirelessDebugging) {
     false => _card(
       title: 'Wireless debugging is off',
-      body: 'Connector mode talks to this phone over its own Wireless '
+      body:
+          'Connector mode talks to this phone over its own Wireless '
           'debugging, and it is switched off right now — that is why this '
           'phone cannot be reached.\n\n'
           'Turn it on in Developer options, then come back. Pairing is '
@@ -533,7 +548,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
     // On, or unreadable: reconnecting is the thing to try either way.
     _ => _card(
       title: 'Reconnect to this phone',
-      body: 'Pairing is already done. If Wireless debugging is switched on, '
+      body:
+          'Pairing is already done. If Wireless debugging is switched on, '
           'reconnecting takes a moment and needs no code.',
       action: 'Reconnect',
       onAction: _busy ? null : _connectAdb,
@@ -542,7 +558,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
 
   Widget _tunnelingCard() => _card(
     title: 'Tunneling ${_tunneledLabel ?? 'the app'}',
-    body: 'The session service owns the tunnel now and keeps running if you '
+    body:
+        'The session service owns the tunnel now and keeps running if you '
         'leave this screen.\n\nOn your machine:\n'
         'rhr attach --code ${_code.text.trim()}\n'
         'then hot reload as usual.',
@@ -567,7 +584,8 @@ class _ConnectorScreenState extends State<ConnectorScreen>
   /// which makes this a step to finish, not an extra to offer.
   Widget _overlayOffer() => _card(
     title: 'Let rhr show a bubble',
-    body: 'Once you connect, you will be in your own app and this screen is '
+    body:
+        'Once you connect, you will be in your own app and this screen is '
         'out of the way. Shaking the phone brings up a small bubble on top of '
         'it: that is how you check the session and disconnect without hunting '
         'for this app again.\n\n'
@@ -620,7 +638,11 @@ class _ConnectorScreenState extends State<ConnectorScreen>
         else ...[
           const Text(
             'Debug builds',
-            style: TextStyle(color: _ink, fontSize: 14, fontWeight: FontWeight.w600),
+            style: TextStyle(
+              color: _ink,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
           ),
           const SizedBox(height: 8),
           ...debuggable.map(_targetTile),
@@ -629,7 +651,11 @@ class _ConnectorScreenState extends State<ConnectorScreen>
           const SizedBox(height: 20),
           const Text(
             'Cannot be hot reloaded',
-            style: TextStyle(color: _inkDim, fontSize: 13, fontWeight: FontWeight.w600),
+            style: TextStyle(
+              color: _inkDim,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
           ),
           const SizedBox(height: 8),
           ...rest.map(_targetTile),

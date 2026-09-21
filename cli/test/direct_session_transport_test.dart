@@ -33,6 +33,30 @@ final class _FakeControlTransport implements RelayControlTransport {
 }
 
 void main() {
+  test('a send racing relay loss remains reconnectable', () async {
+    final relay = _FakeControlTransport();
+    final transport = DirectSessionTransport(relay);
+    final subscription = transport.stream.listen((_) {}, onError: (_) {});
+    final readiness = expectLater(
+      transport.payloadReady,
+      throwsA(isA<DirectTransportFailure>()),
+    );
+    await relay.close();
+    await readiness;
+    await expectLater(
+      transport.sendPayload(Uint8List.fromList([2, 0, 0, 0, 1])),
+      throwsA(
+        isA<DirectTransportFailure>().having(
+          (failure) => failure.transient,
+          'transient',
+          isTrue,
+        ),
+      ),
+    );
+    await subscription.cancel();
+    await transport.close();
+  });
+
   test('missing direct offer fails without a relay payload fallback', () async {
     final relay = _FakeControlTransport();
     final transport = DirectSessionTransport(
@@ -72,36 +96,41 @@ void main() {
   // presence heartbeat, and the re-signaling that would rebuild the channel —
   // so a tester was left reading "Can't reach relay - retrying..." after a
   // clean quit.
-  test('control still reaches the relay after the payload path fails', () async {
-    final relay = _FakeControlTransport();
-    final transport = DirectSessionTransport(
-      relay,
-      offerTimeout: const Duration(milliseconds: 20),
-    );
-    final subscription = transport.stream.listen((_) {}, onError: (_) {});
+  test(
+    'control still reaches the relay after the payload path fails',
+    () async {
+      final relay = _FakeControlTransport();
+      final transport = DirectSessionTransport(
+        relay,
+        offerTimeout: const Duration(milliseconds: 20),
+      );
+      final subscription = transport.stream.listen((_) {}, onError: (_) {});
 
-    relay.controller.add(jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}));
-    await expectLater(
-      transport.payloadReady,
-      throwsA(isA<DirectTransportFailure>()),
-    );
+      relay.controller.add(
+        jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}),
+      );
+      await expectLater(
+        transport.payloadReady,
+        throwsA(isA<DirectTransportFailure>()),
+      );
 
-    // Payloads genuinely need the data channel, so they must still fail.
-    await expectLater(
-      transport.sendPayload(Uint8List.fromList([1, 2, 3])),
-      throwsA(isA<DirectTransportFailure>()),
-    );
+      // Payloads genuinely need the data channel, so they must still fail.
+      await expectLater(
+        transport.sendPayload(Uint8List.fromList([1, 2, 3])),
+        throwsA(isA<DirectTransportFailure>()),
+      );
 
-    // Control does not, so it must go out regardless.
-    transport.sendControl(jsonEncode({'t': 'dev_gone'}));
-    expect(
-      relay.sent.map((message) => jsonDecode(message)['t']),
-      contains('dev_gone'),
-    );
+      // Control does not, so it must go out regardless.
+      transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+      expect(
+        relay.sent.map((message) => jsonDecode(message)['t']),
+        contains('dev_gone'),
+      );
 
-    await subscription.cancel();
-    await transport.close();
-  });
+      await subscription.cancel();
+      await transport.close();
+    },
+  );
 
   test('a device-side direct failure terminates payload readiness', () async {
     final relay = _FakeControlTransport();

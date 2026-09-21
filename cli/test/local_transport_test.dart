@@ -10,6 +10,40 @@ import 'package:web_socket_channel/io.dart';
 
 void main() {
   test(
+    'reconnecting developer receives info after other phone messages',
+    () async {
+      final relay = (await LocalRelay.start(
+        'rhr-test-reconnect',
+        advertisedAddress: InternetAddress.loopbackIPv4,
+      ))!;
+      addTearDown(relay.close);
+      final device = await WebSocket.connect(
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/device',
+      );
+      addTearDown(device.close);
+      final firstDev = await WebSocket.connect(
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/dev',
+      );
+      addTearDown(firstDev.close);
+      const info = '{"t":"info","vm":"http://127.0.0.1:1234/"}';
+      const pong = '{"t":"pong"}';
+      final receivedPong = firstDev.firstWhere((message) => message == pong);
+      device.add(info);
+      device.add('{"t":"progress","phase":"installed"}');
+      device.add('invalid control message');
+      device.add(pong);
+      await receivedPong.timeout(const Duration(seconds: 3));
+      await firstDev.close();
+
+      final reconnected = await WebSocket.connect(
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/dev',
+      );
+      addTearDown(reconnected.close);
+      expect(await reconnected.first.timeout(const Duration(seconds: 3)), info);
+    },
+  );
+
+  test(
     'embedded relay pipes device and dev frames in both directions',
     () async {
       final relay = await LocalRelay.start(

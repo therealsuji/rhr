@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 /// A single-session relay embedded in `rhr run` for same-LAN transfers.
@@ -71,9 +72,19 @@ final class LocalRelay {
   void _attachDevice(WebSocket socket) {
     _device?.close(4001, 'replaced by new connection');
     _device = socket;
+    _lastDeviceInfo = null;
     _subscriptions[socket] = socket.listen(
       (message) {
-        if (message is String) _lastDeviceInfo = message;
+        if (message is String) {
+          try {
+            final control = jsonDecode(message);
+            if (control is Map<String, dynamic> && control['t'] == 'info') {
+              _lastDeviceInfo = message;
+            }
+          } on FormatException {
+            // Forward unrecognized messages without replacing the announcement.
+          }
+        }
         _safeAdd(_dev, message);
       },
       onDone: () {

@@ -57,12 +57,34 @@ void main() {
     );
   });
 
+  testWidgets('typing the full printed code keeps its prefix once', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SessionCodeField(
+            controller: controller,
+            actionLabel: 'Connect',
+            onSubmit: () {},
+            onScanned: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.showKeyboard(find.byType(TextField));
+    for (final character in 'rhr-abcd-efgh-jkmn'.split('')) {
+      tester.testTextInput.enterText('${controller.text}$character');
+      await tester.pump();
+    }
+    expect(controller.text, 'rhr-abcd-efgh-jkmn');
+  });
+
   group('formatSessionCodeInput', () {
     test('groups a bare token and adds the prefix', () {
-      expect(
-        formatSessionCodeInput('abcdefghjkmn'),
-        'rhr-abcd-efgh-jkmn',
-      );
+      expect(formatSessionCodeInput('abcdefghjkmn'), 'rhr-abcd-efgh-jkmn');
     });
 
     test('does not double the prefix on paste', () {
@@ -89,10 +111,7 @@ void main() {
     });
 
     test('stops at a full code', () {
-      expect(
-        formatSessionCodeInput('abcdefghjkmnpqrs'),
-        'rhr-abcd-efgh-jkmn',
-      );
+      expect(formatSessionCodeInput('abcdefghjkmnpqrs'), 'rhr-abcd-efgh-jkmn');
     });
 
     test('is empty until the first character', () {

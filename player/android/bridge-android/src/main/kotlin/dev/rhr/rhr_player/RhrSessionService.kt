@@ -164,11 +164,11 @@ class RhrSessionService : Service() {
 				}
 				"update-foreign" -> {
 					updatingForeignApp = true
-					onUpdate?.invoke()
+					updateListeners.forEach { it() }
 				}
 				"update-player" -> {
 					updatingForeignApp = false
-					onUpdate?.invoke()
+					updateListeners.forEach { it() }
 				}
 				"clear-cache" -> clearAssetCaches()
 			}
@@ -180,7 +180,7 @@ class RhrSessionService : Service() {
 		@Volatile var status: String = "idle"
 			private set(value) {
 				field = value
-				onUpdate?.invoke()
+				updateListeners.forEach { it() }
 			}
 
 		// Latest session code / VM URI, surfaced in the native dev menu so the
@@ -198,6 +198,9 @@ class RhrSessionService : Service() {
 		@Volatile var updateHandlerFactory:
 			((ctx: Context, sendText: (String) -> Unit, sendBinary: (ByteArray) -> Unit)
 				-> RhrUpdateHandler)? = null
+
+		@Volatile var runRequestHandler:
+			((Context, JSONObject, (JSONObject) -> Unit, (String) -> Unit, () -> Boolean) -> Unit)? = null
 
 		// Latest transfer/lifecycle progress, pushed by the dev over the tunnel
 		// ({"t":"progress",...}) or set locally (e.g. "restarting"). The native
@@ -218,7 +221,7 @@ class RhrSessionService : Service() {
 		@Volatile var phaseStalled: Boolean = false
 			private set(value) {
 				field = value
-				onUpdate?.invoke()
+				updateListeners.forEach { it() }
 			}
 
 		// Why the last phase ended, when the developer's side failed. Carried
@@ -235,7 +238,7 @@ class RhrSessionService : Service() {
 		@Volatile private var phaseSetAt = 0L
 		// MainActivity registers here to be pinged whenever status/progress
 		// changes, so the overlay redraws without polling. Called on any thread.
-		@Volatile var onUpdate: (() -> Unit)? = null
+		val updateListeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
 
 		/**
 		 * The install steps, which only this phone can see.
@@ -265,7 +268,7 @@ class RhrSessionService : Service() {
 			} else {
 				phaseSetAt = System.currentTimeMillis()
 			}
-			onUpdate?.invoke()
+			updateListeners.forEach { it() }
 		}
 	}
 
@@ -284,6 +287,7 @@ class RhrSessionService : Service() {
 	// Connector mode: the vmUri was handed to us (target app's door) —
 	// never override it from our own process log.
 	@Volatile private var watchOwnVm = true
+	@Volatile private var ownVmUri = ""
 	private var projectHint: String? = null
 	private val sockets = ConcurrentHashMap<Int, Socket>()
 	private val readers = ConcurrentHashMap<Int, Thread>()
@@ -355,7 +359,8 @@ class RhrSessionService : Service() {
 				// target app is a different process, so our own logcat can
 				// never see its engine lines). Default true: the player
 				// hosts its own engine and tracks guest kernel swaps.
-				watchOwnVm = intent.getBooleanExtra("watchVm", true)
+				val requestedOwnVm = intent.getBooleanExtra("watchVm", true)
+				if (requestedOwnVm) ownVmUri = requestedVm
 				val requestedDirect = intent.getBooleanExtra("preferDirect", true)
 				val sameLiveSession = reconnectThread?.isAlive == true &&
 					!stopped.get() && sessionCode == requestedCode &&
@@ -367,7 +372,7 @@ class RhrSessionService : Service() {
 					// wrong app). The player's auto-resume is unchanged —
 					// its own engine reports a stale URI on Activity
 					// recreate, where the live service knows better.
-					(watchOwnVm || requestedVm == vmUri)
+					(requestedOwnVm || requestedVm == vmUri)
 				if (sameLiveSession) {
 					// Reopening the Activity creates a new FlutterEngine whose
 					// Service.getInfo() may report a stale VM URI. The native service
@@ -388,6 +393,7 @@ class RhrSessionService : Service() {
 					stopped.set(false)
 					relayUrls = requestedRelays
 					sessionCode = requestedCode
+					watchOwnVm = requestedOwnVm
 					vmUri = requestedVm
 					preferDirect = requestedDirect
 					currentCode = sessionCode
@@ -408,7 +414,7 @@ class RhrSessionService : Service() {
 					startPresenceWatch()
 					startReconnectLoop(sessionGeneration)
 				}
-				onUpdate?.invoke()
+				updateListeners.forEach { it() }
 				startForeground(NOTIF_ID, buildNotification())
 			}
 			"kick" -> synchronized(flowLock) { flowLock.notifyAll() } // also wakes backoff
@@ -422,13 +428,13 @@ class RhrSessionService : Service() {
 				directTransport?.close()
 				directTransport = null
 				status = "paused"
-				onUpdate?.invoke()
+				updateListeners.forEach { it() }
 			}
 			"resume" -> {
 				paused = false
 				ws?.send(JSONObject().put("t", "resume").toString())
 				status = "waiting_dev"
-				onUpdate?.invoke()
+				updateListeners.forEach { it() }
 			}
 			// The tester asking for their app back in its opening state. Only
 			// the developer can do this — a hot restart is Flutter's, driven
@@ -500,7 +506,8 @@ class RhrSessionService : Service() {
 					vmLineRegex.find(line)?.let { latest = it.groupValues[1] }
 				}
 				latest?.let {
-					if (it != vmUri) {
+					ownVmUri = it
+					if (watchOwnVm && it != vmUri) {
 						Log.i(TAG, "VM service URI (from buffer) -> $it")
 						vmUri = it
 						announceInfo()
@@ -520,7 +527,8 @@ class RhrSessionService : Service() {
 							if (stopped.get()) break
 							val m = vmLineRegex.find(line) ?: continue
 							val uri = m.groupValues[1]
-							if (uri != vmUri) {
+							ownVmUri = uri
+							if (watchOwnVm && uri != vmUri) {
 								Log.i(TAG, "VM service URI changed -> $uri")
 								vmUri = uri
 								announceInfo()
@@ -546,12 +554,15 @@ class RhrSessionService : Service() {
 			(progressPhase == "restarting" || progressPhase == "reloading")) {
 			setProgress("", 0, 0)
 		} else {
-			onUpdate?.invoke()
+			updateListeners.forEach { it() }
 		}
 	}
 
 	private fun infoMessage(): String = JSONObject()
 		.put("t", "info")
+		.put("runProtocol", if (runRequestHandler != null) 1 else 0)
+		.put("deviceName", android.os.Build.MODEL)
+		.put("deviceId", InstallationIdentity.id(this))
 		.put("vm", vmUri)
 		.put("transport", activeRelayUrl)
 		// Readiness is state, not merely an edge-triggered event. A developer
@@ -665,7 +676,7 @@ class RhrSessionService : Service() {
 						// forwarded dev frames, not from the relay.
 						status = "waiting_dev"
 						Log.i(TAG, "[$sessionCode] connected (http ${response.code})")
-						if (!vmUri.contains(":0/")) {
+						if (runRequestHandler != null || !vmUri.contains(":0/")) {
 							val sent = webSocket.send(infoMessage())
 							Log.i(TAG, "[$sessionCode] SENT info queued=$sent vm=$vmUri")
 						} else {
@@ -687,6 +698,36 @@ class RhrSessionService : Service() {
 								return
 							}
 							directTransport?.handleSignal(text)
+							return
+						}
+						val runRequest = try { JSONObject(text) } catch (_: Exception) { null }
+						if (runRequest?.optString("t") == "run_request") {
+							devLeft = false
+							if (runRequest.optString("action") == "host_player") {
+								val available = ownVmUri.isNotEmpty() && !ownVmUri.contains(":0/")
+								if (available) synchronized(vmUriLock) {
+									watchOwnVm = true
+									vmUri = ownVmUri
+									currentVm = vmUri
+								}
+								webSocket.send(JSONObject().put("t", "run_response")
+									.put("id", runRequest.optInt("id")).put("ok", true)
+									.put("ready", available).put("vm", ownVmUri).toString())
+								return
+							}
+
+							runRequestHandler?.invoke(this@RhrSessionService, runRequest,
+								{ response -> if (generation == sessionGeneration) webSocket.send(response.toString()) },
+								{ targetVm ->
+									if (generation == sessionGeneration) {
+										synchronized(vmUriLock) {
+											watchOwnVm = false
+											vmUri = targetVm
+											currentVm = targetVm
+										}
+										announceInfo()
+									}
+								}, { generation == sessionGeneration && !stopped.get() && !devLeft })
 							return
 						}
 						// Over-the-wire update control messages. The handler is
@@ -723,7 +764,9 @@ class RhrSessionService : Service() {
 							Log.i(TAG, "[$sessionCode] developer left the session")
 							devLeft = true
 							if (status in DEV_PRESENT_STATES) status = "waiting_dev"
-							setProgress("", 0, 0)
+							if (progressPhase != "preparation_failed" && progressPhase != "update_failed") {
+								setProgress("", 0, 0)
+							}
 							// The peer belonged to the developer who just left; it
 							// can only decay to ICE failed from here, and while it
 							// exists the next developer's hello does not start a
@@ -743,7 +786,7 @@ class RhrSessionService : Service() {
 						// that reconnected mid-session), the dev sends {"t":"hello"}
 						// and we answer with a fresh info so pairing is robust to
 						// connection order. Unknown text (e.g. pings) is ignored.
-						if (text.contains("\"hello\"") && !vmUri.contains(":0/")) {
+						if (text.contains("\"hello\"") && (runRequestHandler != null || !vmUri.contains(":0/"))) {
 							// Wait for the developer hello before creating the offer. A
 							// device can connect to the relay before the CLI subscribes;
 							// starting here keeps the first offer and ICE candidates on a

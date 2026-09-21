@@ -260,6 +260,8 @@ class DevOverlay(
 	private var dismissTarget: View? = null
 	private val dismissSize get() = dp(64)
 
+	private val onSessionUpdate: () -> Unit = { ui.post { render() } }
+
 	fun attach() {
 		root = host.createRoot(activity)
 		host.add(root)
@@ -270,7 +272,7 @@ class DevOverlay(
 		buildFab()
 		render()
 
-		RhrSessionService.onUpdate = { ui.post { render() } }
+		RhrSessionService.updateListeners.add(onSessionUpdate)
 		sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
 			// GAME rate (~50 Hz): a shake is a 3-5 Hz oscillation, and the UI
 			// rate (~15 Hz) is too coarse to see its direction reversals
@@ -281,7 +283,7 @@ class DevOverlay(
 	}
 
 	fun detach() {
-		RhrSessionService.onUpdate = null
+		RhrSessionService.updateListeners.remove(onSessionUpdate)
 		sensors?.unregisterListener(this)
 		ui.removeCallbacks(idleHide)
 		cancelTween(fab)

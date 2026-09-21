@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-beta.9
+
+- Connect the phone before selecting hosted or separate-app mode.
+- Guide connector setup, verify installed APKs, and open the target app automatically.
+- Reuse session codes and validated APKs across retries.
+- Recover from interrupted transfers and player replacement; reject signing conflicts without deleting app data.
+- Add `rhr update` and `rhr update --check` for published CLI releases.
+
 ## 0.1.0-beta.4
 
 - Allow patch-level Flutter/Dart skew inside one stable series with a warning;

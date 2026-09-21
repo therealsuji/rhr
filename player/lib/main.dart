@@ -76,6 +76,8 @@ class LobbyScreen extends StatefulWidget {
 class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   final _code = TextEditingController();
   String? _status;
+  String _setupAction = '';
+  String _setupMessage = '';
   bool _active = false; // a session is running → show Disconnect
   // Live native service status, polled over the MethodChannel so the lobby
   // shows the same truth as the native overlay.
@@ -224,11 +226,17 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
             _waitingSince != null &&
             DateTime.now().difference(_waitingSince!) >=
                 const Duration(seconds: 90);
-        if (s != _nativeStatus ||
+        final setupAction = decided?['setupAction'] as String? ?? '';
+        final setupMessage = decided?['setupMessage'] as String? ?? '';
+        if (setupAction != _setupAction ||
+            setupMessage != _setupMessage ||
+            s != _nativeStatus ||
             showHint != _showWaitingHint ||
             banner?.label != _banner?.label ||
             banner?.progress != _banner?.progress) {
           setState(() {
+            _setupAction = setupAction;
+            _setupMessage = setupMessage;
             _nativeStatus = s;
             _banner = banner;
             _showWaitingHint = showHint;
@@ -471,14 +479,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     });
     setState(() {
       _active = true;
-      _status = auto
-          ? 'Session restored — waiting for developer.\n'
-                'Start rhr run on your machine and it will reconnect.'
-          : 'Session service running — "$code". Waiting for developer.\n'
-                'On your machine:\n'
-                'rhr attach --sync-assets --relay $_relay --code $code\n'
-                'then press R (hot restart) to boot your app here.\n'
-                'The tunnel survives hot restarts and backgrounding.';
+      _status =
+          'Waiting for the developer. RHR will check this phone '
+          'before preparing your app.';
     });
   }
 
@@ -582,7 +585,32 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
                         const SizedBox(height: 18),
-                        _connectorEntry(),
+                        if (_active && _setupAction.isNotEmpty) ...[
+                          Text(
+                            _setupMessage,
+                            style: const TextStyle(color: _ink),
+                          ),
+                          const SizedBox(height: 12),
+                          FilledButton(
+                            onPressed: () async {
+                              if (_setupAction == 'install') {
+                                await _session.invokeMethod('installSettings');
+                              } else {
+                                await Navigator.of(context).push<void>(
+                                  MaterialPageRoute(
+                                    builder: (_) => ConnectorScreen(
+                                      relay: _relay,
+                                      fallbackRelays: _fallbackRelays,
+                                      restoreHandler: lobbyChannelHandler,
+                                      setupOnly: true,
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            child: const Text('Complete phone setup'),
+                          ),
+                        ],
                         const SizedBox(height: 20),
                         Center(
                           child: Row(
@@ -680,57 +708,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.symmetric(vertical: 16),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       textStyle: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
-    ),
-  );
-
-  /// The second way to use the player: leave an already-installed app where
-  /// it is and tunnel that instead of hosting a guest project here. Presented
-  /// as a peer of the code entry above, not buried in a menu, because a user
-  /// arriving with their own debug build has no reason to guess it exists.
-  Widget _connectorEntry() => GestureDetector(
-    onTap: () => Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ConnectorScreen(
-          relay: _relay,
-          fallbackRelays: _fallbackRelays,
-          restoreHandler: lobbyChannelHandler,
-        ),
-      ),
-    ),
-    child: Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: _surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _surfaceHi),
-      ),
-      child: Row(
-        children: [
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Connect an installed app',
-                  style: TextStyle(
-                    color: _ink,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                SizedBox(height: 4),
-                Text(
-                  'Hot reload a debug build already on this phone, instead '
-                  'of hosting a project here.',
-                  style: TextStyle(color: _inkDim, fontSize: 12.5, height: 1.4),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          const Icon(Icons.chevron_right, color: _inkDim),
-        ],
-      ),
     ),
   );
 
@@ -1038,9 +1015,11 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   }
 
   String _activeStatusCopy() {
+    final banner = _banner;
+    if (banner != null) return banner.label;
     switch (_nativeStatus) {
       case 'connected':
-        return 'Developer attached — press r (reload) or R (restart) in their terminal.';
+        return 'Connected to your developer. RHR is preparing your app.';
       case 'rejected':
         return 'No session on this code yet. Check the code, or ask the developer to run rhr run first.';
       case 'retrying':
@@ -1050,9 +1029,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       case 'waiting_dev':
       case 'idle':
       default:
-        final base =
-            'Waiting for developer — they can attach with:\n'
-            'rhr attach --relay $_relay --code ${_code.text}';
+        final base = 'Waiting for your developer to connect. Keep RHR open.';
         if (_showWaitingHint) {
           return '$base\n\nNo developer has connected on this code yet. '
               'If they started a fresh session, Disconnect and scan the new QR.';

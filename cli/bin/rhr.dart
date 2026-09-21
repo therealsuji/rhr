@@ -35,13 +35,16 @@ import 'package:rhr_cli/restart_tracker.dart';
 import 'package:rhr_cli/terminal_qr.dart';
 import 'package:rhr_cli/usb_asset_transport.dart';
 import 'package:rhr_cli/version.dart';
+import 'package:rhr_cli/run_preparation.dart';
+import 'package:rhr_cli/running_project.dart';
+import 'package:rhr_cli/cli_update.dart';
 
 const _usage = '''
 rhr — Expo Go for Flutter, over the internet.
 
 Usage:
   rhr setup [--relay <url>]   register the "rhr" Flutter device (run once)
-  rhr run [options]           run Flutter with automatic initial launch
+  rhr run [options]           pair, check, prepare, and run this project
   rhr attach [options]        connect to a session and hot reload into it
   rhr doctor                  check the local Flutter/RHR setup
   rhr login                   sign in so this machine can use account devices
@@ -50,13 +53,21 @@ Usage:
   rhr invite                  show a QR for a phone to join this account
   rhr devices [--remove <id>] list the phones on this account
   rhr --version               print the installed CLI version
+  rhr update [--check]         install the newest release, or only check for it
   rhr push-assets [options]   push assets into an already-attached session
   rhr player build [options]  build a target-compatible debug player APK
 
+Start here: install RHR Player on the phone, run `rhr` in your Flutter project,
+then scan its QR or enter its code. RHR selects the route and guides phone setup.
+An agent can use `rhr run --yes` to approve required debug builds/installations.
+Android may still ask the tester to confirm permissions or installation.
+
 run options:
+  --yes                approve required player/app builds and installations
+  --mode <auto|player|app>  select automatically (default), or force a route
   --project <dir>       Flutter project dir (default: current dir)
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
-  --code <session>      reuse a specific pairing code (default: generate one)
+  --code <session>      override the saved pairing code (new code on first run)
   --device <id>         a phone on your account (see `rhr devices`)
   --no-direct           use the relay for tunnel payloads (legacy/private mode;
                         direct WebRTC is strict and enabled by default)
@@ -87,7 +98,8 @@ attach options:
   -h, --help            show this help
 
 Session selection, for both run and attach: --device, else --code, else
-`code:` in .rhr.yaml, else a fresh code. --device and --code together are
+`code:` in .rhr.yaml, then run reuses its recent saved code or generates one.
+--device and --code together are
 refused rather than one quietly winning.
 
 Config: values in ./.rhr.yaml (keys `relay:`, `code:`, and optional
@@ -126,16 +138,19 @@ Future<void> main(List<String> args) async {
     return;
   }
 
-  if (args.isEmpty ||
-      args.contains('-h') ||
-      args.contains('--help') ||
-      args.first == 'help') {
+  if (args.isEmpty) args = ['run'];
+
+  if (args.contains('-h') || args.contains('--help') || args.first == 'help') {
     stdout.write(_usage);
-    exit(args.isEmpty ? 64 : 0);
+    exit(0);
   }
 
   if (args.first == 'doctor') {
     exit(await _doctor());
+  }
+
+  if (args.first == 'update') {
+    exit(await runCliUpdate(args.skip(1).toList()));
   }
 
   if (args.first == 'login') {
@@ -252,14 +267,27 @@ Future<void> main(List<String> args) async {
   }
 
   // sync assets, and automatically launch the guest app.
-  if (args[0] == 'run') {    String project = '.';
+  if (args[0] == 'run') {
+    String project = '.';
     String? relay;
     String? code;
     String? device;
     var resync = false;
     var direct = true;
     var updatePolicy = PlayerUpdatePolicy.prompt;
+    RunRoute? routeOverride;
     for (var i = 1; i < args.length; i++) {
+      if (const {
+            '--project',
+            '--relay',
+            '--code',
+            '--device',
+            '--mode',
+          }.contains(args[i]) &&
+          (i + 1 == args.length || args[i + 1].startsWith('--'))) {
+        stderr.writeln('rhr run: ${args[i]} requires a value. Run rhr --help.');
+        exit(64);
+      }
       switch (args[i]) {
         case '--project':
           project = args[++i];
@@ -275,6 +303,19 @@ Future<void> main(List<String> args) async {
           direct = false;
         case '--resync':
           resync = true;
+        case '--mode':
+          final mode = args[++i];
+          if (!const {'auto', 'player', 'app'}.contains(mode)) {
+            stderr.writeln('rhr run: --mode must be auto, player, or app.');
+            exit(64);
+          }
+          routeOverride = switch (mode) {
+            'auto' => null,
+            'player' => RunRoute.player,
+            'app' => RunRoute.app,
+            _ => throw ArgumentError('mode must be auto, player, or app'),
+          };
+        case '--yes':
         case '--update-player':
           updatePolicy = PlayerUpdatePolicy.always;
         case '--no-update-player':
@@ -294,6 +335,7 @@ Future<void> main(List<String> args) async {
         code: code,
         preferDirect: direct,
         resync: resync,
+        routeOverride: routeOverride,
         updatePolicy: updatePolicy,
       ),
     );
@@ -381,7 +423,8 @@ Future<void> main(List<String> args) async {
   code ??= cfg['code'];
   if (direct && cfg['direct']?.toLowerCase() == 'false') direct = false;
 
-  code = await _resolveDevice(device: device, code: code, project: project) ??
+  code =
+      await _resolveDevice(device: device, code: code, project: project) ??
       code;
 
   if (code == null) {
@@ -443,7 +486,9 @@ Future<void> main(List<String> args) async {
         RelayRace.releaseClaim(code);
         exit(0);
       }
-      if (result == _noDeviceExitCode || result == _relayBinaryExitCode) {
+      if (result == _noDeviceExitCode ||
+          result == _relayBinaryExitCode ||
+          result == 78) {
         RelayRace.releaseClaim(code);
         exit(result!);
       }
@@ -619,11 +664,6 @@ Map<String, String> _loadConfig(String project) {
   return out;
 }
 
-/// How `rhr` reacts when the compatibility gate blocks: offer an
-/// over-the-wire player update, apply it without asking, or keep the
-/// original hard block.
-enum PlayerUpdatePolicy { prompt, always, never }
-
 /// One relay session: tunnel + optional flutter attach + optional asset sync.
 /// Returns flutter's exit code when it ends on its own, or null when the
 /// relay connection dropped and the caller should reconnect.
@@ -636,6 +676,9 @@ Future<int?> _runSession({
   required bool syncAssets,
   bool preferDirect = false,
   PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.never,
+  bool prepareRun = false,
+  RunRoute? routeOverride,
+  RunProgress? runProgress,
 }) async {
   final compatibility = readProjectCompatibilityProfile(project);
   String? assetStoreId;
@@ -710,6 +753,7 @@ Future<int?> _runSession({
   final sockets = <int, Socket>{};
   final flow = FlowControl();
   DirectTransportFailure? directFailure;
+  PlayerUpdateFailure? preparationRetry;
   // Set once `flutter attach` is running, so a restart the tester asks for
   // has something to signal. Null until then, and on the --no-flutter path.
   String? attachPidFile;
@@ -718,8 +762,41 @@ Future<int?> _runSession({
   );
   PlayerUpdateSender? updateSender;
   var updateAttempted = false;
+  var effectiveSyncAssets = syncAssets;
+  final preparation = prepareRun
+      ? RunPreparation(
+          transport: transport,
+          project: project,
+          profile: compatibility,
+          policy: updatePolicy,
+          routeOverride: routeOverride,
+          progress: runProgress,
+        )
+      : null;
+  Future<void>? preparing;
+  if (preparation != null) {
+    preparing = preparation
+        .run()
+        .then((ready) {
+          effectiveSyncAssets = ready.route == RunRoute.player;
+          assetStoreId = ready.assetStoreId;
+          if (!vmReady.isCompleted) vmReady.complete(ready.vm);
+        })
+        .catchError((Object error) {
+          if (error is PlayerUpdateFailure && error.retryable) {
+            preparationRetry = error;
+          } else if (error is DirectTransportFailure) {
+            directFailure ??= error;
+          } else if (error is! RunDisconnected) {
+            preparation.phase('preparation_failed', '$error');
+            fatalExit = 78;
+          }
+          if (!wsDied.isCompleted) wsDied.complete();
+        });
+  }
 
   void sendPayload(Uint8List payload) {
+    if (wsDied.isCompleted) return;
     unawaited(
       transport.sendPayload(payload).catchError((
         Object error,
@@ -740,6 +817,13 @@ Future<int?> _runSession({
     (msg) {
       if (msg is String) {
         final m = jsonDecode(msg) as Map<String, dynamic>;
+        if (preparation != null && m['t'] == 'info') {
+          bridgeDeadline.value = DateTime.now().add(
+            const Duration(minutes: 40),
+          );
+        }
+        preparation?.handleMessage(m);
+        if (preparation != null && m['t'] == 'info') return;
         if (updateSender?.handleMessage(m) ?? false) return;
         // The tester asking, from the phone's dev menu, for the guest app back
         // in its opening state. A hot restart is Flutter's and belongs to this
@@ -764,12 +848,12 @@ Future<int?> _runSession({
         }
         if (m['t'] == 'info' && !vmReady.isCompleted) {
           final announcedAssetStoreId = m['assetStoreId'];
-          final announcedHost = m['host'] ??
+          final announcedHost =
+              m['host'] ??
               (m['compatibility'] is Map<String, dynamic>
                   ? (m['compatibility'] as Map<String, dynamic>)['host']
                   : null);
-          final hostKind =
-              announcedHost is String ? announcedHost : 'player';
+          final hostKind = announcedHost is String ? announcedHost : 'player';
           if (hostKind == 'connector') {
             // Connector mode tunnels a THIRD-party app's VM service — the
             // target contains no rhr code, so there is no identity to gate on
@@ -779,12 +863,14 @@ Future<int?> _runSession({
             final connectorVm = m['vm'];
             if (connectorVm is! String || connectorVm.isEmpty) {
               stderr.writeln(
-                  '[rhr] the target app announced no VM service — is it a '
-                  'debug build?');
+                '[rhr] the target app announced no VM service — is it a '
+                'debug build?',
+              );
               exit(78);
             }
-            assetStoreId =
-                announcedAssetStoreId is String ? announcedAssetStoreId : '';
+            assetStoreId = announcedAssetStoreId is String
+                ? announcedAssetStoreId
+                : '';
             vmReady.complete(Uri.parse(connectorVm));
             return;
           }
@@ -870,6 +956,7 @@ Future<int?> _runSession({
           sendPayload(encodeAck(f.channel, f.payload.length));
         case opAck:
           if (PlayerUpdateSender.isUpdateAck(f.channel)) {
+            preparation?.handleAck(f.channel, decodeAckCount(f.payload));
             updateSender?.handleAck(f.channel, decodeAckCount(f.payload));
           } else {
             flow.acked(f.channel, decodeAckCount(f.payload));
@@ -898,10 +985,12 @@ Future<int?> _runSession({
         stderr.writeln('[rhr] $relayBinaryUnsupported');
         fatalExit = _relayBinaryExitCode;
       }
+      preparation?.close();
       stderr.writeln('[rhr] relay connection closed');
       if (!wsDied.isCompleted) wsDied.complete();
     },
     onError: (Object e) {
+      preparation?.close();
       if (e is DirectTransportFailure) {
         directFailure ??= e;
       } else {
@@ -939,9 +1028,14 @@ Future<int?> _runSession({
       // An update in flight IS the player, busy. Without this the wait
       // loop told the developer to check whether the phone was connected,
       // every 30 seconds, while it was streaming an APK to that phone.
-      updating: () => updateSender != null,
+      updating: () => updateSender != null || preparation != null,
     );
   } on _WaitTimedOut {
+    preparation?.close();
+    await preparing;
+    await interrupts.cancel();
+    await terminations.cancel();
+    await hangups.cancel();
     keepalive.cancel();
     await transport.close();
     stderr.writeln(
@@ -951,11 +1045,30 @@ Future<int?> _runSession({
     return _noDeviceExitCode;
   }
   if (vm == null) {
+    preparation?.close();
+    await preparing;
     keepalive.cancel();
+    await interrupts.cancel();
+    await terminations.cancel();
+    await hangups.cancel();
+    if (fatalExit != null || preparationRetry != null) {
+      try {
+        transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+      } catch (_) {
+        // The connection may have closed before preparation failed.
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      await transport.close();
+    }
     final failure = directFailure;
     if (failure != null) {
       await transport.close();
       throw failure;
+    }
+    final retry = preparationRetry;
+    if (retry != null) {
+      await transport.close();
+      throw retry;
     }
     return fatalExit; // relay died while waiting
   }
@@ -991,7 +1104,11 @@ Future<int?> _runSession({
               ? start + maxTunnelPayload
               : data.length;
           sendPayload(
-            encodeFrame(opData, channel, Uint8List.sublistView(data, start, end)),
+            encodeFrame(
+              opData,
+              channel,
+              Uint8List.sublistView(data, start, end),
+            ),
           );
         }
         // Pause the local reader once the window fills — this is what keeps
@@ -1020,6 +1137,7 @@ Future<int?> _runSession({
   stderr.writeln('[rhr] tunneled VM service: $local');
 
   Future<void> cleanup() async {
+    preparation?.close();
     keepalive.cancel();
     await server.close();
     for (final s in sockets.values.toList()) {
@@ -1087,35 +1205,68 @@ Future<int?> _runSession({
     mode: ProcessStartMode.inheritStdio,
   );
 
-  if (syncAssets) {
-    unawaited(
-      _syncAssetsAfterAttach(
-        local,
-        project,
-        effectivePidFile,
-        assetStoreId: assetStoreId,
-        maxConcurrentUploads: 4,
-        onProgress: (phase, done, total) {
-          // Send real progress over the tunnel so the phone draws a live bar.
-          // The relay forwards dev→device text as-is; the native player renders it.
-          transport.sendControl(
-            jsonEncode({
-              't': 'progress',
-              'phase': phase,
-              'done': done,
-              'total': total,
-            }),
-          );
-        },
-      ).catchError((Object e) {
-        stderr.writeln('[rhr] asset sync failed: $e');
-        // Clear the phone's progress card while the relay is still writable.
-        // The native side also clears it when the connection itself fails.
-        transport.sendControl(
-          jsonEncode({'t': 'progress', 'phase': '', 'done': 0, 'total': 0}),
-        );
+  var sessionActive = true;
+  void reportProgress(String phase, int done, int total) {
+    if (!sessionActive) return;
+    transport.sendControl(
+      jsonEncode({
+        't': 'progress',
+        'phase': phase,
+        'done': done,
+        'total': total,
       }),
     );
+  }
+
+  if (effectiveSyncAssets || prepareRun) {
+    unawaited(() async {
+      try {
+        if (effectiveSyncAssets) {
+          await _syncAssetsAfterAttach(
+            local,
+            project,
+            effectivePidFile,
+            assetStoreId: assetStoreId,
+            maxConcurrentUploads: 4,
+            onProgress: reportProgress,
+          );
+        } else {
+          final deadline = DateTime.now().add(const Duration(minutes: 3));
+          while (!File(effectivePidFile).existsSync()) {
+            if (!sessionActive) return;
+            if (DateTime.now().isAfter(deadline)) {
+              throw TimeoutException(
+                'Flutter did not attach to the debug app.',
+              );
+            }
+            await Future<void>.delayed(const Duration(seconds: 1));
+          }
+          if (!await isProjectRunning(local, project)) {
+            throw StateError(
+              'The connected runtime is not running this project.',
+            );
+          }
+        }
+        if (sessionActive) {
+          stderr.writeln('[rhr] Ready. Your project is running on the phone.');
+          reportProgress('ready', 0, 0);
+        }
+      } catch (error) {
+        if (!sessionActive) return;
+        stderr.writeln('[rhr] Could not start your project: $error');
+        transport.sendControl(
+          jsonEncode({
+            't': 'progress',
+            'phase': 'preparation_failed',
+            'message': '$error',
+            'done': 0,
+            'total': 0,
+          }),
+        );
+        fatalExit = 78;
+        proc.kill();
+      }
+    }());
   }
 
   // Whichever ends first decides: flutter exiting on its own ends the CLI;
@@ -1125,12 +1276,17 @@ Future<int?> _runSession({
     flutterExit.then((c) => c),
     wsDied.future.then((_) => const _RelayEnded()),
   ]);
+  sessionActive = false;
   if (ended is _RelayEnded) {
     proc.kill();
     await flutterExit; // reap
     await cleanup();
     final failure = directFailure;
     if (failure != null) throw failure;
+    return fatalExit;
+  }
+  if (fatalExit != null) {
+    await cleanup();
     return fatalExit;
   }
   // flutter exited. But if the relay dropped at nearly the same moment (e.g.
@@ -1188,6 +1344,7 @@ Future<Uri?> _waitForDeviceBridge(
   Completer<void> wsDied,
   String code,
   _DeadlineHolder deadline, {
+
   /// Whether an update is streaming to the device right now. The reminder
   /// below asks the developer to check that the player is connected, which
   /// is unhelpful advice while we are mid-transfer to it.
@@ -1282,13 +1439,14 @@ Future<bool> _updatePlayerOverTheWire({
           : '[rhr] update the player over the wire to Flutter '
                 '${local.frameworkVersion}? [Y/n] ',
     );
-    final answer = (await stdin
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .first
-            .catchError((_) => 'n'))
-        .trim()
-        .toLowerCase();
+    final answer =
+        (await stdin
+                .transform(utf8.decoder)
+                .transform(const LineSplitter())
+                .first
+                .catchError((_) => 'n'))
+            .trim()
+            .toLowerCase();
     if (answer.isNotEmpty && answer != 'y' && answer != 'yes') {
       _clearUpdatePhase(transport);
       return false;
@@ -1307,12 +1465,7 @@ Future<bool> _updatePlayerOverTheWire({
     // The build takes minutes. Say so on the phone, which is otherwise
     // staring at a session that has gone quiet.
     transport.sendControl(
-      jsonEncode({
-        't': 'progress',
-        'phase': 'building',
-        'done': 0,
-        'total': 0,
-      }),
+      jsonEncode({'t': 'progress', 'phase': 'building', 'done': 0, 'total': 0}),
     );
     // Building can take minutes and the install needs the tester to reopen
     // the player; keep the bridge wait from expiring under either.
@@ -1363,7 +1516,7 @@ Future<bool> _updatePlayerOverTheWire({
           // Android is showing the install sheet: the tester has to tap.
           PlayerUpdateOutcome.pendingUser => 'install_confirm',
           // Handed to PackageInstaller, or already on disk.
-          PlayerUpdateOutcome.committed ||
+          PlayerUpdateOutcome.committed => 'installing',
           PlayerUpdateOutcome.installed => 'installed',
         },
         'done': 0,
@@ -1434,7 +1587,7 @@ Future<void> _syncAssetsAfterAttach(
       // bundle at startup, so a hot reload would swap code against stale
       // assets — but when nothing was pushed there is nothing stale, and
       // restarting anyway throws away the app's state for no reason.
-      if (!changed) {
+      if (!changed && await isProjectRunning(vmService, project)) {
         stderr.writeln('[rhr] assets unchanged; no restart needed');
         return;
       }
@@ -1449,7 +1602,12 @@ Future<void> _syncAssetsAfterAttach(
         trigger: () => Process.killPid(pid, ProcessSignal.sigusr2),
         onProgress: onProgress ?? (_, _, _) {},
       );
-      stderr.writeln('[rhr] hot restart completed; main isolate replaced');
+      if (!await isProjectRunning(vmService, project)) {
+        throw StateError(
+          'The phone restarted but did not launch this project.',
+        );
+      }
+      stderr.writeln('[rhr] Your project is running on the phone.');
     },
   );
 }
@@ -1476,13 +1634,64 @@ Future<int> _runAttachProductFlow({
   bool? preferDirect,
   bool resync = false,
   PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.prompt,
+  RunRoute? routeOverride,
 }) async {
+  if (!File('$project/pubspec.yaml').existsSync()) {
+    stderr.writeln(
+      '[rhr] Run rhr inside a Flutter project, or pass --project <directory>.',
+    );
+    return 64;
+  }
+  stderr.writeln('[rhr] resolving project dependencies...');
+  final dependencies = await Process.run(projectFlutterExecutable(project), [
+    'pub',
+    'get',
+  ], workingDirectory: project);
+  if (dependencies.exitCode != 0) {
+    stderr.writeln(
+      '[rhr] Could not resolve project dependencies:\n${dependencies.stdout}\n${dependencies.stderr}',
+    );
+    return 78;
+  }
   final config = _loadConfig(project);
   // Same order `attach` uses: an explicit flag, then the project's own
   // config, then a fresh code. `run` used to mint before reading the config
   // at all, so a project that pinned a code got a different one every time
   // and nobody could tell why.
-  final sessionCode = code ?? config['code'] ?? mintRhrSessionCode();
+  final savedSession = File('$project/.dart_tool/rhr/session.json');
+  String? savedCode;
+  if (savedSession.existsSync()) {
+    try {
+      final saved = jsonDecode(savedSession.readAsStringSync());
+      if (saved is Map<String, dynamic> &&
+          saved['relay'] == (relay ?? config['relay'])) {
+        final created = DateTime.tryParse('${saved['created']}');
+        final candidate = saved['code'];
+        if (created != null &&
+            DateTime.now().difference(created) < const Duration(hours: 24) &&
+            candidate is String &&
+            isValidRhrSessionCode(candidate))
+          savedCode = candidate;
+      }
+    } on FormatException {
+      // A partial receipt cannot authorize reuse of a session.
+    }
+  }
+  final sessionCode =
+      code ?? config['code'] ?? savedCode ?? mintRhrSessionCode();
+  if (isValidRhrSessionCode(sessionCode)) {
+    savedSession.parent.createSync(recursive: true);
+    savedSession.writeAsStringSync(
+      jsonEncode({
+        'code': sessionCode,
+        'relay': relay ?? config['relay'],
+        'created': DateTime.now().toUtc().toIso8601String(),
+      }),
+      flush: true,
+    );
+    if (!Platform.isWindows)
+      await Process.run('chmod', ['600', savedSession.path]);
+  }
   final configuredRelay = relay ?? config['relay'];
   preferDirect ??= config['direct']?.toLowerCase() != 'false';
   final localRelay = await LocalRelay.start(sessionCode);
@@ -1517,25 +1726,15 @@ Future<int> _runAttachProductFlow({
   }
 
   try {
-    stderr.writeln('[rhr] building Android asset bundle…');
-    final build = await Process.run(projectFlutterExecutable(project), [
-      'build',
-      'bundle',
-      '--debug',
-      '--target-platform',
-      'android-arm64',
-    ], workingDirectory: project);
-    if (build.exitCode != 0) {
-      stderr.writeln('[rhr] Android bundle build failed:\n${build.stderr}');
-      return 1;
-    }
     if (resync) {
       final manifest = File('$project/.dart_tool/rhr/pushed_assets.json');
       if (manifest.existsSync()) manifest.deleteSync();
     }
 
+    final runProgress = RunProgress();
     var failures = 0;
     var directRetries = 0;
+    var transferRetries = 0;
     while (true) {
       try {
         final result = await _runSession(
@@ -1547,10 +1746,15 @@ Future<int> _runAttachProductFlow({
           syncAssets: true,
           preferDirect: preferDirect,
           updatePolicy: updatePolicy,
+          prepareRun: true,
+          runProgress: runProgress,
+          routeOverride: routeOverride,
         );
         directRetries = 0;
         if (result == 0) return 0;
-        if (result == _noDeviceExitCode || result == _relayBinaryExitCode) {
+        if (result == _noDeviceExitCode ||
+            result == _relayBinaryExitCode ||
+            result == 78) {
           return result!;
         }
         failures++;
@@ -1572,6 +1776,17 @@ Future<int> _runAttachProductFlow({
           stderr.writeln('[rhr] direct connection failed: $failure');
           return _directFailureExitCode;
         }
+      } on PlayerUpdateFailure catch (failure) {
+        if (!failure.retryable || ++transferRetries >= 3) {
+          stderr.writeln(
+            '[rhr] $failure Transfer could not finish after retries. Run rhr again when the connection is stable.',
+          );
+          return 78;
+        }
+        failures++;
+        stderr.writeln(
+          '[rhr] $failure Reconnecting and reusing the built APK.',
+        );
       } on DeviceBusyException catch (busy) {
         // Reconnecting cannot win a device someone else is holding; it would
         // only spin until they leave. Report and quit so the operator can pick
@@ -1612,7 +1827,8 @@ Future<String?> _resolveDevice({
   }
   // A remembered device is a convenience, not an instruction: anything the
   // developer actually typed wins, and so does a project that pins a code.
-  final wanted = device ?? (code == null ? await preferredDevice(project) : null);
+  final wanted =
+      device ?? (code == null ? await preferredDevice(project) : null);
   if (wanted == null) return null;
 
   final session = await currentAccountSession();
@@ -1771,7 +1987,10 @@ Future<int> _invite() async {
 /// name WorkOS generated. Falls back to the raw URL when no login base is
 /// configured, since a self-hosted relay may not run the route.
 String _loginLink(String workosUrl) {
-  const base = String.fromEnvironment('RHR_LOGIN_BASE', defaultValue: defaultLoginBase);
+  const base = String.fromEnvironment(
+    'RHR_LOGIN_BASE',
+    defaultValue: defaultLoginBase,
+  );
   if (base.isEmpty) return workosUrl;
   return '$base?to=${Uri.encodeComponent(workosUrl)}';
 }

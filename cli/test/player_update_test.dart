@@ -52,6 +52,18 @@ void main() {
 
   tearDown(() => tmp.deleteSync(recursive: true));
 
+  test(
+    'player cache identity changes when native implementation changes',
+    () async {
+      final template = Directory('${tmp.path}/template')..createSync();
+      final source = File('${template.path}/MainActivity.kt')
+        ..writeAsStringSync('first');
+      final before = await playerTemplateIdentity(template);
+      source.writeAsStringSync('changed');
+      expect(await playerTemplateIdentity(template), isNot(before));
+    },
+  );
+
   test('transfer ids live in the reserved high-bit range', () {
     expect(PlayerUpdateSender.isUpdateAck(updateTransferIdBase | 1), isTrue);
     expect(PlayerUpdateSender.isUpdateAck(1), isFalse);
@@ -150,6 +162,75 @@ void main() {
     sender.close();
   });
 
+  test(
+    'self-update cancellation is still observed after commit was announced',
+    () async {
+      final transport = _FakeTransport();
+      final sender = PlayerUpdateSender(transport);
+      final sent = sender.send(apk);
+      await _pumpUntil(() => transport.sentText.isNotEmpty);
+      final id = transport.sentText.first['id'] as int;
+      sender.handleMessage({'t': 'update_status', 'id': id, 'state': 'ready'});
+      sender.handleMessage({
+        't': 'update_status',
+        'id': id,
+        'state': 'committed',
+      });
+      expect(await sent, PlayerUpdateOutcome.committed);
+      final installed = sender.waitForInstallation();
+      sender.handleMessage({
+        't': 'update_status',
+        'id': id,
+        'state': 'failure',
+        'message': 'INSTALL_FAILED_ABORTED: User rejected permissions',
+      });
+      await expectLater(
+        installed,
+        throwsA(
+          isA<PlayerUpdateFailure>().having(
+            (failure) => failure.message,
+            'message',
+            contains('Installation canceled'),
+          ),
+        ),
+      );
+      sender.close();
+    },
+  );
+
+  test('declined installation asks for an explicit retry', () async {
+    final transport = _FakeTransport();
+    final sender = PlayerUpdateSender(
+      transport,
+      kind: UpdateKind.app,
+      target: 'dev.test.app',
+    );
+    final done = sender.send(apk);
+    await _pumpUntil(() => transport.sentText.isNotEmpty);
+    final id = transport.sentText.first['id'] as int;
+    sender.handleMessage({
+      't': 'update_status',
+      'id': id,
+      'state': 'failure',
+      'message': 'INSTALL_FAILED_ABORTED: User rejected permissions',
+    });
+    await expectLater(
+      done,
+      throwsA(
+        isA<PlayerUpdateFailure>().having(
+          (failure) => failure.message,
+          'message',
+          'Installation canceled on the phone. Run rhr again to retry.',
+        ),
+      ),
+    );
+    expect(
+      transport.sentText.where((message) => message['t'] == 'update_begin'),
+      hasLength(1),
+    );
+    sender.close();
+  });
+
   test('a failure queued between waits is not lost', () async {
     final transport = _FakeTransport();
     final sender = PlayerUpdateSender(transport);
@@ -169,15 +250,17 @@ void main() {
     sender.close();
   });
 
-  test('a player that never answers ready fails with the manual hint',
-      () async {
-    final transport = _FakeTransport();
-    final sender = PlayerUpdateSender(transport);
-    final done = sender.send(apk);
-    await _pumpUntil(() => transport.sentText.isNotEmpty);
-    sender.close(); // simulate giving up: close unblocks the wait
-    await expectLater(done, throwsA(isA<PlayerUpdateFailure>()));
-  });
+  test(
+    'a player that never answers ready fails with the manual hint',
+    () async {
+      final transport = _FakeTransport();
+      final sender = PlayerUpdateSender(transport);
+      final done = sender.send(apk);
+      await _pumpUntil(() => transport.sentText.isNotEmpty);
+      sender.close(); // simulate giving up: close unblocks the wait
+      await expectLater(done, throwsA(isA<PlayerUpdateFailure>()));
+    },
+  );
 
   test('messages for other transfers are left to the caller', () {
     final sender = PlayerUpdateSender(_FakeTransport());

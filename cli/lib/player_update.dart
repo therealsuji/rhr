@@ -7,7 +7,7 @@
 //   {"t":"update_begin","id":N,"size":S,"sha256":H}   announce the transfer
 //   {"t":"update_status","id":N,"state":...}          device → dev acks:
 //       "ready"         updater accepted the transfer, chunks may flow
-//       "committed"     APK verified and handed to PackageInstaller
+//       "committed"     APK verified; installation is being requested
 //       "pending_user"  Android is showing the install confirmation sheet
 //       "failure"       verification or install failed ("message" says why)
 //   binary opUpdateData frames                        APK chunks, flow-
@@ -68,10 +68,15 @@ Future<File> buildUpdatePlayerApk({
 }) async {
   final log = onLog ?? stderr.writeln;
   final home =
-      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '.';
+      Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'] ??
+      '.';
   final cache = Directory(cacheDir ?? '$home/.rhr/player-cache');
   final profileId = projectPlayerProfileId(project);
-  final cached = File('${cache.path}/$frameworkRevision-$profileId-arm64.apk');
+  final templateId = await playerTemplateIdentity(Directory(template));
+  final cached = File(
+    '${cache.path}/$frameworkRevision-$profileId-$templateId-arm64.apk',
+  );
   if (cached.existsSync() && cached.lengthSync() > 0) {
     log('[rhr] using cached update player ${cached.path}');
     return cached;
@@ -91,6 +96,40 @@ Future<File> buildUpdatePlayerApk({
   );
 }
 
+/// Runtime updates must carry the current player code, not an old cached APK
+/// that happens to use the same Flutter SDK and native plugins.
+Future<String> playerTemplateIdentity(Directory template) async {
+  final entries = <String>[];
+  Future<void> visit(Directory directory) async {
+    await for (final entry in directory.list(followLinks: false)) {
+      final name = entry.uri.pathSegments.where((part) => part.isNotEmpty).last;
+      if ({
+        'build',
+        '.dart_tool',
+        '.gradle',
+        '.git',
+        '.idea',
+        'Pods',
+        '.symlinks',
+      }.contains(name))
+        continue;
+      if (entry is Directory) {
+        await visit(entry);
+      } else if (entry is File && name != 'local.properties') {
+        final digest = await sha256.bind(entry.openRead()).first;
+        entries.add('${entry.path.substring(template.path.length)}:$digest');
+      }
+    }
+  }
+
+  await visit(template);
+  entries.sort();
+  return sha256
+      .convert(utf8.encode(entries.join('\n')))
+      .toString()
+      .substring(0, 16);
+}
+
 /// Builds the project's own debug APK, for a project whose native code the
 /// generic player cannot carry. Unlike the player APK this is never cached:
 /// it is the developer's own app, and its Dart changes every edit.
@@ -102,7 +141,9 @@ Future<File> buildUpdateProjectApk({
 }) async {
   final log = onLog ?? stderr.writeln;
   final home =
-      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '.';
+      Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'] ??
+      '.';
   final cache = Directory(cacheDir ?? '$home/.rhr/player-cache');
   cache.createSync(recursive: true);
   log('[rhr] building your app\'s debug APK (this takes a few minutes)…');
@@ -114,17 +155,20 @@ Future<File> buildUpdateProjectApk({
   );
 }
 
+enum PlayerUpdatePolicy { prompt, always, never }
+
 final class PlayerUpdateFailure implements Exception {
-  PlayerUpdateFailure(this.message);
+  PlayerUpdateFailure(this.message, {this.retryable = false});
   final String message;
+  final bool retryable;
   @override
   String toString() => message;
 }
 
 /// Terminal outcome of a streamed update, as reported by the device.
 enum PlayerUpdateOutcome {
-  /// PackageInstaller accepted the session; the install proceeds without
-  /// further user action (Android 12+ self-update) and kills the player.
+  /// The player is about to request installation. A self-update can kill it.
+  /// Reinspect the replacement before claiming installation succeeded.
   committed,
 
   /// Android is showing the install confirmation sheet on the device.
@@ -223,7 +267,8 @@ final class PlayerUpdateSender {
     await _awaitState(
       {'ready'},
       timeout: const Duration(seconds: 15),
-      onTimeout: 'the player did not acknowledge the update — it predates '
+      onTimeout:
+          'the player did not acknowledge the update — it predates '
           'self-update; reinstall it manually once',
     );
 
@@ -276,7 +321,8 @@ final class PlayerUpdateSender {
             await window.future.timeout(
               const Duration(seconds: 60),
               onTimeout: () => throw PlayerUpdateFailure(
-                'update transfer stalled — the device stopped acking',
+                'Transfer stopped receiving acknowledgments from the phone.',
+                retryable: true,
               ),
             );
           }
@@ -347,13 +393,25 @@ final class PlayerUpdateSender {
         return state;
       }
       if (state == 'failure') {
+        final detail = '${status['message'] ?? 'unknown error'}';
         throw PlayerUpdateFailure(
-          'player update failed on the device: '
-          '${status['message'] ?? 'unknown error'}',
+          detail.contains('INSTALL_FAILED_ABORTED')
+              ? 'Installation canceled on the phone. Run rhr again to retry.'
+              : '${kind == UpdateKind.app ? 'App installation' : 'Player update'} failed on the phone: $detail',
         );
       }
       // Other states ("receiving") are informational; keep waiting.
     }
+  }
+
+  /// Continues observing Android after a self-update has requested installation.
+  /// The caller also watches disconnection because replacement kills the player.
+  Future<void> waitForInstallation() async {
+    await _awaitState(
+      {'installed'},
+      timeout: const Duration(minutes: 10),
+      onTimeout: 'Installation was not confirmed. Check the phone and retry.',
+    );
   }
 
   void close() {

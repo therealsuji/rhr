@@ -140,7 +140,10 @@ class _SessionCodeFormatter extends TextInputFormatter {
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
-    final text = formatSessionCodeInput(newValue.text);
+    final input = newValue.text.toLowerCase();
+    final text = 'rhr-'.startsWith(input)
+        ? input
+        : formatSessionCodeInput(input);
     return TextEditingValue(
       text: text,
       selection: TextSelection.collapsed(offset: text.length),
@@ -190,9 +193,9 @@ class SessionCodeField extends StatelessWidget {
   final String? errorText;
 
   Future<void> _scan(BuildContext context) async {
-    final raw = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const ScannerScreen()),
-    );
+    final raw = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const ScannerScreen()));
     if (raw == null) return;
     // An account invitation and a session code arrive through the same
     // camera, so which one this is decides what happens next.
