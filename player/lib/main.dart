@@ -21,9 +21,13 @@ import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import 'account_join.dart';
 import 'connector.dart';
 import 'session_code_field.dart';
+import 'update_check.dart';
 
 const _relayUrl = String.fromEnvironment(
   'RHR_RELAY',
@@ -89,6 +93,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   // Hidden QA entry: tap the footer 7× to open the fault-injection sheet.
   int _debugTaps = 0;
 
+  /// This build's version, shown in the footer. Null until read.
+  String? _installedVersion;
+  bool _checkingUpdate = false;
+
   /// Whether the code field is on screen.
   ///
   /// Joining is how this is used now, so the code is a way in round the back:
@@ -143,6 +151,40 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       _waitOnAccountRendezvous();
     });
     _collectLinkInvite();
+    _readInstalledVersion();
+  }
+
+  /// Reads this build's version for the footer.
+  ///
+  /// A release APK carries the release version, stamped by the release
+  /// workflow; a locally built one carries player/pubspec.yaml's. Either
+  /// way the tester can say which player they are holding, which they could
+  /// not do before.
+  Future<void> _readInstalledVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (!mounted) return;
+      setState(() => _installedVersion = info.version);
+    } catch (_) {
+      // Not worth telling the tester about: the footer simply keeps its
+      // version-less wording.
+    }
+  }
+
+  /// Compares this build with the newest GitHub release, on request.
+  ///
+  /// Manual, never on a timer: a tester's phone may be on cellular, and the
+  /// answer is only interesting when someone is asking.
+  Future<void> _checkForUpdate() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    final status = await checkForUpdate(
+      installedVersion: () async =>
+          _installedVersion ?? (await PackageInfo.fromPlatform()).version,
+    );
+    if (!mounted) return;
+    setState(() => _checkingUpdate = false);
+    _showUpdateResult(status);
   }
 
   @override
@@ -548,11 +590,34 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                             children: [
                               GestureDetector(
                                 onTap: _onFooterTap,
-                                child: const Text(
-                                  'rhr player · debug build',
-                                  style: TextStyle(
+                                child: Text(
+                                  // Which build is this? Nobody could answer
+                                  // that from the phone before: every release
+                                  // reported the same 0.1.0.
+                                  _installedVersion == null
+                                      ? 'rhr player · debug build'
+                                      : 'rhr player $_installedVersion · debug',
+                                  style: const TextStyle(
                                     color: _hintColor,
                                     fontSize: 11,
+                                  ),
+                                ),
+                              ),
+                              const Text(
+                                ' · ',
+                                style: TextStyle(
+                                  color: _hintColor,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: _checkForUpdate,
+                                child: Text(
+                                  _checkingUpdate ? 'Checking…' : 'Updates',
+                                  style: const TextStyle(
+                                    color: _hintColor,
+                                    fontSize: 11,
+                                    decoration: TextDecoration.underline,
                                   ),
                                 ),
                               ),
@@ -844,6 +909,60 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     (Icons.cleaning_services_rounded, 'Clear cached apps', 'clear-cache'),
     (Icons.refresh_rounded, 'Reset state', 'clear'),
   ];
+
+  /// Says what the check found, and offers the release page when there is
+  /// something to go and get.
+  ///
+  /// Opening the browser rather than downloading here is deliberate: the APK
+  /// is over 100 MB, and Chrome already handles a transfer that size, with
+  /// resume, better than a first attempt in this app would.
+  void _showUpdateResult(UpdateStatus status) {
+    final (title, body, showOpen) = switch (status) {
+      UpToDate(:final version) => (
+        'Up to date',
+        'This phone is running the newest player ($version).',
+        false,
+      ),
+      UpdateAvailable(:final installed, :final latest) => (
+        'Update available',
+        'This phone has $installed. The newest release is $latest.\n\n'
+            'Opening the release page downloads the APK; Android will ask '
+            'before installing it.',
+        true,
+      ),
+      UpdateCheckFailed(:final reason) => ('Could not check', reason, false),
+    };
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: _surface,
+        title: Text(title, style: const TextStyle(color: _ink, fontSize: 17)),
+        content: Text(
+          body,
+          style: const TextStyle(color: _inkDim, fontSize: 14, height: 1.35),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: TextButton.styleFrom(foregroundColor: _inkDim),
+            child: Text(showOpen ? 'Not now' : 'OK'),
+          ),
+          if (showOpen)
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                launchUrl(
+                  Uri.parse(releasesPage),
+                  mode: LaunchMode.externalApplication,
+                );
+              },
+              style: TextButton.styleFrom(foregroundColor: _violet),
+              child: const Text('Open releases'),
+            ),
+        ],
+      ),
+    );
+  }
 
   void _showDebugSheet() {
     showModalBottomSheet<void>(

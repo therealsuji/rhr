@@ -48,11 +48,18 @@ jobs:
           flutter pub get
           VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' ../cli/pubspec.yaml)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # Stamp the release version into the APK. Without --build-name the
+          # player reports player/pubspec.yaml's "0.1.0" for every release, so
+          # beta.6, .7 and .8 are indistinguishable on the phone — and the
+          # in-app update check has nothing to compare against. $VERSION comes
+          # from cli/pubspec.yaml above, which stays the single source.
           if [ -n "$RELAY" ]; then
             echo "Baking relay: $RELAY"
-            flutter build apk --debug --target-platform android-arm64 --dart-define=RHR_RELAY="$RELAY"
+            flutter build apk --debug --target-platform android-arm64 \
+              --build-name="$VERSION" --dart-define=RHR_RELAY="$RELAY"
           else
-            flutter build apk --debug --target-platform android-arm64
+            flutter build apk --debug --target-platform android-arm64 \
+              --build-name="$VERSION"
           fi
           mkdir -p release
           APK="rhr-player-${VERSION}-android-arm64.apk"
