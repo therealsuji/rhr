@@ -2,7 +2,9 @@ package dev.rhr.rhr_player
 
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -21,6 +23,9 @@ class MainActivity : FlutterActivity() {
 
 	/** Resumed once the POST_NOTIFICATIONS prompt is answered, either way. */
 	private var pendingAfterNotificationPrompt: (() -> Unit)? = null
+
+	/** Debug-only adb entry point for the QA faults; null on a release build. */
+	private var debugFaultReceiver: DebugFaultReceiver? = null
 
 	companion object {
 		private const val REQ_POST_NOTIFICATIONS = 4801
@@ -46,6 +51,34 @@ class MainActivity : FlutterActivity() {
 		RhrSessionService.updateHandlerFactory = { ctx, sendText, sendBinary ->
 			RhrPlayerUpdater(ctx, sendText, sendBinary)
 		}
+		registerDebugFaultReceiver()
+	}
+
+	/**
+	 * Lets adb drive the QA faults on a debug build. See [DebugFaultReceiver].
+	 *
+	 * On the Activity rather than the session service, because the service
+	 * only exists while a session is running — and the resting lobby, where
+	 * no service is alive, is exactly where a banner test starts. Registered
+	 * there, every fault injected before the first connection reached
+	 * nothing, while `am broadcast` still reported success.
+	 *
+	 * In code rather than the manifest so a release build has nothing to
+	 * export, and gated on the host's debuggable flag.
+	 */
+	private fun registerDebugFaultReceiver() {
+		if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+		if (debugFaultReceiver != null) return
+		val receiver = DebugFaultReceiver()
+		val filter = IntentFilter(DebugFaultReceiver.ACTION)
+		if (Build.VERSION.SDK_INT >= 33) {
+			// An adb broadcast comes from outside this app, so the receiver
+			// must be exported — which is why it is debug-only.
+			registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+		} else {
+			registerReceiver(receiver, filter)
+		}
+		debugFaultReceiver = receiver
 	}
 
 	override fun provideFlutterEngine(context: Context): FlutterEngine? = sessionEngine
@@ -86,6 +119,10 @@ class MainActivity : FlutterActivity() {
 	override fun onDestroy() {
 		overlay?.detach()
 		overlay = null
+		debugFaultReceiver?.let {
+			try { unregisterReceiver(it) } catch (_: IllegalArgumentException) {}
+		}
+		debugFaultReceiver = null
 		super.onDestroy()
 	}
 

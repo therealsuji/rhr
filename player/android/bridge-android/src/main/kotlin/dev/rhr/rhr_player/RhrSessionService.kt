@@ -6,10 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.FileObserver
 import android.os.IBinder
 import android.system.Os
@@ -309,8 +306,6 @@ class RhrSessionService : Service() {
 	// relay WebSocket in the foreground service, never in the guest Flutter
 	// engine, so hot restart cannot destroy the peer connection.
 	private var directTransport: RhrDirectTransport? = null
-	// Debug-only adb entry point for the QA faults; null on a release build.
-	private var debugFaultReceiver: DebugFaultReceiver? = null
 	private var preferDirect = false
 	@Volatile private var directFailureReported = false
 	// Over-the-wire APK-update receiver, provided by the HOST app (the
@@ -340,31 +335,6 @@ class RhrSessionService : Service() {
 	override fun onCreate() {
 		super.onCreate()
 		RhrSessionService.current = this
-		registerDebugFaultReceiver()
-	}
-
-	/**
-	 * Lets adb drive the QA faults on a debug build. See [DebugFaultReceiver].
-	 *
-	 * Registered in code rather than the manifest so there is nothing to
-	 * export from a release build, and gated on the host's debuggable flag
-	 * rather than a BuildConfig this library module does not have.
-	 */
-	private fun registerDebugFaultReceiver() {
-		val debuggable =
-			applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
-		if (!debuggable) return
-		if (debugFaultReceiver != null) return
-		val receiver = DebugFaultReceiver()
-		val filter = IntentFilter(DebugFaultReceiver.ACTION)
-		if (Build.VERSION.SDK_INT >= 33) {
-			// An adb broadcast comes from outside this app, so the receiver
-			// has to be exported — which is exactly why it is debug-only.
-			registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-		} else {
-			registerReceiver(receiver, filter)
-		}
-		debugFaultReceiver = receiver
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -498,10 +468,6 @@ class RhrSessionService : Service() {
 		directTransport?.close()
 		directTransport = null
 		devfsObserver?.stopWatching()
-		debugFaultReceiver?.let {
-			try { unregisterReceiver(it) } catch (_: IllegalArgumentException) {}
-		}
-		debugFaultReceiver = null
 		if (RhrSessionService.current === this) RhrSessionService.current = null
 		super.onDestroy()
 	}
