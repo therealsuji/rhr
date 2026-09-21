@@ -82,7 +82,29 @@ Map<String, dynamic> _localCompatibility() {
     'dartSdkVersion': json['dartSdkVersion'],
     'channel': json['channel'],
     'androidPlugins': <String, dynamic>{},
-    'androidPermissions': <String>[],
+    // What the real player's manifest declares. Claiming none made the
+    // compatibility gate block every project on the spot — every Flutter app
+    // needs INTERNET — so the gate could never be observed PASSING, which is
+    // half of what it does. Keep this in step with
+    // player/android/app/src/main/AndroidManifest.xml.
+    'androidPermissions': const <String>[
+      'android.permission.ACCESS_COARSE_LOCATION',
+      'android.permission.ACCESS_FINE_LOCATION',
+      'android.permission.BLUETOOTH',
+      'android.permission.BLUETOOTH_ADMIN',
+      'android.permission.BLUETOOTH_CONNECT',
+      'android.permission.BLUETOOTH_SCAN',
+      'android.permission.CAMERA',
+      'android.permission.FOREGROUND_SERVICE',
+      'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+      'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
+      'android.permission.INTERNET',
+      'android.permission.POST_NOTIFICATIONS',
+      'android.permission.READ_EXTERNAL_STORAGE',
+      'android.permission.REQUEST_INSTALL_PACKAGES',
+      'android.permission.SYSTEM_ALERT_WINDOW',
+      'android.permission.WRITE_EXTERNAL_STORAGE',
+    ],
   };
 }
 
