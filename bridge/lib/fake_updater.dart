@@ -91,6 +91,19 @@ class FakeUpdater implements RhrUpdateHandler {
 
   @override
   void handleBegin(Map<String, dynamic> message) {
+    // A handler outlives its transfer: the bridge builds one per session and
+    // a session can carry several updates — a player update, then the
+    // project's own APK. Without this reset the second transfer inherited
+    // `_finished` from the first, handleData discarded every byte it was
+    // given, and the commit waited for a stream that was being thrown away.
+    _finished = false;
+    _commitRequested = false;
+    _wireBytes = 0;
+    _verifiedBytes = 0;
+    _decoded.clear();
+    _inflateInput = null;
+    _inflateDone = null;
+
     _transferId = message['id'] as int? ?? 0;
     _expectedSize = message['size'] as int? ?? 0;
     _expectedSha = message['sha256'] as String? ?? '';

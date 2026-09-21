@@ -28,8 +28,11 @@ import 'package:test/test.dart';
 final class _LoopbackTransport implements SessionTransport {
   _LoopbackTransport();
 
-  late final PlayerUpdateSender sender;
-  late final FakeUpdater device;
+  // Not `final`: one session can carry two transfers, each with its own
+  // sender, against the same device handler — which is what the
+  // second-transfer test below exercises.
+  late PlayerUpdateSender sender;
+  late FakeUpdater device;
 
   /// Every progress-bearing call the CLI would make, as (done, total).
   final progress = <({int done, int total})>[];
@@ -212,6 +215,50 @@ void main() {
   test('a player payload surfaces pending_user as its own outcome', () async {
     final result = await run(installs: FakeInstallOutcome.pendingUser);
     expect(result.outcome, PlayerUpdateOutcome.pendingUser);
+  });
+
+  test('a second transfer on the same handler still completes', () async {
+    // A session can carry two updates — a player update, then the project's
+    // own APK when the first one turns out not to be enough. The bridge
+    // builds ONE handler per session and hands both to it, so a handler that
+    // treats itself as spent after the first leaves the second's bytes on
+    // the floor and the commit waiting on a stream nobody is reading.
+    //
+    // Found on hardware, in this stand-in rather than the product: the
+    // Android updater already resets itself per transfer and this did not,
+    // which is exactly the divergence a stand-in must not have.
+    final transport = _LoopbackTransport();
+    transport.device = FakeUpdater(
+      sendText: transport.deviceSays,
+      outcome: FakeInstallOutcome.installed,
+      acceptGzip: true,
+      confirmDelay: const Duration(milliseconds: 10),
+    );
+
+    for (final attempt in ['first', 'second']) {
+      // kind=app is the one that waits past the install sheet for a terminal
+      // "installed", and it is also the real sequence: a player update first,
+      // then the project's own APK when the player cannot host it.
+      transport.sender = PlayerUpdateSender(
+        transport,
+        kind: UpdateKind.app,
+        target: 'dev.rhrtest.native_skew',
+      );
+      transport.progress.clear();
+      final outcome = await transport.sender.send(
+        apk,
+        onProgress: (done, total) =>
+            transport.progress.add((done: done, total: total)),
+      );
+      transport.sender.close();
+      expect(
+        outcome,
+        PlayerUpdateOutcome.installed,
+        reason: 'the $attempt transfer did not finish',
+      );
+      expect(transport.progress.last.done, transport.progress.last.total);
+      expect(transport.device.decodedBytes, apkBytes.length);
+    }
   });
 
   test('a refused install fails with the device\'s reason', () async {
