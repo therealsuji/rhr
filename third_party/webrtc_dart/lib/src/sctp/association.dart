@@ -317,7 +317,7 @@ class SctpAssociation {
   /// Handle incoming SCTP packet
   Future<void> handlePacket(Uint8List data) async {
     _log.fine(' handlePacket: ${data.length} bytes, state=$_state');
-    _log.fine(
+    _log.fine(() =>
         '[SCTP]   first 16 bytes: ${data.take(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
 
     final packet = SctpPacket.parse(data);
@@ -463,9 +463,7 @@ class SctpAssociation {
     );
     final data = packet.serialize();
     if (chunk.type == SctpChunkType.data) {
-      _log.fine('[SCTP] _sendChunk DATA: ${data.length} bytes');
-      _log.fine(
-          '[SCTP] _sendChunk DATA hex: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
+      _log.fine(() => '[SCTP] _sendChunk DATA: ${data.length} bytes');
     }
     await onSendPacket(data);
   }

@@ -16,10 +16,8 @@ final class DirectTransportFailure implements Exception {
 
   /// Whether retrying could plausibly succeed.
   ///
-  /// A relay socket that drops mid-negotiation says nothing about whether a
-  /// direct path is possible — the next attempt usually gets one. A refusal
-  /// from the device, or a payload path that failed after being established,
-  /// is a real answer and retrying only spins.
+  /// Network and data-channel failures can recover with a new connection.
+  /// Protocol violations remain fatal.
   final bool transient;
 
   @override
@@ -94,12 +92,8 @@ final class DirectSessionTransport implements SessionTransport {
             transient: true,
           );
         } else if (state == PeerConnectionState.failed) {
-          // Before the data channel ever opened this is ICE finding no
-          // pair, which on the same network and candidates succeeds on the
-          // next offer often enough to be worth one (seen on the SM-A566B:
-          // one failure between runs that connected in under a second).
-          // After it opened it is a path that was working and died.
-          _fail('direct WebRTC connection failed', transient: _stage != 'open');
+          // An established path can also recover after a network interruption.
+          _fail('direct WebRTC connection failed', transient: true);
         }
       });
       _relaySubscription = _relay.controlStream.listen(
@@ -178,8 +172,9 @@ final class DirectSessionTransport implements SessionTransport {
     } on Object catch (error, stack) {
       final failure = DirectTransportFailure(
         'direct WebRTC payload send failed: $error',
+        transient: true,
       );
-      _fail(failure.message, stack: stack);
+      _fail(failure.message, stack: stack, transient: true);
       throw failure;
     }
   }
@@ -217,10 +212,14 @@ final class DirectSessionTransport implements SessionTransport {
           }),
         );
       case _DeviceInfo():
-        _offerTimer ??= Timer(
-          offerTimeout,
-          () => _fail('device did not offer a direct WebRTC payload path'),
-        );
+        if (_pendingOffer == null && !_directReady)
+          _offerTimer ??= Timer(
+            offerTimeout,
+            () => _fail(
+              'device did not offer a direct WebRTC payload path',
+              transient: true,
+            ),
+          );
         if (!_events.isClosed) _events.add(message);
       case _ApplicationControl():
         if (!_events.isClosed) _events.add(message);
@@ -242,7 +241,10 @@ final class DirectSessionTransport implements SessionTransport {
         _pendingOffer = signal;
         _candidateTimer ??= Timer(
           connectionTimeout,
-          () => _fail('device did not finish gathering direct ICE candidates'),
+          () => _fail(
+            'device did not finish gathering direct ICE candidates',
+            transient: true,
+          ),
         );
         await _startNegotiationWhenReady();
       case DirectCandidateSignal():
@@ -253,12 +255,11 @@ final class DirectSessionTransport implements SessionTransport {
         _candidateTimer?.cancel();
         await _startNegotiationWhenReady();
       case DirectErrorSignal(:final message):
-        // The device reports the same ICE verdict from its side; before the
-        // channel opened it is the same retryable negotiation failure.
+        // Recreate the channel after a failure reported by the phone.
         _fail(
           'device direct transport failed: $message',
           notifyPeer: false,
-          transient: _stage != 'open',
+          transient: true,
         );
     }
   }

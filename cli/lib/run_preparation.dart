@@ -10,6 +10,7 @@ import 'player_builder.dart';
 import 'player_update.dart';
 import 'project_apk.dart';
 import 'relay_race.dart';
+import 'terminal_io.dart';
 
 enum RunRoute { player, app }
 
@@ -160,7 +161,10 @@ final class RunPreparation {
     }
     stderr.write('[rhr] Continue? [y/N] ');
     final answer = (await _connected(
-      stdin.transform(utf8.decoder).transform(const LineSplitter()).first,
+      terminalInput
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .first,
     )).trim().toLowerCase();
     if (answer != 'y' && answer != 'yes')
       throw StateError('Preparation canceled. No installation was started.');

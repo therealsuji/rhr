@@ -57,39 +57,54 @@ void main() {
     await transport.close();
   });
 
-  test('missing direct offer fails without a relay payload fallback', () async {
-    final relay = _FakeControlTransport();
-    final transport = DirectSessionTransport(
-      relay,
-      offerTimeout: const Duration(milliseconds: 20),
-    );
-    final errors = <Object>[];
-    final subscription = transport.stream.listen(
-      (_) {},
-      onError: (Object error) => errors.add(error),
-    );
+  test(
+    'missing direct offer is recoverable without a relay payload fallback',
+    () async {
+      final relay = _FakeControlTransport();
+      final transport = DirectSessionTransport(
+        relay,
+        offerTimeout: const Duration(milliseconds: 20),
+      );
+      final errors = <Object>[];
+      final subscription = transport.stream.listen(
+        (_) {},
+        onError: (Object error) => errors.add(error),
+      );
 
-    relay.controller.add(
-      jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}),
-    );
+      relay.controller.add(
+        jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}),
+      );
 
-    await expectLater(
-      transport.payloadReady,
-      throwsA(isA<DirectTransportFailure>()),
-    );
-    await expectLater(
-      transport.sendPayload(Uint8List.fromList([1, 2, 3])),
-      throwsA(isA<DirectTransportFailure>()),
-    );
-    expect(errors, contains(isA<DirectTransportFailure>()));
-    expect(
-      relay.sent.map((message) => jsonDecode(message)['t']),
-      contains('direct_error'),
-    );
+      await expectLater(
+        transport.payloadReady,
+        throwsA(
+          isA<DirectTransportFailure>().having(
+            (e) => e.transient,
+            'recoverable',
+            isTrue,
+          ),
+        ),
+      );
+      await expectLater(
+        transport.sendPayload(Uint8List.fromList([1, 2, 3])),
+        throwsA(
+          isA<DirectTransportFailure>().having(
+            (e) => e.transient,
+            'recoverable',
+            isTrue,
+          ),
+        ),
+      );
+      expect(errors, contains(isA<DirectTransportFailure>()));
+      expect(
+        relay.sent.map((message) => jsonDecode(message)['t']),
+        contains('direct_error'),
+      );
 
-    await subscription.cancel();
-    await transport.close();
-  });
+      await subscription.cancel();
+      await transport.close();
+    },
+  );
 
   // A dead WebRTC payload path used to veto control traffic, which rides the
   // relay and never touches WebRTC. That took out the farewell (dev_gone), the
@@ -164,7 +179,10 @@ void main() {
     'waits for end-of-candidates before answering an offer',
     () async {
       final relay = _FakeControlTransport();
-      final transport = DirectSessionTransport(relay);
+      final transport = DirectSessionTransport(
+        relay,
+        offerTimeout: const Duration(milliseconds: 20),
+      );
       final subscription = transport.stream.listen((_) {}, onError: (_) {});
       late final DirectWebRtcPeer device;
       final offerSent = Completer<void>();
@@ -205,6 +223,11 @@ void main() {
 
       relay.controller.add(const DirectEndSignal().encode());
       await transport.payloadReady.timeout(const Duration(seconds: 10));
+      relay.controller.add(
+        jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await transport.sendPayload(Uint8List.fromList([2, 0, 0, 0, 1]));
 
       await subscription.cancel();
       await transport.close();

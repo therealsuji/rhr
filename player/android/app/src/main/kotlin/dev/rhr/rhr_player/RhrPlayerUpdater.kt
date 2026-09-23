@@ -55,6 +55,8 @@ class RhrPlayerUpdater(
 		@Volatile var active: RhrPlayerUpdater? = null
 	}
 
+	@Volatile var installSessionId: Int? = null
+		private set
 	private var transferId = 0
 	private var expectedSize = 0L
 	private var expectedSha256 = ""
@@ -93,6 +95,7 @@ class RhrPlayerUpdater(
 		}
 		synchronized(this) {
 			closeQuietly()
+			installSessionId = null
 			transferId = id
 			expectedSize = size
 			expectedSha256 = sha
@@ -253,7 +256,12 @@ class RhrPlayerUpdater(
 						PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
 				}
 			}
+			// A replacement transfer supersedes this installer's unfinished prompts.
+			for (previous in installer.mySessions) {
+				installer.abandonSession(previous.sessionId)
+			}
 			val sessionId = installer.createSession(params)
+			installSessionId = sessionId
 			installer.openSession(sessionId).use { session ->
 				session.openWrite("player.apk", 0, apk.length()).use { out ->
 					apk.inputStream().use { it.copyTo(out) }
@@ -266,6 +274,7 @@ class RhrPlayerUpdater(
 				if (foreign) Thread.sleep(500)
 				val intent = Intent(context, UpdateResultReceiver::class.java)
 					.setAction(UpdateResultReceiver.ACTION)
+					.putExtra("rhr.installSessionId", sessionId)
 				val pending = PendingIntent.getBroadcast(
 					context,
 					sessionId,
@@ -355,6 +364,9 @@ class UpdateResultReceiver : BroadcastReceiver() {
 	}
 
 	override fun onReceive(context: Context, intent: Intent) {
+		val sessionId = intent.getIntExtra("rhr.installSessionId", -1)
+		val updater = RhrPlayerUpdater.active?.takeIf { it.installSessionId == sessionId }
+		if (updater == null) return
 		val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)
 		when (status) {
 			PackageInstaller.STATUS_PENDING_USER_ACTION -> {
@@ -362,7 +374,7 @@ class UpdateResultReceiver : BroadcastReceiver() {
 				val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
 				if (confirm != null) {
 					confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-					RhrPlayerUpdater.active?.onPendingUser()
+					updater.onPendingUser()
 					context.startActivity(confirm)
 				}
 			}
@@ -370,12 +382,12 @@ class UpdateResultReceiver : BroadcastReceiver() {
 				// Unreachable for self-updates (the process dies first), but
 				// THE terminal state for foreign packages (kind=app): the
 				// delivered app installed successfully.
-				RhrPlayerUpdater.active?.onInstalled()
+				updater.onInstalled()
 			}
 			else -> {
 				val message = intent.getStringExtra(
 					PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "status $status"
-				RhrPlayerUpdater.active?.onInstallFailed(message)
+				updater.onInstallFailed(message)
 			}
 		}
 	}

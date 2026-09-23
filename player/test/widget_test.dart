@@ -120,6 +120,14 @@ void main() {
   });
 
   group('parseSessionPayload', () {
+    test('reads a session deep link', () {
+      final entry = parseSessionPayload(
+        'rhr://connect?code=rhr-abcd-efgh-jkmn&relay=wss%3A%2F%2Fone.example&relay=ws%3A%2F%2F192.168.1.5%3A8123',
+      );
+      expect(entry.code, 'rhr-abcd-efgh-jkmn');
+      expect(entry.relay, 'wss://one.example');
+      expect(entry.fallbackRelays, ['ws://192.168.1.5:8123']);
+    });
     test('reads a code and its relay list', () {
       final entry = parseSessionPayload(
         '{"code":"rhr-abcd-efgh-jkmn",'

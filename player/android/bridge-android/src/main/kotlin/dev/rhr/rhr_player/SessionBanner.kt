@@ -66,6 +66,8 @@ data class SessionBanner(
 			stalled: Boolean = false,
 			foreignApp: Boolean = false,
 		): SessionBanner = when (phase) {
+			"reload_complete" -> SessionBanner("App updated", 1000, Style.DETERMINATE)
+			"reload_failed" -> SessionBanner("Could not update the app. Check the developer’s terminal.", null, Style.FAILED, failure = "Reload failed")
 			"ready" -> SessionBanner("Your app is running", null, Style.HIDDEN)
 			"checking", "launching" -> SessionBanner(message, null, Style.BUSY)
 			"setup", "approval" -> SessionBanner(message, null, Style.WAITING)

@@ -125,7 +125,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _pollStatus();
-    SharedPreferences.getInstance().then((prefs) {
+    SharedPreferences.getInstance().then((prefs) async {
+      if (await _collectLinkInvite() || !mounted || _code.text.isNotEmpty) {
+        return;
+      }
       final saved = prefs.getString('rhr_session_code');
       final savedRelays = prefs.getStringList('rhr_relay_urls');
       final autoResume = prefs.getBool('rhr_auto_resume') ?? true;
@@ -152,7 +155,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       // nothing stays on the lobby, which is what keeps the code path whole.
       _waitOnAccountRendezvous();
     });
-    _collectLinkInvite();
     _readInstalledVersion();
   }
 
@@ -248,16 +250,17 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     });
   }
 
-  /// Live status label + dot color for the brand row and session card.
-  ///
-  /// The words come from the native [SessionBanner], so an update in flight
-  /// reads as an update here and not as a connection being made. Only the
-  /// colour is decided locally — it is presentation, and the banner's style
-  /// does not need to know this screen's palette.
+  /// Connection summary. Operation progress belongs to the native overlay.
   (String, Color) get _statusDisplay {
     if (!_active) return ('Ready to connect', _inkDim);
     return (
-      _banner?.label ?? 'Connecting…',
+      switch (_nativeStatus) {
+        'connected' => 'Connected',
+        'waiting_dev' => 'Waiting for developer',
+        'retrying' || 'closed' => 'Reconnecting',
+        'rejected' => 'Connection unavailable',
+        _ => 'Connecting…',
+      },
       switch (_nativeStatus) {
         'connected' => _ok,
         'rejected' => _err,
@@ -284,6 +287,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
 
   /// Handles what the native side pushes to the lobby.
   Future<dynamic> lobbyChannelHandler(MethodCall call) async {
+    if (call.method == 'sessionLinkArrived' && mounted) {
+      unawaited(_onSessionLink('${call.arguments}'));
+      return true;
+    }
     if (call.method != 'inviteArrived' || !mounted) return null;
     final invite = parseAccountInvite('${call.arguments}');
     if (invite != null) await _onInvite(invite);
@@ -295,17 +302,67 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// Same payload a QR carries, so it lands on the same consent screen: the
   /// difference is only how it reached the phone. A link can travel however a
   /// team already talks, where a QR needs both people in one room.
-  Future<void> _collectLinkInvite() async {
+  Future<bool> _collectLinkInvite() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return false;
     const channel = MethodChannel('rhr/connector');
     // A link that arrives while the player is already open is pushed rather
     // than polled, since there is no launch to read it from. Named so the
     // connector screen can put it back when it leaves — it takes this same
     // channel over while it is open.
     channel.setMethodCallHandler(lobbyChannelHandler);
+    final link = await channel.invokeMethod<String>('pendingSessionLink');
+    if (link != null && mounted) {
+      await _onSessionLink(link);
+      return true;
+    }
     final payload = await channel.invokeMethod<String>('pendingInvite');
-    if (payload == null || !mounted) return;
+    if (payload == null || !mounted) return false;
     final invite = parseAccountInvite(payload);
     if (invite != null) await _onInvite(invite);
+    return invite != null;
+  }
+
+  Future<void> _onSessionLink(String raw) async {
+    SessionCodeEntry entry;
+    try {
+      entry = parseSessionPayload(raw);
+    } on FormatException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+      return;
+    }
+    if (!mounted) return;
+    final relays = [entry.relay, ...entry.fallbackRelays];
+    final sameSession =
+        _code.text == entry.code &&
+        listEquals([_relay, ..._fallbackRelays], relays);
+    if (_active && !sameSession) {
+      final change = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Switch sessions?'),
+          content: const Text(
+            'Disconnect from the current developer and connect to this link?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Stay here'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Switch'),
+            ),
+          ],
+        ),
+      );
+      if (change != true || !mounted) return;
+    }
+    _code.text = entry.code;
+    await _onScanned(entry);
   }
 
   /// Waits on this phone's own rendezvous, when it belongs to an account.
@@ -689,6 +746,11 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         context,
       ).push<String>(MaterialPageRoute(builder: (_) => const ScannerScreen()));
       if (raw == null || !mounted) return;
+      if (raw.startsWith('rhr:') ||
+          raw.startsWith('https://getrhr.dev/connect')) {
+        await _onSessionLink(raw);
+        return;
+      }
       final invite = parseAccountInvite(raw);
       if (invite != null) {
         await _onInvite(invite);
@@ -779,7 +841,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
             _activeStatusCopy(),
             style: const TextStyle(color: _ink, fontSize: 13.5, height: 1.35),
           ),
-          ..._updateProgress(),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -808,31 +869,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         ],
       ),
     );
-  }
-
-  /// The bar for an update in flight, or nothing.
-  ///
-  /// A player or app build runs for minutes on the developer's machine, and
-  /// the transfer for a minute more. The lobby showed none of it — the phone
-  /// had the phase all along and only the native overlay ever drew it, so a
-  /// tester looking at this screen saw a session that had simply gone quiet.
-  List<Widget> _updateProgress() {
-    final banner = _banner;
-    if (banner == null || !banner.visible) return const [];
-    final progress = banner.progress;
-    return [
-      const SizedBox(height: 12),
-      ClipRRect(
-        borderRadius: BorderRadius.circular(3),
-        child: LinearProgressIndicator(
-          // A known size gives a real bar; a build gives a moving one.
-          value: progress == null ? null : progress / 1000,
-          minHeight: 4,
-          backgroundColor: _surfaceHi,
-          valueColor: const AlwaysStoppedAnimation(_violet),
-        ),
-      ),
-    ];
   }
 
   /// Recoverable failures (can't reach relay / session not found) get an
@@ -1015,8 +1051,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   }
 
   String _activeStatusCopy() {
-    final banner = _banner;
-    if (banner != null) return banner.label;
     switch (_nativeStatus) {
       case 'connected':
         return 'Connected to your developer. RHR is preparing your app.';

@@ -171,6 +171,9 @@ class _ConnectorScreenState extends State<ConnectorScreen>
 
   Future<dynamic> _onNative(MethodCall call) async {
     if (!mounted) return null;
+    if (call.method == 'sessionLinkArrived' || call.method == 'inviteArrived') {
+      return widget.restoreHandler?.call(call);
+    }
     switch (call.method) {
       case 'progress':
         // Discovery narrates itself; surfacing it is the difference between

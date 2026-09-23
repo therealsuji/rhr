@@ -41,10 +41,13 @@ class MainActivity : FlutterActivity() {
 
 	/** An `rhr://` invitation this launch carried, until Dart collects it. */
 	private var pendingInvite: String? = null
+	private var pendingSessionLink: String? = null
 
 	override fun onCreate(savedInstanceState: Bundle?) {
+		val reusedEngine = sessionEngine != null
 		super.onCreate(savedInstanceState)
 		readInvite(intent)
+		if (reusedEngine) Handler(Looper.getMainLooper()).post { deliverSessionLink() }
 		// The library owns the tunnel; the player owns the over-the-wire
 		// self-update (PackageInstaller). Registered before any session can
 		// start so an update arriving mid-session always has a handler.
@@ -90,6 +93,7 @@ class MainActivity : FlutterActivity() {
 		super.onNewIntent(intent)
 		// A link that arrives while the player is already open.
 		readInvite(intent)
+		deliverSessionLink()
 		if (pendingInvite != null) {
 			connector.invokeMethod("inviteArrived", pendingInvite)
 			pendingInvite = null
@@ -104,17 +108,66 @@ class MainActivity : FlutterActivity() {
 	 */
 	private fun readInvite(intent: Intent?) {
 		val data = intent?.data ?: return
+		if (data.scheme == "rhr" && data.host == "connect") {
+			pendingSessionLink = data.toString()
+			return
+		}
 		if (data.scheme != "rhr" || data.host != "join") return
 		pendingInvite = data.getQueryParameter("payload")
 	}
 
+	private fun deliverSessionLink() {
+		val link = pendingSessionLink ?: return
+		val handler = Handler(Looper.getMainLooper())
+		var answered = false
+		val restoreLobby = Runnable {
+			if (!answered && pendingSessionLink == link && !isFinishing && !isDestroyed) {
+				answered = true
+				// A guest may buffer the channel call forever because its kernel has no lobby handler.
+				android.app.AlertDialog.Builder(this@MainActivity)
+					.setTitle("Open RHR connection?")
+					.setMessage("This leaves the running preview and returns to RHR to open the link.")
+					.setNegativeButton("Stay here") { _, _ -> pendingSessionLink = null }
+					.setPositiveButton("Open RHR") { _, _ ->
+						val restart = Intent.makeRestartActivityTask(componentName)
+						restart.action = Intent.ACTION_VIEW
+						restart.data = android.net.Uri.parse(link)
+						startService(Intent(this@MainActivity, RhrSessionService::class.java).putExtra("cmd", "stop"))
+						startActivity(restart)
+						finishAffinity()
+						Runtime.getRuntime().exit(0)
+					}.show()
+			}
+		}
+		handler.postDelayed(restoreLobby, 2000)
+		connector.invokeMethod("sessionLinkArrived", link, object : MethodChannel.Result {
+			override fun success(result: Any?) {
+				if (result == true) {
+					answered = true
+					handler.removeCallbacks(restoreLobby)
+					if (pendingSessionLink == link) pendingSessionLink = null
+				} else restoreLobby.run()
+			}
+			override fun error(code: String, message: String?, details: Any?) { restoreLobby.run() }
+			override fun notImplemented() { restoreLobby.run() }
+		})
+	}
+
 	override fun onPostResume() {
 		super.onPostResume()
+		OverlayService.setPlayerVisible(true)
 		// Attach the native dev overlay above the Flutter surface once the
 		// content view exists. Idempotent-guarded so config changes don't stack.
 		if (overlay == null) {
 			overlay = DevOverlay(this).also { it.attach() }
 		}
+	}
+
+	override fun onPause() {
+		overlay?.detach()
+		overlay = null
+		OverlayService.setPlayerVisible(false)
+		super.onPause()
 	}
 
 	override fun onDestroy() {
@@ -299,6 +352,10 @@ class MainActivity : FlutterActivity() {
 				"pendingInvite" -> {
 					result.success(pendingInvite)
 					pendingInvite = null
+				}
+				"pendingSessionLink" -> {
+					result.success(pendingSessionLink)
+					pendingSessionLink = null
 				}
 				"installationId" -> result.success(InstallationIdentity.id(this))
 				// Proves this installation is itself. The id alone is public —

@@ -131,8 +131,8 @@ class RhrSessionService : Service() {
 
 		// Deliberate fault injection for QA / state-machine testing. Hidden
 		// behind the dev menu's "Test faults" section; not reachable by normal
-		// users. "relay-loss" is real (closes the live socket → genuine
-		// onFailure/retry path); the others force a status/phase for UI checks.
+		// users. Transport faults close live connections; status and phase
+		// faults only change the UI state.
 		fun debugInjectFault(name: String) {
 			when (name) {
 				"clear" -> {
@@ -140,6 +140,12 @@ class RhrSessionService : Service() {
 					status = if (current?.reconnectThread?.isAlive == true) "waiting_dev" else "idle"
 				}
 				"relay-loss" -> current?.ws?.close(4001, "fault: relay loss")
+				"tunnel-loss" -> current?.let { service ->
+					service.sockets.keys.toList().forEach { service.closeChannel(it, notifyPeer = true) }
+				}
+				"direct-loss" -> current?.let { service ->
+					service.ws?.let { service.failDirectSession(it, "fault: direct transport loss") }
+				}
 				"status-retrying" -> status = "retrying"
 				"status-rejected" -> status = "rejected"
 				"status-waiting" -> status = "waiting_dev"
@@ -186,6 +192,8 @@ class RhrSessionService : Service() {
 		// Latest session code / VM URI, surfaced in the native dev menu so the
 		// tester can see them even after the guest app has taken the screen.
 		@Volatile var currentCode: String = ""
+			private set
+		@Volatile var usesExternalVm = false
 			private set
 		@Volatile var currentVm: String = ""
 			private set
@@ -259,12 +267,12 @@ class RhrSessionService : Service() {
 		}
 
 		private fun setProgress(phase: String, done: Int, total: Int) {
+			phaseStalled = false
 			progressPhase = phase
 			progressDone = done
 			progressTotal = total
 			if (phase.isEmpty()) {
 				phaseSetAt = 0L
-				phaseStalled = false
 			} else {
 				phaseSetAt = System.currentTimeMillis()
 			}
@@ -287,6 +295,11 @@ class RhrSessionService : Service() {
 	// Connector mode: the vmUri was handed to us (target app's door) —
 	// never override it from our own process log.
 	@Volatile private var watchOwnVm = true
+		set(value) {
+			field = value
+			usesExternalVm = !value
+			updateListeners.forEach { it() }
+		}
 	@Volatile private var ownVmUri = ""
 	private var projectHint: String? = null
 	private val sockets = ConcurrentHashMap<Int, Socket>()
@@ -441,7 +454,12 @@ class RhrSessionService : Service() {
 			// from their machine — so this asks rather than acts, and the menu
 			// only offers it while a developer is attached to ask.
 			"restart_guest" -> {
-				ws?.send(JSONObject().put("t", "restart_guest").toString())
+				if (status == "connected" && progressPhase != "restarting" && progressPhase != "reloading") {
+					setProgress("restarting", 0, 0)
+					if (ws?.send(JSONObject().put("t", "restart_guest").toString()) != true) {
+						setProgress("reload_failed", 0, 0)
+					}
+				}
 			}
 			"stop" -> {
 				stopped.set(true)
@@ -594,6 +612,8 @@ class RhrSessionService : Service() {
 				.put("androidPermissions", androidPermissions()))
 		.toString()
 
+	private var developerConnectionId: String? = null
+
 	private fun startDirectTransport(webSocket: WebSocket) {
 		directTransport?.close()
 		directTransport = RhrDirectTransport(
@@ -632,7 +652,8 @@ class RhrSessionService : Service() {
 					.put("message", reason)
 					.toString())
 		}
-		webSocket.close(1011, "direct WebRTC failed")
+		// Keep signaling alive so the next developer hello can replace the peer
+		// without waiting for a WebSocket close handshake and relay backoff.
 	}
 
 	private fun androidPermissions(): org.json.JSONArray {
@@ -657,7 +678,7 @@ class RhrSessionService : Service() {
 			var candidateIndex = 0
 			var failuresThisRound = 0
 			while (!stopped.get() && generation == sessionGeneration) {
-				val connected = AtomicBoolean(false)
+				val wasConnected = AtomicBoolean(false)
 				val closed = Object()
 				val relayUrl = relayUrls[candidateIndex % relayUrls.size]
 				candidateIndex = (candidateIndex + 1) % relayUrls.size
@@ -667,7 +688,7 @@ class RhrSessionService : Service() {
 				val socket = client.newWebSocket(req, object : WebSocketListener() {
 					override fun onOpen(webSocket: WebSocket, response: Response) {
 						if (generation != sessionGeneration) return
-						connected.set(true)
+						wasConnected.set(true)
 						directFailureReported = false
 						activeRelayUrl = relayUrl
 						failuresThisRound = 0
@@ -791,7 +812,13 @@ class RhrSessionService : Service() {
 							// device can connect to the relay before the CLI subscribes;
 							// starting here keeps the first offer and ICE candidates on a
 							// live developer stream instead of losing them in the relay.
-							if (preferDirect && directTransport == null) {
+							val connectionId = runRequest?.optString("connectionId")?.takeIf { it.isNotEmpty() }
+							// Abrupt CLI exits do not send dev_gone. A new attempt owns a new peer.
+							if (preferDirect && (directFailureReported || directTransport == null ||
+								(connectionId != null && connectionId != developerConnectionId))) {
+								developerConnectionId = connectionId
+								directFailureReported = false
+								cleanupChannels()
 								startDirectTransport(webSocket)
 							}
 							announceInfo()
@@ -866,7 +893,6 @@ class RhrSessionService : Service() {
 						setProgress("", 0, 0)
 						directTransport?.close()
 						directTransport = null
-						connected.set(false)
 						synchronized(closed) { closed.notifyAll() }
 					}
 
@@ -883,7 +909,6 @@ class RhrSessionService : Service() {
 						setProgress("", 0, 0)
 						directTransport?.close()
 						directTransport = null
-						connected.set(false)
 						synchronized(closed) { closed.notifyAll() }
 					}
 				})
@@ -904,9 +929,10 @@ class RhrSessionService : Service() {
 				directTransport?.close()
 				directTransport = null
 				if (stopped.get() || generation != sessionGeneration) break
-				if (connected.get()) {
+				if (wasConnected.get()) {
 					backoffMs = 1000L
 					failuresThisRound = 0
+					continue
 				} else {
 					failuresThisRound++
 					// Try the next candidate immediately. Back off only after every
@@ -1026,21 +1052,27 @@ class RhrSessionService : Service() {
 		val channel = ByteBuffer.wrap(frame, 1, 4).int
 		when (op) {
 			OP_OPEN -> {
-				pending[channel] = java.io.ByteArrayOutputStream()
+				synchronized(flowLock) { pending[channel] = java.io.ByteArrayOutputStream() }
 				openChannel(channel)
 			}
 			OP_DATA -> {
-				val sock = sockets[channel]
-				if (sock != null) {
+				// The connect thread flushes pending bytes and publishes the socket
+				// under this same lock. No data may fall between those two steps.
+				synchronized(flowLock) {
+					val sock = sockets[channel]
 					try {
-						sock.getOutputStream().write(frame, 5, frame.size - 5)
+						if (sock != null) {
+							sock.getOutputStream().write(frame, 5, frame.size - 5)
+						} else {
+							val buffer = pending[channel] ?: return
+							buffer.write(frame, 5, frame.size - 5)
+						}
+						sendBinaryFrame(encodeAck(channel, frame.size - 5))
 					} catch (e: Exception) {
 						Log.w(TAG, "write failed ch=$channel: $e")
+						closeChannel(channel, notifyPeer = true)
 					}
-				} else {
-					pending[channel]?.write(frame, 5, frame.size - 5)
 				}
-				sendBinaryFrame(encodeAck(channel, frame.size - 5))
 			}
 			OP_ACK -> {
 				val n = ByteBuffer.wrap(frame, 5, 4).int
@@ -1111,7 +1143,7 @@ class RhrSessionService : Service() {
 		}.also { it.isDaemon = true }.start()
 	}
 
-	private fun closeChannel(channel: Int, notifyPeer: Boolean) {
+	private fun closeChannel(channel: Int, notifyPeer: Boolean) = synchronized(flowLock) {
 		pending.remove(channel)
 		sockets.remove(channel)?.let { try { it.close() } catch (_: Exception) {} }
 		readers.remove(channel)?.interrupt()

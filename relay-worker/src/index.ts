@@ -48,6 +48,7 @@ import {
 	redeemInvite,
 	rendezvousFor,
 } from "./accounts";
+import { connectionPage } from "./connect-page";
 
 export interface Env {
 	SESSIONS: DurableObjectNamespace;
@@ -503,6 +504,9 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		const seg = url.pathname.split("/").filter(Boolean);
+		if (url.pathname === "/connect" && request.method === "GET") {
+			return connectionPage();
+		}
 		if (seg.length === 1 && seg[0] === "healthz") {
 			return new Response("ok");
 		}

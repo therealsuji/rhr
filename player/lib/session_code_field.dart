@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:rhr_bridge/session_code.dart';
+import 'package:rhr_bridge/session_link.dart';
 
 const _violet = Color(0xFF7C4DFF);
 const _ink = Color(0xFFF3F1FA);
@@ -84,6 +85,15 @@ AccountInvite? parseAccountInvite(String raw) {
 /// (`{"code":..,"relay":..,"relays":[..]}`) or a bare code string.
 SessionCodeEntry parseSessionPayload(String raw) {
   final trimmed = raw.trim();
+  if (trimmed.startsWith('rhr:') ||
+      trimmed.startsWith('https://getrhr.dev/connect')) {
+    final link = parseSessionConnectionLink(trimmed);
+    return SessionCodeEntry(
+      code: link.code,
+      relay: link.relays.first,
+      fallbackRelays: link.relays.skip(1).toList(growable: false),
+    );
+  }
   try {
     final map = jsonDecode(trimmed) as Map<String, dynamic>;
     final code = map['code'] is String ? map['code'] as String : trimmed;
@@ -204,7 +214,17 @@ class SessionCodeField extends StatelessWidget {
       onInvite?.call(invite);
       return;
     }
-    final entry = parseSessionPayload(raw);
+    SessionCodeEntry entry;
+    try {
+      entry = parseSessionPayload(raw);
+    } on FormatException catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+      return;
+    }
     controller.text = formatSessionCodeInput(entry.code);
     onScanned(
       SessionCodeEntry(

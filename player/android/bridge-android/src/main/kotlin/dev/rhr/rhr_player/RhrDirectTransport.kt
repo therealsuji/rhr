@@ -162,7 +162,7 @@ internal class RhrDirectTransport(
 		}
 		return try {
 			val sent = channel?.send(DataChannel.Buffer(ByteBuffer.wrap(frame), true)) == true
-			if (!sent) fail("data channel rejected a payload")
+			if (!sent) fail("data channel rejected a payload: bytes=${frame.size}, buffered=${channel?.bufferedAmount()}, state=${channel?.state()}")
 			sent
 		} catch (error: Throwable) {
 			fail("send: ${error.message ?: error.javaClass.simpleName}")

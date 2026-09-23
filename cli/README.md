@@ -52,6 +52,23 @@ dart pub global activate --source git \
 Then run `rhr doctor` from a shell where the Dart global executable directory
 is on `PATH`.
 
+## Share a connection from an agent
+
+`rhr run` prints a connection link, session code, and terminal QR for the same
+session. On Android, open the link and tap **Open RHR**. It carries the relay
+addresses as well as the code. Switching to another active session asks first.
+
+Agents can read `.dart_tool/rhr/connection.json` in the Flutter project. Share
+its `url` as a Markdown link and include `code` as a fallback. `deepLink` is the
+direct `rhr://connect` URL for clients that permit custom schemes. `qrPayload`
+contains the data encoded by the terminal QR. Treat this file as session access
+information and do not commit it.
+
+The HTTPS connection page is `/connect` on `getrhr.dev`. It reads the session
+from the URL fragment in the browser and passes it to RHR; it does not send that
+fragment to the server. This is a browser handoff, not a verified Android App
+Link. A player containing the session deep-link handler is required.
+
 ## Update the CLI
 
 ```bash

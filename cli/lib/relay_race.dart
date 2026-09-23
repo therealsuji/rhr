@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
@@ -53,35 +54,46 @@ final class DeviceBusyException implements Exception {
 /// It forwards messages only from the candidate that first announces device
 /// info and closes the remaining candidates once that winner is selected.
 final class RelayRace implements RelayControlTransport, SessionTransport {
-  RelayRace._(this._code);
+  RelayRace._(this._code, this._claimFile);
+
+  final File? _claimFile;
 
   /// The session this race is for, so a granted claim is filed under it.
   final String _code;
 
-  static const _hello = '{"t":"hello"}';
+  // Repeated hellos share an identity; a reconnect must replace the old peer.
+  final _hello = jsonEncode({
+    't': 'hello',
+    'connectionId': base64UrlEncode(
+      List<int>.generate(16, (_) => Random.secure().nextInt(256)),
+    ),
+  });
 
   /// Header naming the claim being resumed, and carrying the granted one back.
   static const _claimHeader = 'x-rhr-claim';
 
-  /// Claims this process holds, by session code.
+  /// Claims this process holds, by relay and session code.
   ///
   /// Static because a reconnect builds a fresh RelayRace: the recovery loop
   /// must re-dial as the incumbent rather than as a stranger asking for a
-  /// phone it already has. Keyed by code so attaching to a different session
-  /// never offers another session's claim, which the relay would refuse.
-  static final _claims = <String, String>{};
+  /// phone it already has. The relay and code prevent a claim from being
+  /// offered to another server or session.
+  static final _claims = <(String, String), String>{};
 
   /// Forgets the claim for [code], so the next connect asks for a new one.
   ///
   /// Local bookkeeping only: [release] is what tells the relay to hand the
   /// device back before the grace period runs out.
-  static void releaseClaim(String code) => _claims.remove(code);
+  static void releaseClaim(String code) =>
+      _claims.removeWhere((key, _) => key.$2 == code);
 
   /// Tells the relay this session is over on purpose, so the next developer
   /// takes the device immediately instead of waiting out a grace period meant
   /// for a CLI that crashed.
   void release() {
-    _claims.remove(_code);
+    releaseClaim(_code);
+    final file = _claimFile;
+    if (file != null && file.existsSync()) file.deleteSync();
     if (_closed) return;
     try {
       sendControl('{"t":"release"}');
@@ -110,8 +122,9 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   static Future<RelayRace> connect({
     required List<String> relays,
     required String code,
+    File? claimFile,
   }) async {
-    final race = RelayRace._(code);
+    final race = RelayRace._(code, claimFile);
     final uniqueRelays = relays.toSet();
     final refusals = <String>[];
     await Future.wait(
@@ -119,14 +132,17 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         (relay) => race._connectCandidate(relay, code, refusals),
       ),
     );
+    if (refusals.isNotEmpty) {
+      final drain = race.stream.listen((_) {});
+      await race.close();
+      await drain.cancel();
+      throw DeviceBusyException(refusals.first);
+    }
     if (race._candidates.isEmpty) {
-      // A refusal is a definite answer — someone else has the phone — where a
-      // plain connect failure is not, so it is worth reporting as itself.
-      if (refusals.isNotEmpty) throw DeviceBusyException(refusals.first);
       throw StateError('could not connect to any relay candidate');
     }
     for (final candidate in race._candidates) {
-      candidate.channel.sink.add(_hello);
+      candidate.channel.sink.add(race._hello);
     }
     return race;
   }
@@ -136,7 +152,21 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     String code,
     List<String> refusals,
   ) async {
-    final claim = _claims[code];
+    var claim = _claims[(relay, code)];
+    final file = _claimFile;
+    if (claim == null && file != null && file.existsSync()) {
+      try {
+        final saved = jsonDecode(file.readAsStringSync());
+        if (saved is Map<String, dynamic> &&
+            saved['code'] == code &&
+            saved['relay'] == relay &&
+            saved['id'] is String) {
+          claim = saved['id'] as String;
+        }
+      } on FormatException {
+        // An incomplete cache cannot authorize resuming a claim.
+      }
+    }
     // dart:io's WebSocket rather than IOWebSocketChannel.connect: a refused
     // claim comes back as an HTTP 409, and only this surfaces the status
     // instead of a bare "connection failed".
@@ -197,7 +227,22 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   void _onMessage(_RelayCandidate candidate, Object message) {
     if (message is String && message.contains('"claim"')) {
       final granted = _readClaim(message);
-      if (granted != null) _claims[_code] = granted;
+      if (granted != null) {
+        _claims[(candidate.relay, _code)] = granted;
+        final file = _claimFile;
+        if (file != null) {
+          file.parent.createSync(recursive: true);
+          file.writeAsStringSync(
+            jsonEncode({
+              'code': _code,
+              'relay': candidate.relay,
+              'id': granted,
+            }),
+            flush: true,
+          );
+          if (!Platform.isWindows) Process.runSync('chmod', ['600', file.path]);
+        }
+      }
       return;
     }
     if (_winner == null) {

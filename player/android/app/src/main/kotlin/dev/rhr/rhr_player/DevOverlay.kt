@@ -1,6 +1,9 @@
 package dev.rhr.rhr_player
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -260,14 +263,34 @@ class DevOverlay(
 	private var dismissTarget: View? = null
 	private val dismissSize get() = dp(64)
 
+	private var menuProgress: TextView? = null
+	private var menuRestart: View? = null
+	private var debugMenuReceiver: BroadcastReceiver? = null
+
+	private var attached = false
 	private val onSessionUpdate: () -> Unit = { ui.post { render() } }
 
 	fun attach() {
+		attached = true
 		root = host.createRoot(activity)
 		host.add(root)
 		// Back closes the panel rather than falling through to the app below.
 		host.onBackPressed = { ui.post { closeMenu() } }
 
+		if (activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+			val receiver = object : BroadcastReceiver() {
+				override fun onReceive(context: Context, intent: Intent) {
+					if (host.transient || (activity as? Activity)?.hasWindowFocus() == true) {
+						reveal()
+						if (menu == null) toggleMenu()
+					}
+				}
+			}
+			val filter = IntentFilter("dev.rhr.DEBUG_MENU")
+			if (Build.VERSION.SDK_INT >= 33) activity.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+			else activity.registerReceiver(receiver, filter)
+			debugMenuReceiver = receiver
+		}
 		buildProgressCard()
 		buildFab()
 		render()
@@ -283,6 +306,9 @@ class DevOverlay(
 	}
 
 	fun detach() {
+		attached = false
+		debugMenuReceiver?.let { activity.unregisterReceiver(it) }
+		debugMenuReceiver = null
 		RhrSessionService.updateListeners.remove(onSessionUpdate)
 		sensors?.unregisterListener(this)
 		ui.removeCallbacks(idleHide)
@@ -293,6 +319,7 @@ class DevOverlay(
 		// screen with nothing left to remove it.
 		hideDismissTarget()
 		host.remove(root)
+		ui.removeCallbacksAndMessages(null)
 	}
 
 	// ---- progress card (top, floating pill) ------------------------------
@@ -356,11 +383,7 @@ class DevOverlay(
 			topMargin = dp(10)
 		})
 
-		// GONE, not merely empty. A View defaults to VISIBLE, and this one is
-		// MATCH_PARENT wide — left visible in a system overlay window it is an
-		// invisible full-width touch target that swallows the tester's taps
-		// across the whole screen. render() shows it when there is progress to
-		// report (and never at all in connector mode, see showCard).
+		// Hidden until the session reports progress.
 		card.visibility = View.GONE
 
 		val lp = FrameLayout.LayoutParams(
@@ -809,9 +832,12 @@ class DevOverlay(
 		})
 		statusCard.addView(statusLine, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3); bottomMargin = dp(3) })
-		// Status and session only. The VM URI and cache size answer questions a
-		// developer has and a tester does not, and this sheet belongs to
-		// whoever is holding the phone.
+		menuProgress = TextView(activity).apply {
+			setTextColor(ink)
+			textSize = 12.5f
+			setPadding(0, dp(8), 0, 0)
+			statusCard.addView(this)
+		}
 		row("session", RhrSessionService.currentCode.ifEmpty { "—" })
 		sheet.addView(statusCard, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT,
@@ -830,18 +856,15 @@ class DevOverlay(
 		// without one to ask, the row would be a button that does nothing.
 		// Worded "the app" rather than "restart" alone, so it is not read as a
 		// third sibling of Reconnect and Disconnect.
-		if (RhrSessionService.status == "connected") {
-			sheet.addView(
-				iconRow("⟲", "Restart the app — back to a clean start", primary = false) {
-					activity.startService(
-						Intent(activity, RhrSessionService::class.java)
-							.putExtra("cmd", "restart_guest"))
-					closeMenu()
-				},
-				LinearLayout.LayoutParams(
-					ViewGroup.LayoutParams.MATCH_PARENT,
-					ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+		val restart = iconRow("⟲", "Restart the app — back to a clean start", primary = false) {
+			activity.startService(
+				Intent(activity, RhrSessionService::class.java).putExtra("cmd", "restart_guest"))
+			closeMenu()
 		}
+		menuRestart = restart
+		sheet.addView(restart, LinearLayout.LayoutParams(
+			ViewGroup.LayoutParams.MATCH_PARENT,
+			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
 		// Pause, not Stop: ending a session while the phone stays available just
 		// lets the next recovery loop take it again a second later, which reads
@@ -926,6 +949,7 @@ class DevOverlay(
 		}
 		sheet.post { springIn(sheet, sheet.height.toFloat().coerceAtLeast(dpf(200f))) }
 		menu = scrim
+		render()
 	}
 
 	private fun iconRow(
@@ -1027,6 +1051,9 @@ class DevOverlay(
 			}
 		}
 		menu = null
+		render()
+		menuProgress = null
+		menuRestart = null
 		// Panel closed: the bubble may idle away again, a little sooner than
 		// after a shake since the tester has just been looking at it.
 		armIdleHide(IDLE_AFTER_PANEL_MS)
@@ -1035,6 +1062,7 @@ class DevOverlay(
 	// ---- render -----------------------------------------------------------
 
 	private fun render() {
+		if (!attached) return
 		// What to say is decided by [SessionBanner], which is pure and unit
 		// tested; this only paints it. The two used to be one `when` block
 		// here and a second, differently-wrong one in the Flutter lobby.
@@ -1047,7 +1075,13 @@ class DevOverlay(
 			stalled = RhrSessionService.phaseStalled,
 			foreignApp = RhrSessionService.updatingForeignApp,
 		)
-		if (!banner.isVisible) {
+		menuRestart?.visibility = if (RhrSessionService.status == "connected" &&
+			RhrSessionService.progressPhase !in setOf("restarting", "reloading")) View.VISIBLE else View.GONE
+		menuProgress?.apply {
+			text = banner.label
+			visibility = if (banner.isVisible) View.VISIBLE else View.GONE
+		}
+		if (!banner.isVisible || menu != null) {
 			hideCard()
 			return
 		}
@@ -1066,15 +1100,13 @@ class DevOverlay(
 		cardPct.visibility = if (showPct) View.VISIBLE else View.GONE
 	}
 
-	// The card only ever shows in hosted mode, with the player's Activity in
-	// front, so plain Animators are safe here (see the animation note above).
 	private fun showCard() {
-		// Over the tester's OWN app, nothing may appear uninvited — the whole
-		// contract is "you see nothing until you shake". In the player's own
-		// Activity the status card is welcome chrome; floating above someone
-		// else's UI it is an intrusion, so connector mode suppresses it and
-		// surfaces the same state inside the shake-summoned panel instead.
-		if (host.transient) return
+		if (host.transient) {
+			card.visibility = View.VISIBLE
+			host.showChild(card, dp(12), safeTop() + dp(10),
+				screenSize().first - dp(24), ViewGroup.LayoutParams.WRAP_CONTENT, touchable = false)
+			return
+		}
 		if (card.visibility != View.VISIBLE) {
 			card.visibility = View.VISIBLE
 			card.alpha = 0f
@@ -1084,6 +1116,11 @@ class DevOverlay(
 	}
 
 	private fun hideCard() {
+		if (host.transient) {
+			host.hideChild(card)
+			card.visibility = View.GONE
+			return
+		}
 		if (card.visibility == View.VISIBLE) {
 			card.animate().alpha(0f).translationY(-dpf(12f)).setDuration(160)
 				.withEndAction { card.visibility = View.GONE }.start()

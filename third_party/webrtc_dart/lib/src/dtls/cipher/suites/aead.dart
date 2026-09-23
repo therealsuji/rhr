@@ -52,15 +52,8 @@ class AEADCipherSuite {
     // Construct additional authenticated data (AAD) - always uses plaintext length
     final aad = _constructAAD(header, plaintext.length);
 
-    _log.fine('encrypt: epoch=${header.epoch} seq=${header.sequenceNumber}');
-    _log.fine(
-        'plaintext (${plaintext.length} bytes): ${plaintext.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'writeKey: ${writeKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'nonce: ${nonce.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'aad: ${aad.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
+    _log.fine(() =>
+        'encrypt: epoch=${header.epoch} seq=${header.sequenceNumber} bytes=${plaintext.length}');
 
     // Encrypt with appropriate algorithm
     final Uint8List ciphertext;
@@ -87,9 +80,6 @@ class AEADCipherSuite {
     final result = Uint8List(explicitNonce.length + ciphertext.length);
     result.setRange(0, explicitNonce.length, explicitNonce);
     result.setRange(explicitNonce.length, result.length, ciphertext);
-
-    _log.fine(
-        'result (${result.length} bytes): ${result.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
 
     return result;
   }

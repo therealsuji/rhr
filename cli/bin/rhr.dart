@@ -21,6 +21,7 @@ import 'dart:typed_data';
 import 'dart:io';
 
 import 'package:rhr_bridge/session_code.dart';
+import 'package:rhr_bridge/session_link.dart';
 import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
@@ -32,7 +33,9 @@ import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/account_auth.dart';
 import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/restart_tracker.dart';
+import 'package:rhr_cli/reconnect_backoff.dart';
 import 'package:rhr_cli/terminal_qr.dart';
+import 'package:rhr_cli/terminal_io.dart';
 import 'package:rhr_cli/usb_asset_transport.dart';
 import 'package:rhr_cli/version.dart';
 import 'package:rhr_cli/run_preparation.dart';
@@ -59,6 +62,8 @@ Usage:
 
 Start here: install RHR Player on the phone, run `rhr` in your Flutter project,
 then scan its QR or enter its code. RHR selects the route and guides phone setup.
+On the phone, tap the printed connection link, then Open RHR. Connection details are
+also saved as JSON in .dart_tool/rhr/connection.json for agents to read.
 An agent can use `rhr run --yes` to approve required debug builds/installations.
 Android may still ask the tester to confirm permissions or installation.
 
@@ -113,15 +118,6 @@ flags override the file.
 // correct the code and start a fresh attach instead.
 const _noDeviceExitCode = 75;
 const _directFailureExitCode = 69;
-// How many direct negotiations may fail in a row before the CLI stops
-// re-dialing. One retry recovers a one-off ICE miss; a network where STUN
-// alone never finds a path fails every time, and looping there hides the
-// real answer (a TURN server, or a different network).
-const _maxDirectRetries = 3;
-const _directGaveUp =
-    'direct WebRTC could not be negotiated after $_maxDirectRetries attempts. '
-    'This network needs a TURN server or a different route between the '
-    'phone and this machine.';
 // The device is reachable but another developer is holding it. Distinct from
 // "no device joined" so a caller can tell "wait, or pick another phone" apart
 // from "check the code".
@@ -462,8 +458,7 @@ Future<void> main(List<String> args) async {
   // on both ends (the phone's service reconnects on its own), so we recover
   // by re-dialing, respawning flutter attach, and re-running the asset sync —
   // the manifest makes that seconds. flutter exiting on its own (q) ends us.
-  var failures = 0;
-  var directRetries = 0;
+  final reconnectBackoff = ReconnectBackoff();
   while (true) {
     try {
       final result = await _runSession(
@@ -475,6 +470,7 @@ Future<void> main(List<String> args) async {
         syncAssets: syncAssets,
         preferDirect: direct,
         updatePolicy: updatePolicy,
+        onReady: reconnectBackoff.markReady,
       );
       // Clean flutter exit (user pressed q) => done. A nonzero exit is a
       // failed attach (e.g. the flaky first-connect DDS race) => reconnect.
@@ -492,23 +488,15 @@ Future<void> main(List<String> args) async {
         RelayRace.releaseClaim(code);
         exit(result!);
       }
-      directRetries = 0;
       if (result != null) {
-        failures++;
         stderr.writeln('[rhr] flutter attach exited ($result)');
-      } else {
-        failures = 0;
       }
     } on DirectTransportFailure catch (failure) {
       // Same rule as `run` below: a direct path lost while the device is
       // replacing its session or its relay socket is re-dialed, only a
-      // refusal or a dead established path ends the attach.
-      if (failure.transient && ++directRetries < _maxDirectRetries) {
-        failures++;
+      // protocol violation ends the attach.
+      if (failure.transient) {
         stderr.writeln('[rhr] direct path dropped: $failure');
-      } else if (failure.transient) {
-        stderr.writeln('[rhr] $_directGaveUp');
-        exit(_directFailureExitCode);
       } else {
         stderr.writeln('[rhr] direct connection failed: $failure');
         exit(_directFailureExitCode);
@@ -520,10 +508,9 @@ Future<void> main(List<String> args) async {
       stderr.writeln('[rhr] $busy');
       exit(_deviceBusyExitCode);
     } on Exception catch (e) {
-      failures++;
       stderr.writeln('[rhr] session error: $e');
     }
-    final delay = Duration(seconds: (2 * (failures + 1)).clamp(2, 15));
+    final delay = reconnectBackoff.nextDelay();
     stderr.writeln(
       '[rhr] session dropped — reconnecting in ${delay.inSeconds}s '
       '(ctrl-c to quit)',
@@ -679,12 +666,17 @@ Future<int?> _runSession({
   bool prepareRun = false,
   RunRoute? routeOverride,
   RunProgress? runProgress,
+  void Function()? onReady,
 }) async {
   final compatibility = readProjectCompatibilityProfile(project);
   String? assetStoreId;
   late final RelayRace relayTransport;
   try {
-    relayTransport = await RelayRace.connect(relays: relays, code: code);
+    relayTransport = await RelayRace.connect(
+      relays: relays,
+      code: code,
+      claimFile: File('$project/.dart_tool/rhr/claim.json'),
+    );
   } on DeviceBusyException catch (e) {
     // Someone else is on this device. Retrying would only fight them for it,
     // so say who has it and stop — the caller must not treat this as a
@@ -707,7 +699,11 @@ Future<int?> _runSession({
   // as deliberately and were not watched at all, so they left the tester
   // waiting out the 45s lease with a connection error on screen. SIGKILL cannot
   // be caught by anyone; that is what the device's lease is for.
+  void Function()? restoreTerminal;
+  Process? attachProcess;
   Future<void> leaveOnSignal(ProcessSignal signal) async {
+    restoreTerminal?.call();
+    attachProcess?.kill();
     relayTransport.release();
     // Tell the phone as well as the relay: releasing the claim frees the
     // device for the next developer, but only dev_gone takes the tester off
@@ -757,6 +753,8 @@ Future<int?> _runSession({
   // Set once `flutter attach` is running, so a restart the tester asks for
   // has something to signal. Null until then, and on the --no-flutter path.
   String? attachPidFile;
+  var reloadInProgress = false;
+  Timer? reloadFeedbackTimer;
   final bridgeDeadline = _DeadlineHolder(
     DateTime.now().add(const Duration(minutes: 5)),
   );
@@ -831,11 +829,20 @@ Future<int?> _runSession({
         // asset sync sends. The player only offers the row while a developer
         // is attached; this still answers honestly if it arrives anyway.
         if (m['t'] == 'restart_guest') {
+          if (reloadInProgress) return;
           final pidFile = attachPidFile;
           final pid = pidFile == null || !File(pidFile).existsSync()
               ? null
               : int.tryParse(File(pidFile).readAsStringSync().trim());
           if (pid == null) {
+            transport.sendControl(
+              jsonEncode({
+                't': 'progress',
+                'phase': 'reload_failed',
+                'done': 0,
+                'total': 0,
+              }),
+            );
             stderr.writeln(
               '[rhr] the phone asked to restart the app, but no flutter '
               'attach is running to do it.',
@@ -843,7 +850,16 @@ Future<int?> _runSession({
             return;
           }
           stderr.writeln('[rhr] restart requested from the phone');
-          Process.killPid(pid, ProcessSignal.sigusr2);
+          reloadInProgress = Process.killPid(pid, ProcessSignal.sigusr2);
+          if (!reloadInProgress)
+            transport.sendControl(
+              jsonEncode({
+                't': 'progress',
+                'phase': 'reload_failed',
+                'done': 0,
+                'total': 0,
+              }),
+            );
           return;
         }
         if (m['t'] == 'info' && !vmReady.isCompleted) {
@@ -1039,10 +1055,12 @@ Future<int?> _runSession({
     keepalive.cancel();
     await transport.close();
     stderr.writeln(
-      '[rhr] no player joined session "$code" within 5 minutes. '
-      'Check the code, scan the QR again, and rerun rhr attach.',
+      prepareRun
+          ? '[rhr] Still waiting for the phone. Keeping this session available.'
+          : '[rhr] no player joined session "$code" within 5 minutes. '
+                'Check the code, scan the QR again, and rerun rhr attach.',
     );
-    return _noDeviceExitCode;
+    return prepareRun ? null : _noDeviceExitCode;
   }
   if (vm == null) {
     preparation?.close();
@@ -1070,6 +1088,7 @@ Future<int?> _runSession({
       await transport.close();
       throw retry;
     }
+    await transport.close();
     return fatalExit; // relay died while waiting
   }
   stderr.writeln('[rhr] device VM service: $vm');
@@ -1078,6 +1097,9 @@ Future<int?> _runSession({
     await transport.payloadReady;
   } on DirectTransportFailure catch (failure) {
     keepalive.cancel();
+    await interrupts.cancel();
+    await terminations.cancel();
+    await hangups.cancel();
     await transport.close();
     throw failure;
   }
@@ -1137,6 +1159,7 @@ Future<int?> _runSession({
   stderr.writeln('[rhr] tunneled VM service: $local');
 
   Future<void> cleanup() async {
+    reloadFeedbackTimer?.cancel();
     preparation?.close();
     keepalive.cancel();
     await server.close();
@@ -1162,6 +1185,7 @@ Future<int?> _runSession({
   }
 
   if (!runFlutter) {
+    onReady?.call();
     await wsDied.future; // keep tunneling until the relay drops
     await cleanup();
     final failure = directFailure;
@@ -1181,31 +1205,31 @@ Future<int?> _runSession({
   if (stalePid.existsSync()) stalePid.deleteSync();
   attachPidFile = effectivePidFile;
 
-  final proc = await Process.start(
-    projectFlutterExecutable(project),
-    [
-      'attach',
-      '-d',
-      'rhr',
-      '--debug-url',
-      local.toString(),
-      // The rhr custom device intentionally has no port-forward command: the
-      // VM service is already exposed on this host-local tunnel port. Without
-      // an explicit host port Flutter asks the device for a forward and
-      // silently ends up with port 0, leaving attach waiting forever.
-      '--host-vmservice-port',
-      '${local.port}',
-      // DDS tries to claim the same host port for a custom device whose VM
-      // service is already exposed by our tunnel. The tunneled VM service is
-      // sufficient for attach/hot reload, so keep DDS out of this path.
-      '--no-dds',
-      '--pid-file', effectivePidFile,
-    ],
-    workingDirectory: project,
-    mode: ProcessStartMode.inheritStdio,
-  );
+  final proc = await Process.start(projectFlutterExecutable(project), [
+    'attach',
+    '-d',
+    'rhr',
+    '--debug-url',
+    local.toString(),
+    // The rhr custom device intentionally has no port-forward command: the
+    // VM service is already exposed on this host-local tunnel port. Without
+    // an explicit host port Flutter asks the device for a forward and
+    // silently ends up with port 0, leaving attach waiting forever.
+    '--host-vmservice-port',
+    '${local.port}',
+    // DDS tries to claim the same host port for a custom device whose VM
+    // service is already exposed by our tunnel. The tunneled VM service is
+    // sufficient for attach/hot reload, so keep DDS out of this path.
+    '--no-dds',
+    '--pid-file', effectivePidFile,
+  ], workingDirectory: project);
 
   var sessionActive = true;
+  void lostConnection() {
+    sessionActive = false;
+    if (!wsDied.isCompleted) wsDied.complete();
+  }
+
   void reportProgress(String phase, int done, int total) {
     if (!sessionActive) return;
     transport.sendControl(
@@ -1218,7 +1242,83 @@ Future<int?> _runSession({
     );
   }
 
-  if (effectiveSyncAssets || prepareRun) {
+  void onReloadEvent(FlutterReloadEvent event) {
+    if (!sessionActive) return;
+    reloadFeedbackTimer?.cancel();
+    reloadInProgress =
+        event == FlutterReloadEvent.reloading ||
+        event == FlutterReloadEvent.restarting;
+    reportProgress(
+      switch (event) {
+        FlutterReloadEvent.reloading => 'reloading',
+        FlutterReloadEvent.restarting => 'restarting',
+        FlutterReloadEvent.completed => 'reload_complete',
+        FlutterReloadEvent.failed => 'reload_failed',
+      },
+      0,
+      0,
+    );
+    if (event == FlutterReloadEvent.completed) {
+      reloadFeedbackTimer = Timer(
+        const Duration(seconds: 2),
+        () => reportProgress('ready', 0, 0),
+      );
+    }
+  }
+
+  final output = Future.wait([
+    forwardFlutterOutput(
+      proc.stdout,
+      stdout,
+      lostConnection,
+      onReloadEvent: onReloadEvent,
+    ),
+    forwardFlutterOutput(
+      proc.stderr,
+      stderr,
+      lostConnection,
+      onReloadEvent: onReloadEvent,
+    ),
+  ]);
+  bool? wasLineMode;
+  bool? wasEchoMode;
+  restoreTerminal = () {
+    try {
+      if (wasLineMode != null) stdin.lineMode = wasLineMode;
+      if (wasEchoMode != null) stdin.echoMode = wasEchoMode;
+    } on StdinException {
+      // The terminal may have closed with the session.
+    }
+  };
+  attachProcess = proc;
+  try {
+    if (stdin.hasTerminal) {
+      wasLineMode = stdin.lineMode;
+      wasEchoMode = stdin.echoMode;
+      stdin.echoMode = false;
+      stdin.lineMode = false;
+    }
+  } on StdinException {
+    restoreTerminal();
+  }
+  // The child may close its input before the subscription is cancelled.
+  proc.stdin.done.catchError((Object _) {});
+  final input = terminalInput.listen((bytes) {
+    try {
+      proc.stdin.add(bytes);
+    } on StateError {
+      // Flutter has already exited.
+    }
+  });
+  final flutterExit = () async {
+    final code = await proc.exitCode;
+    sessionActive = false;
+    await input.cancel();
+    restoreTerminal?.call();
+    await output;
+    return code;
+  }();
+  if (effectiveSyncAssets || prepareRun || onReady != null) {
     unawaited(() async {
       try {
         if (effectiveSyncAssets) {
@@ -1239,16 +1339,21 @@ Future<int?> _runSession({
                 'Flutter did not attach to the debug app.',
               );
             }
-            await Future<void>.delayed(const Duration(seconds: 1));
+            await Future<void>.delayed(const Duration(milliseconds: 100));
           }
-          if (!await isProjectRunning(local, project)) {
+          if (prepareRun && !await isProjectRunning(local, project)) {
             throw StateError(
               'The connected runtime is not running this project.',
             );
           }
         }
         if (sessionActive) {
-          stderr.writeln('[rhr] Ready. Your project is running on the phone.');
+          onReady?.call();
+          stderr.writeln(
+            effectiveSyncAssets || prepareRun
+                ? '[rhr] Ready. Your project is running on the phone.'
+                : '[rhr] Ready. Flutter is attached.',
+          );
           reportProgress('ready', 0, 0);
         }
       } catch (error) {
@@ -1271,7 +1376,6 @@ Future<int?> _runSession({
 
   // Whichever ends first decides: flutter exiting on its own ends the CLI;
   // the relay dying means we kill flutter and reconnect.
-  final flutterExit = proc.exitCode;
   final ended = await Future.any<Object>([
     flutterExit.then((c) => c),
     wsDied.future.then((_) => const _RelayEnded()),
@@ -1440,7 +1544,7 @@ Future<bool> _updatePlayerOverTheWire({
                 '${local.frameworkVersion}? [Y/n] ',
     );
     final answer =
-        (await stdin
+        (await terminalInput
                 .transform(utf8.decoder)
                 .transform(const LineSplitter())
                 .first
@@ -1569,7 +1673,7 @@ Future<void> _syncAssetsAfterAttach(
     if (DateTime.now().isAfter(deadline)) {
       throw TimeoutException('flutter attach never became interactive');
     }
-    await Future<void>.delayed(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
   }
   stderr.writeln(
     '[rhr] attach became interactive after '
@@ -1607,7 +1711,6 @@ Future<void> _syncAssetsAfterAttach(
           'The phone restarted but did not launch this project.',
         );
       }
-      stderr.writeln('[rhr] Your project is running on the phone.');
     },
   );
 }
@@ -1711,8 +1814,26 @@ Future<int> _runAttachProductFlow({
           'relays': deviceRelays,
         });
   final qr = renderTerminalQr(qrPayload);
+  final deepLink = sessionConnectionLink(sessionCode, deviceRelays);
+  final link = sessionConnectionWebLink(deepLink).toString();
+  final connectionFile = File('$project/.dart_tool/rhr/connection.json');
+  await connectionFile.parent.create(recursive: true);
+  await connectionFile.writeAsString(
+    jsonEncode({
+      'code': sessionCode,
+      'url': link,
+      'deepLink': deepLink.toString(),
+      'relays': deviceRelays,
+      'qrPayload': qrPayload,
+    }),
+  );
+  if (!Platform.isWindows) {
+    await Process.run('chmod', ['600', connectionFile.path]);
+  }
   stderr.write(
-    '\n${qr.text}\n  Scan with the rhr player  ·  or type:  $sessionCode\n\n',
+    '\nTap to connect: $link\nSession code: $sessionCode\n'
+    'Connection JSON: ${connectionFile.absolute.path}\n\n'
+    '${qr.text}\n  Scan with the RHR player\n\n',
   );
   if (localRelay != null) {
     stderr.writeln(
@@ -1732,8 +1853,7 @@ Future<int> _runAttachProductFlow({
     }
 
     final runProgress = RunProgress();
-    var failures = 0;
-    var directRetries = 0;
+    final reconnectBackoff = ReconnectBackoff();
     var transferRetries = 0;
     while (true) {
       try {
@@ -1749,15 +1869,14 @@ Future<int> _runAttachProductFlow({
           prepareRun: true,
           runProgress: runProgress,
           routeOverride: routeOverride,
+          onReady: reconnectBackoff.markReady,
         );
-        directRetries = 0;
         if (result == 0) return 0;
         if (result == _noDeviceExitCode ||
             result == _relayBinaryExitCode ||
             result == 78) {
           return result!;
         }
-        failures++;
         stderr.writeln(
           '[rhr] Flutter attach ended${result == null ? '' : ' ($result)'}.',
         );
@@ -1766,12 +1885,8 @@ Future<int> _runAttachProductFlow({
         // a direct path is impossible, only that this attempt lost its
         // signaling channel. The recovery loop below re-dials, which is what
         // every other transient failure here already does.
-        if (failure.transient && ++directRetries < _maxDirectRetries) {
-          failures++;
+        if (failure.transient) {
           stderr.writeln('[rhr] direct path dropped: $failure');
-        } else if (failure.transient) {
-          stderr.writeln('[rhr] $_directGaveUp');
-          return _directFailureExitCode;
         } else {
           stderr.writeln('[rhr] direct connection failed: $failure');
           return _directFailureExitCode;
@@ -1783,7 +1898,6 @@ Future<int> _runAttachProductFlow({
           );
           return 78;
         }
-        failures++;
         stderr.writeln(
           '[rhr] $failure Reconnecting and reusing the built APK.',
         );
@@ -1794,10 +1908,9 @@ Future<int> _runAttachProductFlow({
         stderr.writeln('[rhr] $busy');
         return _deviceBusyExitCode;
       } on Exception catch (error) {
-        failures++;
         stderr.writeln('[rhr] session error: $error');
       }
-      final delay = Duration(seconds: (2 * (failures + 1)).clamp(2, 15));
+      final delay = reconnectBackoff.nextDelay();
       stderr.writeln(
         '[rhr] reconnecting in ${delay.inSeconds}s (ctrl-c to quit)',
       );

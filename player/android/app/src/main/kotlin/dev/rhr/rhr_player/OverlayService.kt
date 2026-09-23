@@ -7,7 +7,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
-import android.util.Log
+import android.os.Handler
+import android.os.Looper
 
 /**
  * Owns the dev overlay in CONNECTOR mode, where the tester is looking at their
@@ -25,6 +26,14 @@ import android.util.Log
  */
 class OverlayService : Service() {
 	private var overlay: DevOverlay? = null
+	private val main = Handler(Looper.getMainLooper())
+	private val refreshOverlay: () -> Unit = { main.post { refresh() } }
+
+	override fun onCreate() {
+		super.onCreate()
+		instance = this
+		RhrSessionService.updateListeners.add(refreshOverlay)
+	}
 
 	override fun onBind(intent: Intent?): IBinder? = null
 
@@ -36,25 +45,30 @@ class OverlayService : Service() {
 			return START_NOT_STICKY
 		}
 
-		if (overlay == null) {
-			// Without the permission the window manager rejects the view with
-			// a BadTokenException. Checking first turns "the app crashed" into
-			// a log line and a service that simply does nothing.
-			if (!SystemOverlayHost.granted(this)) {
-				Log.w(TAG, "overlay permission not granted — bubble unavailable")
-				stopSelf()
-				return START_NOT_STICKY
-			}
+		refresh()
+		return START_STICKY
+	}
+
+	private fun refresh() {
+		if (!RhrSessionService.usesExternalVm) {
+			stopSelf()
+		}
+		if (playerVisible || !RhrSessionService.usesExternalVm) {
+			overlay?.detach()
+			overlay = null
+			return
+		}
+		if (overlay == null && SystemOverlayHost.granted(this)) {
 			overlay = DevOverlay(this, SystemOverlayHost(this)).also { it.attach() }
 		}
-		// STICKY: if Android reclaims us mid-session, come back — the session
-		// itself is still alive in RhrSessionService.
-		return START_STICKY
 	}
 
 	override fun onDestroy() {
 		overlay?.detach()
 		overlay = null
+		RhrSessionService.updateListeners.remove(refreshOverlay)
+		main.removeCallbacksAndMessages(null)
+		instance = null
 		super.onDestroy()
 	}
 
@@ -77,7 +91,13 @@ class OverlayService : Service() {
 	}
 
 	companion object {
-		private const val TAG = "rhr_overlay"
+		private var instance: OverlayService? = null
+		private var playerVisible = false
+
+		fun setPlayerVisible(visible: Boolean) {
+			playerVisible = visible
+			instance?.refresh()
+		}
 		private const val CHANNEL = "rhr_overlay"
 		private const val NOTIF_ID = 7414
 

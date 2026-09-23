@@ -37,7 +37,7 @@ interface OverlayHost {
 	 * In a system overlay it gets its OWN window of exactly that size, so no
 	 * touch outside it is ever routed to us.
 	 */
-	fun showChild(child: View, x: Int, y: Int, width: Int, height: Int) {}
+	fun showChild(child: View, x: Int, y: Int, width: Int, height: Int, touchable: Boolean = true) {}
 
 	/** Counterpart to [showChild]. */
 	fun hideChild(child: View) {}
@@ -51,11 +51,7 @@ interface OverlayHost {
 	/** Invoked when the system back key reaches an open modal. */
 	var onBackPressed: (() -> Unit)?
 
-	/**
-	 * True when this window sits above an app that is not ours, so nothing may
-	 * appear without the tester asking for it. Drives the "invisible until you
-	 * shake" contract.
-	 */
+	/** True for system windows above a separate debug app. */
 	val transient: Boolean
 }
 
@@ -86,7 +82,7 @@ class ActivityOverlayHost(private val activity: Activity) : OverlayHost {
 	// Inside our own Activity every piece already lives in the shared root, so
 	// showing and hiding is just visibility — the Activity owns the touches
 	// either way.
-	override fun showChild(child: View, x: Int, y: Int, width: Int, height: Int) {
+	override fun showChild(child: View, x: Int, y: Int, width: Int, height: Int, touchable: Boolean) {
 		child.visibility = View.VISIBLE
 	}
 
@@ -147,7 +143,7 @@ class SystemOverlayHost(private val context: Context) : OverlayHost {
 	 * Re-positions instead of re-adding when the child is already showing, so
 	 * a drag is a cheap layout update.
 	 */
-	override fun showChild(child: View, x: Int, y: Int, width: Int, height: Int) {
+	override fun showChild(child: View, x: Int, y: Int, width: Int, height: Int, touchable: Boolean) {
 		val existing = windows[child]
 		if (existing != null) {
 			val params = existing.layoutParams as WindowManager.LayoutParams
@@ -162,16 +158,17 @@ class SystemOverlayHost(private val context: Context) : OverlayHost {
 			width,
 			height,
 			WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-			// Touchable (no FLAG_NOT_TOUCHABLE): this window IS the bubble, and
-			// it is only as large as the bubble. NOT_FOCUSABLE keeps the target
-			// app's keyboard and back button working.
+			// Progress passes touches through; the bubble remains interactive.
 			WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-				WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+				WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+				(if (touchable) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE),
 			PixelFormat.TRANSLUCENT,
 		).apply {
 			gravity = Gravity.TOP or Gravity.START
 			this.x = x
 			this.y = y
+			// Android permits touches through an untrusted overlay at this opacity.
+			if (!touchable) alpha = 0.8f
 		}
 		windows[child] = holder
 		addWindow(holder, params)
