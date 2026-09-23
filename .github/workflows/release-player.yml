@@ -5,9 +5,8 @@ name: Release player APK
 # or manually from the Actions tab.
 #
 # The player is intentionally a DEBUG build: it needs the Dart VM Service
-# (JIT) to accept hot reloads. Debug APKs are signed with Flutter's
-# auto-generated debug keystore, so no signing secrets are required — the
-# workflow is reproducible for anyone who forks this repo.
+# (JIT) to accept hot reloads. Published debug APKs use a persistent private
+# signing key so Android accepts updates without uninstalling the player.
 
 on:
   push:
@@ -44,9 +43,21 @@ jobs:
         working-directory: player
         env:
           RELAY: ${{ github.event.inputs.relay_url }}
+          RHR_PLAYER_KEYSTORE_BASE64: ${{ secrets.RHR_PLAYER_KEYSTORE_BASE64 }}
+          RHR_PLAYER_KEY_PASSWORD: ${{ secrets.RHR_PLAYER_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          : "${RHR_PLAYER_KEYSTORE_BASE64:?Missing persistent player signing key}"
+          : "${RHR_PLAYER_KEY_PASSWORD:?Missing player signing password}"
+          export RHR_PLAYER_KEYSTORE="$RUNNER_TEMP/rhr-player.jks"
+          trap 'rm -f "$RHR_PLAYER_KEYSTORE"' EXIT
+          umask 077
+          printf '%s' "$RHR_PLAYER_KEYSTORE_BASE64" | base64 --decode > "$RHR_PLAYER_KEYSTORE"
+          unset RHR_PLAYER_KEYSTORE_BASE64
+          umask 022
           flutter pub get
           VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' ../cli/pubspec.yaml)
+          BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           # Stamp the release version into the APK. Without --build-name the
           # player reports player/pubspec.yaml's "0.1.0" for every release, so
@@ -56,11 +67,14 @@ jobs:
           if [ -n "$RELAY" ]; then
             echo "Baking relay: $RELAY"
             flutter build apk --debug --target-platform android-arm64 \
-              --build-name="$VERSION" --dart-define=RHR_RELAY="$RELAY"
+              --build-name="$VERSION" --build-number="$BUILD_NUMBER" --dart-define=RHR_RELAY="$RELAY"
           else
             flutter build apk --debug --target-platform android-arm64 \
-              --build-name="$VERSION"
+              --build-name="$VERSION" --build-number="$BUILD_NUMBER"
           fi
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          "$BUILD_TOOLS/apksigner" verify --print-certs build/app/outputs/flutter-apk/app-debug.apk > "$RUNNER_TEMP/rhr-player-signature.txt"
+          grep -Fx "Signer #1 certificate SHA-256 digest: $(cat tool/release-signing.sha256)" "$RUNNER_TEMP/rhr-player-signature.txt"
           mkdir -p release
           APK="rhr-player-${VERSION}-android-arm64.apk"
           cp build/app/outputs/flutter-apk/app-debug.apk "release/$APK"
@@ -69,6 +83,8 @@ jobs:
           cat > release/RELEASE_MANIFEST.txt <<EOF
           rhr Player ${VERSION}
           Android ABI: arm64-v8a
+          Android version code: ${BUILD_NUMBER}
+          Signing certificate SHA-256: $(cat tool/release-signing.sha256)
           Build mode: debug (Dart VM Service required for hot reload)
           Flutter identity: release/FLUTTER_VERSION.json
           Payload transport: direct WebRTC; the relay carries signaling only

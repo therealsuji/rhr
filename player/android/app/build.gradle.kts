@@ -130,7 +130,23 @@ android {
         resValue("string", "rhr_host", "player")
     }
 
+    val releaseKey = System.getenv("RHR_PLAYER_KEYSTORE")
+    if (releaseKey != null) {
+        signingConfigs.create("publishedPlayer") {
+            storeFile = file(releaseKey)
+            storePassword = System.getenv("RHR_PLAYER_KEY_PASSWORD")
+                ?: error("RHR_PLAYER_KEY_PASSWORD is required with RHR_PLAYER_KEYSTORE")
+            keyAlias = "rhr-player"
+            keyPassword = storePassword
+        }
+    }
+
     buildTypes {
+        debug {
+            if (releaseKey != null) {
+                signingConfig = signingConfigs.getByName("publishedPlayer")
+            }
+        }
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
