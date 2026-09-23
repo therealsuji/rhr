@@ -74,7 +74,7 @@ jobs:
           fi
           BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
           "$BUILD_TOOLS/apksigner" verify --print-certs build/app/outputs/flutter-apk/app-debug.apk | tee "$RUNNER_TEMP/rhr-player-signature.txt"
-          CERTIFICATES=$(sed -n 's/^Signer .* certificate SHA-256 digest: //p' "$RUNNER_TEMP/rhr-player-signature.txt" | sort -u)
+          CERTIFICATES=$(sed -n 's/^.* certificate SHA-256 digest: //p' "$RUNNER_TEMP/rhr-player-signature.txt" | sort -u)
           test "$CERTIFICATES" = "$(cat tool/release-signing.sha256)"
           mkdir -p release
           APK="rhr-player-${VERSION}-android-arm64.apk"
