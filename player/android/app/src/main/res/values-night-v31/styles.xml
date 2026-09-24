@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowSplashScreenBackground">@color/rhr_splash_background</item>
+        <!-- Android 12+ replaces the legacy launch drawable with the system
+             splash. Keep the branded mark visible during Flutter startup. -->
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/rhr_splash_logo</item>
+    </style>
+</resources>

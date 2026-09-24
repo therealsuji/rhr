@@ -5,9 +5,8 @@ name: Release player APK
 # or manually from the Actions tab.
 #
 # The player is intentionally a DEBUG build: it needs the Dart VM Service
-# (JIT) to accept hot reloads. Debug APKs are signed with Flutter's
-# auto-generated debug keystore, so no signing secrets are required — the
-# workflow is reproducible for anyone who forks this repo.
+# (JIT) to accept hot reloads. Published debug APKs use a persistent private
+# signing key so Android accepts updates without uninstalling the player.
 
 on:
   push:
@@ -40,32 +39,92 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Verify installed CLI dependencies
+        env:
+          PUB_CACHE: ${{ runner.temp }}/rhr-cli-install-cache
+        run: |
+          dart pub global activate --source git "$GITHUB_WORKSPACE" --git-path cli --git-ref "$GITHUB_SHA"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          config = Path(os.environ["PUB_CACHE"]) / "global_packages/rhr_cli/.dart_tool/package_config.json"
+          packages = json.loads(config.read_text())["packages"]
+          webrtc = next(package for package in packages if package["name"] == "webrtc_dart")
+          assert webrtc["rootUri"].rstrip("/").endswith("/third_party/webrtc_dart"), webrtc["rootUri"]
+          print("Installed CLI uses the repository's patched WebRTC package.")
+          PY
+          dart pub global run rhr_cli:rhr --version
+
       - name: Build player APK (debug)
         working-directory: player
         env:
           RELAY: ${{ github.event.inputs.relay_url }}
+          RHR_PLAYER_KEYSTORE_BASE64: ${{ secrets.RHR_PLAYER_KEYSTORE_BASE64 }}
+          RHR_PLAYER_KEY_PASSWORD: ${{ secrets.RHR_PLAYER_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          : "${RHR_PLAYER_KEYSTORE_BASE64:?Missing persistent player signing key}"
+          : "${RHR_PLAYER_KEY_PASSWORD:?Missing player signing password}"
+          export RHR_PLAYER_KEYSTORE="$RUNNER_TEMP/rhr-player.jks"
+          trap 'rm -f "$RHR_PLAYER_KEYSTORE"' EXIT
+          umask 077
+          printf '%s' "$RHR_PLAYER_KEYSTORE_BASE64" | base64 --decode > "$RHR_PLAYER_KEYSTORE"
+          unset RHR_PLAYER_KEYSTORE_BASE64
+          umask 022
           flutter pub get
+          VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' ../cli/pubspec.yaml)
+          BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # Stamp the release version into the APK. Without --build-name the
+          # player reports player/pubspec.yaml's "0.1.0" for every release, so
+          # beta.6, .7 and .8 are indistinguishable on the phone — and the
+          # in-app update check has nothing to compare against. $VERSION comes
+          # from cli/pubspec.yaml above, which stays the single source.
           if [ -n "$RELAY" ]; then
             echo "Baking relay: $RELAY"
-            flutter build apk --debug --dart-define=RHR_RELAY="$RELAY"
+            flutter build apk --debug --target-platform android-arm64 \
+              --build-name="$VERSION" --build-number="$BUILD_NUMBER" --dart-define=RHR_RELAY="$RELAY"
           else
-            flutter build apk --debug
+            flutter build apk --debug --target-platform android-arm64 \
+              --build-name="$VERSION" --build-number="$BUILD_NUMBER"
           fi
-          cp build/app/outputs/flutter-apk/app-debug.apk rhr-player.apk
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          "$BUILD_TOOLS/apksigner" verify --print-certs build/app/outputs/flutter-apk/app-debug.apk | tee "$RUNNER_TEMP/rhr-player-signature.txt"
+          CERTIFICATES=$(sed -n 's/^.* certificate SHA-256 digest: //p' "$RUNNER_TEMP/rhr-player-signature.txt" | sort -u)
+          test "$CERTIFICATES" = "$(cat tool/release-signing.sha256)"
+          mkdir -p release
+          APK="rhr-player-${VERSION}-android-arm64.apk"
+          cp build/app/outputs/flutter-apk/app-debug.apk "release/$APK"
+          sha256sum "release/$APK" > release/SHA256SUMS
+          flutter --version --machine | jq 'del(.flutterRoot)' > release/FLUTTER_VERSION.json
+          cat > release/RELEASE_MANIFEST.txt <<EOF
+          rhr Player ${VERSION}
+          Android ABI: arm64-v8a
+          Android version code: ${BUILD_NUMBER}
+          Signing certificate SHA-256: $(cat tool/release-signing.sha256)
+          Build mode: debug (Dart VM Service required for hot reload)
+          Flutter identity: release/FLUTTER_VERSION.json
+          Payload transport: direct WebRTC; the relay carries signaling only
+          Cellular/strict-NAT direct transport: not certified
+          EOF
+          dart run tool/check_16kb.dart "build/app/outputs/flutter-apk/app-debug.apk"
 
       - name: Upload artifact (for manual runs)
         uses: actions/upload-artifact@v4
         with:
           name: rhr-player-apk
-          path: player/rhr-player.apk
+          path: player/release
 
       - name: Attach APK to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
-          files: player/rhr-player.apk
+          files: |
+            player/release/*.apk
+            player/release/SHA256SUMS
+            player/release/FLUTTER_VERSION.json
+            player/release/RELEASE_MANIFEST.txt
           body: |
             **rhr player** — the generic Flutter shell. Sideload on the tester's phone.
 

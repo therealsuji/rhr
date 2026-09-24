@@ -6,29 +6,133 @@ import 'package:test/test.dart';
 
 void main() {
   const local = FlutterCompatibility(
-    frameworkVersion: '3.44.2',
+    frameworkVersion: '3.44.0',
     frameworkRevision: 'framework-a',
     engineRevision: 'engine-a',
-    dartSdkVersion: '3.12.2',
+    dartSdkVersion: '3.12.0',
+    channel: 'stable',
   );
 
   test('matching identities are compatible', () {
-    expect(local.differencesFrom(local), isEmpty);
+    final report = local.differencesFrom(local);
+    expect(report.isCompatible, isTrue);
+    expect(report.warnings, isEmpty);
   });
 
-  test('reports every incompatible runtime field', () {
+  test('patch drift inside one stable series is allowed with a warning', () {
+    // Real pairing from the Flutter release manifest: 3.44.0 pins Dart
+    // 3.12.0, 3.44.2 pins Dart 3.12.2.
     const player = FlutterCompatibility(
-      frameworkVersion: '3.43.0',
+      frameworkVersion: '3.44.2',
       frameworkRevision: 'framework-b',
       engineRevision: 'engine-b',
-      dartSdkVersion: '3.11.0',
+      dartSdkVersion: '3.12.2',
+      channel: 'stable',
     );
+    final report = local.differencesFrom(player);
+    expect(report.isCompatible, isTrue);
+    expect(report.warnings.single, contains('same stable series'));
+    expect(report.warnings.single, contains('3.44.0'));
+    expect(report.warnings.single, contains('3.44.2'));
+  });
 
-    expect(local.differencesFrom(player), [
+  test('dart-only patch drift stays inside the series', () {
+    const player = FlutterCompatibility(
+      frameworkVersion: '3.44.0',
+      frameworkRevision: 'framework-a',
+      engineRevision: 'engine-a',
+      dartSdkVersion: '3.12.2',
+      channel: 'stable',
+    );
+    final report = local.differencesFrom(player);
+    expect(report.isCompatible, isTrue);
+    expect(report.warnings.single, contains('Dart 3.12.2'));
+  });
+
+  test('sdk version strings with build suffixes compare by their semver', () {
+    // 3.38.0 reported "3.10.0 (build 3.10.0-290.4.beta)" while 3.38.1
+    // reported plain "3.10.0" for the same SDK.
+    const dev = FlutterCompatibility(
+      frameworkVersion: '3.38.1',
+      frameworkRevision: 'r1',
+      engineRevision: 'e1',
+      dartSdkVersion: '3.10.0',
+      channel: 'stable',
+    );
+    const player = FlutterCompatibility(
+      frameworkVersion: '3.38.0',
+      frameworkRevision: 'r0',
+      engineRevision: 'e0',
+      dartSdkVersion: '3.10.0 (build 3.10.0-290.4.beta)',
+      channel: 'stable',
+    );
+    final report = dev.differencesFrom(player);
+    expect(report.isCompatible, isTrue);
+    expect(report.warnings, isNotEmpty);
+  });
+
+  test('cross-minor drift blocks even on the stable channel', () {
+    const player = FlutterCompatibility(
+      frameworkVersion: '3.45.0',
+      frameworkRevision: 'framework-c',
+      engineRevision: 'engine-c',
+      dartSdkVersion: '3.13.0',
+      channel: 'stable',
+    );
+    final report = local.differencesFrom(player);
+    expect(report.isCompatible, isFalse);
+    expect(report.warnings, isEmpty);
+    expect(report.blockers, hasLength(4));
+  });
+
+  test('unknown channels keep the exact-identity gate', () {
+    const player = FlutterCompatibility(
+      frameworkVersion: '3.44.2',
+      frameworkRevision: 'framework-b',
+      engineRevision: 'engine-b',
+      dartSdkVersion: '3.12.2',
+    );
+    final report = local.differencesFrom(player);
+    expect(report.isCompatible, isFalse);
+    expect(report.blockers, [
+      'Flutter version: local 3.44.0, player 3.44.2',
       'Flutter revision: local framework-a, player framework-b',
       'engine revision: local engine-a, player engine-b',
-      'Dart SDK: local 3.12.2, player 3.11.0',
+      'Dart SDK: local 3.12.0, player 3.12.2',
     ]);
+  });
+
+  test('non-stable channels keep the exact-identity gate', () {
+    const player = FlutterCompatibility(
+      frameworkVersion: '3.44.2',
+      frameworkRevision: 'framework-b',
+      engineRevision: 'engine-b',
+      dartSdkVersion: '3.12.2',
+      channel: 'beta',
+    );
+    final report = local.differencesFrom(player);
+    expect(report.isCompatible, isFalse);
+  });
+
+  test('project profile applies the same gate to every player capability', () {
+    const profile = ProjectCompatibilityProfile(
+      flutter: local,
+      androidPlugins: {'camera_android': '1.2.3'},
+      androidPermissions: {'android.permission.CAMERA'},
+      unsupportedAndroidInputs: ['android/app/src/main/kotlin/Payments.kt'],
+    );
+
+    final report = profile.differencesFrom({
+      'frameworkVersion': '3.44.0',
+      'frameworkRevision': 'framework-a',
+      'engineRevision': 'engine-a',
+      'dartSdkVersion': '3.12.0',
+      'channel': 'stable',
+      'androidPlugins': {'camera_android': '1.2.3'},
+      'androidPermissions': ['android.permission.CAMERA'],
+    });
+    expect(report.blockers, ['android/app/src/main/kotlin/Payments.kt']);
+    expect(report.warnings, isEmpty);
   });
 
   test('player plugin profile may be a compatible superset', () {

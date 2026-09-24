@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Library manifest: merged into host apps. Brings the session service and
+     the permissions it needs; the host adds nothing by hand. Sessions are
+     driven explicitly by the host (the player's lobby, the connector's
+     picker), never started behind the user's back. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <application>
+        <!-- Native session service: the tunnel bridge must live outside the
+             Dart world so hot restarts can't kill it. -->
+        <service
+            android:name="dev.rhr.rhr_player.RhrSessionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

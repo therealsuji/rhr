@@ -83,4 +83,39 @@ flutter:
       );
     },
   );
+
+  group('readProjectApplicationId', () {
+    Directory projectWith(String file, String contents) {
+      final project = Directory.systemTemp.createTempSync('rhr_appid_');
+      addTearDown(() => project.deleteSync(recursive: true));
+      Directory('${project.path}/android/app').createSync(recursive: true);
+      File('${project.path}/android/app/$file')
+          .writeAsStringSync(contents);
+      return project;
+    }
+
+    test('reads the Kotlin DSL form', () {
+      final project = projectWith(
+        'build.gradle.kts',
+        'android { defaultConfig { applicationId = "com.suji.gymapp" } }',
+      );
+      expect(readProjectApplicationId(project.path), 'com.suji.gymapp');
+    });
+
+    test('reads the legacy Groovy form', () {
+      final project = projectWith(
+        'build.gradle',
+        'android { defaultConfig { applicationId "com.example.legacy" } }',
+      );
+      expect(readProjectApplicationId(project.path), 'com.example.legacy');
+    });
+
+    test('fails loudly when there is no applicationId to target', () {
+      final project = projectWith('build.gradle.kts', 'android { }');
+      expect(
+        () => readProjectApplicationId(project.path),
+        throwsA(isA<StateError>()),
+      );
+    });
+  });
 }

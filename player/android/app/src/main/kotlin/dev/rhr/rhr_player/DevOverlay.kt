@@ -1,6 +1,10 @@
 package dev.rhr.rhr_player
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -10,31 +14,55 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import androidx.dynamicanimation.animation.SpringAnimation
-import androidx.dynamicanimation.animation.SpringForce
+import android.util.Log
+import android.os.SystemClock
 import kotlin.math.sqrt
 
 /**
- * Native dev overlay layered above the Flutter surface, INSIDE the player's own
- * Activity — the guest app runs in this same process via a kernel swap, so this
- * view sits above whatever Flutter renders. No SYSTEM_ALERT_WINDOW needed: it's
- * our own window.
+ * Native dev overlay: shake to reveal a draggable bubble, tap it to see the
+ * live connection. Deliberately native rather than Flutter — in hosted mode a
+ * guest hot restart swaps the entire Dart kernel (a Flutter-drawn overlay
+ * would vanish with it), and in connector mode the foreground app is a
+ * different process with no rhr code in it at all.
+ *
+ * The same view tree serves both modes; only the WINDOW differs, which is what
+ * [host] abstracts:
+ *
+ *  - [ActivityOverlayHost] adds it to the player's own Activity. No permission
+ *    needed, but only visible while the player is foreground — right for
+ *    hosted mode, where the guest runs inside this very Activity.
+ *  - [SystemOverlayHost] puts it in a TYPE_APPLICATION_OVERLAY window so it
+ *    floats above the tester's own app — required for connector mode, at the
+ *    cost of the "Display over other apps" permission.
  *
  * Design language: dark translucent surfaces, rounded corners, the rhr violet
  * (#7C4DFF) as the single accent, generous padding. Meant to read as a polished
  * product chrome, not a debug widget.
  */
-class DevOverlay(private val activity: Activity) : SensorEventListener {
+class DevOverlay(
+	// A Context, not an Activity: in connector mode the overlay belongs to a
+	// foreground service and there is no Activity of ours on screen.
+	private val activity: Context,
+	private val host: OverlayHost,
+) : SensorEventListener {
+
+	constructor(activity: Activity) : this(activity, ActivityOverlayHost(activity))
+
+	/** Views must be touched on the main thread, Activity or not. */
+	private val ui = Handler(Looper.getMainLooper())
 
 	private val density = activity.resources.displayMetrics.density
 	private fun dp(v: Int): Int = (v * density).toInt()
@@ -62,20 +90,49 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 	}
 
 	// Live safe-area insets (status bar / notch on top, nav bar / gesture pill on
-	// bottom). Read from the window; fall back to the status-bar dimen if the
-	// insets aren't attached yet.
-	private fun safeTop(): Int {
-		val insets = root.rootWindowInsets ?: return statusBarHeight()
-		return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-			insets.getInsets(android.view.WindowInsets.Type.systemBars()).top
-		else @Suppress("DEPRECATION") insets.systemWindowInsetTop
+	// bottom).
+	//
+	// These MUST NOT be read from `root`: in connector mode the bubble lives in
+	// its own window and `root` is never attached to anything, so
+	// rootWindowInsets is null and the old fallback quietly returned a made-up
+	// 16dp. On this phone the real nav bar is 135px, so the bottom "hot corner"
+	// sat ~68px too low, under the nav bar. WindowManager knows the true insets
+	// whether or not any of our views are attached.
+	private fun systemBarInsets(): android.graphics.Insets? {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+		val wm = activity.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+			?: return null
+		return wm.currentWindowMetrics.windowInsets
+			.getInsets(android.view.WindowInsets.Type.systemBars())
 	}
-	private fun safeBottom(): Int {
-		val insets = root.rootWindowInsets ?: return dp(16)
-		return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-			insets.getInsets(android.view.WindowInsets.Type.systemBars()).bottom
-		else @Suppress("DEPRECATION") insets.systemWindowInsetBottom
+
+	/**
+	 * Full screen size in pixels, from the same source as the insets.
+	 * resources.displayMetrics can exclude system bars, which would make the
+	 * bubble's clamp disagree with the window it actually lives in.
+	 */
+	private fun screenSize(): Pair<Int, Int> {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+			val wm = activity.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+			wm?.currentWindowMetrics?.bounds?.let { return Pair(it.width(), it.height()) }
+		}
+		val m = activity.resources.displayMetrics
+		return Pair(m.widthPixels, m.heightPixels)
 	}
+
+	private fun safeTop(): Int =
+		systemBarInsets()?.top
+			?: root.rootWindowInsets?.let {
+				@Suppress("DEPRECATION") it.systemWindowInsetTop
+			}
+			?: statusBarHeight()
+
+	private fun safeBottom(): Int =
+		systemBarInsets()?.bottom
+			?: root.rootWindowInsets?.let {
+				@Suppress("DEPRECATION") it.systemWindowInsetBottom
+			}
+			?: dp(16)
 
 	// ---- interaction polish ----
 	private fun haptic(view: View, strong: Boolean = false) {
@@ -84,15 +141,85 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 		view.performHapticFeedback(c)
 	}
 
-	// A View that spring-animates in from translationY + alpha (Expo-style pop).
+	// ---- animation ----
+	//
+	// Every animation here is a plain Handler-driven tween. Nothing may sit on
+	// the Choreographer or on android.animation, because in connector mode the
+	// player is a background process for the whole session, and background
+	// processes get no animation frames:
+	//
+	//  - Android 13+ pauses every android.animation Animator after ~10 s in
+	//    the background, and the opt-out API is hidden.
+	//  - Samsung's Choreographer drops animation callbacks outright
+	//    ("stop animation in background states" in logcat), which also stalls
+	//    DynamicAnimation springs. Observed on Android 16: the shake added the
+	//    bubble window, the pop-in never ticked, and it sat at alpha 0.
+	//
+	// Handler messages keep flowing, and a view that changes still invalidates
+	// and traverses, so the tween draws. Even if it did not, every state
+	// transition below is timed by the same Handler, so nothing depends on a
+	// frame arriving. One tween per view: a new one replaces the old.
+
+	private val tweens = HashMap<View, Runnable>()
+
+	/**
+	 * Runs [apply] with an eased 0..1 over [durationMs], then [onEnd]. Starting
+	 * a new tween on the same view cancels the old one, whose onEnd never runs.
+	 */
+	private fun tween(
+		view: View,
+		durationMs: Long,
+		ease: (Float) -> Float = ::easeOut,
+		onEnd: (() -> Unit)? = null,
+		apply: (Float) -> Unit,
+	) {
+		cancelTween(view)
+		val start = SystemClock.uptimeMillis()
+		val step = object : Runnable {
+			override fun run() {
+				val t = ((SystemClock.uptimeMillis() - start).toFloat() / durationMs)
+					.coerceIn(0f, 1f)
+				apply(ease(t))
+				if (t < 1f) {
+					ui.postDelayed(this, FRAME_MS)
+				} else {
+					if (tweens[view] === this) tweens.remove(view)
+					onEnd?.invoke()
+				}
+			}
+		}
+		tweens[view] = step
+		step.run()
+	}
+
+	private fun cancelTween(view: View) {
+		tweens.remove(view)?.let { ui.removeCallbacks(it) }
+	}
+
+	private fun lerp(from: Float, to: Float, t: Float) = from + (to - from) * t
+
+	/** Tween [view]'s alpha and uniform scale from where they are to the targets. */
+	private fun tweenTo(
+		view: View, alpha: Float, scale: Float, durationMs: Long,
+		ease: (Float) -> Float = ::easeOut, onEnd: (() -> Unit)? = null,
+	) {
+		val a0 = view.alpha; val s0 = view.scaleX
+		tween(view, durationMs, ease, onEnd) { t ->
+			view.alpha = lerp(a0, alpha, t)
+			val sc = lerp(s0, scale, t)
+			view.scaleX = sc; view.scaleY = sc
+		}
+	}
+
+	private fun scaleTo(view: View, scale: Float) = tweenTo(view, view.alpha, scale, 90)
+
+	// A sheet that slides up from translationY while fading in.
 	private fun springIn(view: View, fromY: Float) {
 		view.translationY = fromY
 		view.alpha = 0f
-		view.animate().alpha(1f).setDuration(120).start()
-		SpringAnimation(view, SpringAnimation.TRANSLATION_Y, 0f).apply {
-			spring.stiffness = SpringForce.STIFFNESS_LOW
-			spring.dampingRatio = SpringForce.DAMPING_RATIO_MEDIUM_BOUNCY
-			start()
+		tween(view, 260, ::easeOutBack) { t ->
+			view.alpha = t.coerceAtMost(1f)
+			view.translationY = fromY * (1 - t)
 		}
 	}
 
@@ -114,30 +241,85 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 	private var menu: View? = null
 
 	private val sensors =
-		activity.getSystemService(Activity.SENSOR_SERVICE) as SensorManager?
-	private var lastShake = 0L
+		activity.getSystemService(Context.SENSOR_SERVICE) as SensorManager?
+	private val shake = ShakeDetector()
+
+	// Bubble position in screen pixels. The single source of truth for both
+	// hosts: a system overlay moves its window here, an Activity moves the
+	// view's margins to the same place.
+	private var fabX = 0
+	private var fabY = 0
+	private val fabSize get() = dp(46)
+
+	// Whether the bubble is on screen is tracked by the state machine below,
+	// never read off fab.visibility: in a system overlay the bubble is hidden
+	// by REMOVING ITS WINDOW, which leaves the view's own visibility untouched.
+
+	/**
+	 * The "drop here to dismiss" target, shown at the bottom of the screen only
+	 * while the bubble is being dragged — the chat-head convention. Lives in its
+	 * own window like the bubble does, so it never touches the app underneath.
+	 */
+	private var dismissTarget: View? = null
+	private val dismissSize get() = dp(64)
+
+	private var menuProgress: TextView? = null
+	private var menuRestart: View? = null
+	private var debugMenuReceiver: BroadcastReceiver? = null
+
+	private var attached = false
+	private val onSessionUpdate: () -> Unit = { ui.post { render() } }
 
 	fun attach() {
-		root = FrameLayout(activity)
-		activity.addContentView(
-			root,
-			FrameLayout.LayoutParams(
-				ViewGroup.LayoutParams.MATCH_PARENT,
-				ViewGroup.LayoutParams.MATCH_PARENT))
+		attached = true
+		root = host.createRoot(activity)
+		host.add(root)
+		// Back closes the panel rather than falling through to the app below.
+		host.onBackPressed = { ui.post { closeMenu() } }
 
+		if (activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+			val receiver = object : BroadcastReceiver() {
+				override fun onReceive(context: Context, intent: Intent) {
+					if (host.transient || (activity as? Activity)?.hasWindowFocus() == true) {
+						reveal()
+						if (menu == null) toggleMenu()
+					}
+				}
+			}
+			val filter = IntentFilter("dev.rhr.DEBUG_MENU")
+			if (Build.VERSION.SDK_INT >= 33) activity.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+			else activity.registerReceiver(receiver, filter)
+			debugMenuReceiver = receiver
+		}
 		buildProgressCard()
 		buildFab()
 		render()
 
-		RhrSessionService.onUpdate = { activity.runOnUiThread { render() } }
+		RhrSessionService.updateListeners.add(onSessionUpdate)
 		sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
-			sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+			// GAME rate (~50 Hz): a shake is a 3-5 Hz oscillation, and the UI
+			// rate (~15 Hz) is too coarse to see its direction reversals
+			// reliably. Delivered on the main thread so the detector and the
+			// bubble state are only ever touched from one thread.
+			sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, ui)
 		}
 	}
 
 	fun detach() {
-		RhrSessionService.onUpdate = null
+		attached = false
+		debugMenuReceiver?.let { activity.unregisterReceiver(it) }
+		debugMenuReceiver = null
+		RhrSessionService.updateListeners.remove(onSessionUpdate)
 		sensors?.unregisterListener(this)
+		ui.removeCallbacks(idleHide)
+		cancelTween(fab)
+		snap?.let { ui.removeCallbacks(it) }
+		bubble = Bubble.HIDDEN
+		// Tearing down mid-drag would otherwise strand the dismiss target on
+		// screen with nothing left to remove it.
+		hideDismissTarget()
+		host.remove(root)
+		ui.removeCallbacksAndMessages(null)
 	}
 
 	// ---- progress card (top, floating pill) ------------------------------
@@ -201,6 +383,9 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 			topMargin = dp(10)
 		})
 
+		// Hidden until the session reports progress.
+		card.visibility = View.GONE
+
 		val lp = FrameLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT,
 			ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -233,41 +418,82 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 			elevation = dpf(6f)
 			outlineProvider = ViewOutlineProvider.BACKGROUND
 		}
-		val lp = FrameLayout.LayoutParams(dp(46), dp(46), Gravity.TOP or Gravity.START)
-		lp.leftMargin = dp(16)
-		lp.topMargin = statusBarHeight() + dp(72)
+		fabX = dp(16)
+		fabY = statusBarHeight() + dp(72)
 		fab.visibility = View.GONE   // hidden until a shake reveals it
-		root.addView(fab, lp)
+		// In an Activity the bubble lives in the shared root; in a system
+		// overlay showChild() gives it its own window instead, so it must not
+		// be pre-parented there.
+		if (!host.transient) {
+			val lp = FrameLayout.LayoutParams(fabSize, fabSize, Gravity.TOP or Gravity.START)
+			lp.leftMargin = fabX
+			lp.topMargin = fabY
+			root.addView(fab, lp)
+		}
 
 		var downX = 0f; var downY = 0f; var startL = 0; var startT = 0
 		var moved = false
 		fab.setOnTouchListener { v, e ->
-			val p = v.layoutParams as FrameLayout.LayoutParams
 			when (e.action) {
 				MotionEvent.ACTION_DOWN -> {
+					when (bubble) {
+						// A window on its way out does not take touches; the
+						// tester was aiming at whatever is underneath by now.
+						Bubble.HIDDEN, Bubble.HIDING -> return@setOnTouchListener false
+						// Tapped mid pop-in: land it and carry on, so a quick
+						// tester never has to wait out the animation.
+						Bubble.SHOWING -> settleVisible()
+						Bubble.VISIBLE -> {}
+					}
+					ui.removeCallbacks(idleHide)   // never vanish under a finger
+					snap?.let { ui.removeCallbacks(it) }   // grabbed mid-snap: finger wins
 					downX = e.rawX; downY = e.rawY
-					startL = p.leftMargin; startT = p.topMargin; moved = false
-					v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(80).start()
+					startL = fabX; startT = fabY; moved = false
+					scaleTo(v, 0.9f)
 					true
 				}
 				MotionEvent.ACTION_MOVE -> {
 					val dx = (e.rawX - downX).toInt(); val dy = (e.rawY - downY).toInt()
-					if (kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) moved = true
-					p.leftMargin = (startL + dx)
-					p.topMargin = (startT + dy)
-						.coerceIn(safeTop(), root.height - v.height - safeBottom())
-					v.layoutParams = p
+					if (kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
+						if (!moved) showDismissTarget()   // first real movement
+						moved = true
+					}
+					// Moves the bubble's own window, which is what keeps the
+					// touchable area the size of the bubble and no larger.
+					moveFab(startL + dx, startT + dy)
+					if (moved) {
+						// Grow the target and shrink the bubble as they meet, so
+						// the drop point is obvious before letting go.
+						val over = overDismissTarget()
+						dismissTarget?.let { scaleTo(it, if (over) 1.25f else 1f) }
+						scaleTo(v, if (over) 0.7f else 0.9f)
+					}
 					true
 				}
 				MotionEvent.ACTION_UP -> {
-					v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+					scaleTo(v, 1f)
 					if (!moved) {
-						fab.removeCallbacks(hideFabRunnable)   // keep fab while panel open
-						toggleMenu()
+						toggleMenu()   // the panel keeps the bubble up while open
+					} else if (overDismissTarget()) {
+						// Dropped on the target: gone at once, no waiting out
+						// the idle timer.
+						haptic(v, strong = true)
+						hideDismissTarget()
+						hide()
+						// The next reveal should come back where the bubble used
+						// to rest, not on the spot where it was thrown away.
+						fabX = startL; fabY = startT
 					} else {
+						hideDismissTarget()
 						snapToCorner()
-						fab.postDelayed(hideFabRunnable, 5000) // re-arm idle hide
+						armIdleHide(IDLE_MS)
 					}
+					true
+				}
+				MotionEvent.ACTION_CANCEL -> {
+					scaleTo(v, 1f)
+					hideDismissTarget()
+					armIdleHide(IDLE_MS)
 					true
 				}
 				else -> false
@@ -275,81 +501,229 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 		}
 	}
 
-	private val hideFabRunnable = Runnable { hideFab() }
+	// ---- bubble lifecycle ---------------------------------------------------
+	//
+	// One explicit state machine. The two ways this used to go wrong were both
+	// races between an asynchronous callback and a state change it did not
+	// know about: a fade-out's end action removing a window that a fresh shake
+	// had just re-shown, and a hide timer posted on a view that was not
+	// attached yet. So:
+	//
+	//  - every state change goes through transition(), which bumps `epoch`;
+	//  - every animation end action captures the epoch it started under and
+	//    does nothing if a transition happened in the meantime;
+	//  - the idle timer lives on the main Handler, never on the view, and
+	//    transition() always cancels it.
+	//
+	// Whatever order shakes, taps, timers and animation callbacks arrive in,
+	// the bubble is in exactly one of these states and only the newest intent
+	// can act on it.
 
-	// Shake ONLY reveals the fab (never opens the panel). The panel opens solely
-	// by tapping the fab. The fab auto-hides after a few idle seconds so it never
-	// lingers over the tester's app.
-	private fun revealFab() {
-		fab.removeCallbacks(hideFabRunnable)
-		fab.postDelayed(hideFabRunnable, 5000)
-		if (fab.visibility == View.VISIBLE) return   // already shown; just extend
-		fab.visibility = View.VISIBLE
-		fab.scaleX = 0.4f; fab.scaleY = 0.4f; fab.alpha = 0f
-		fab.animate().alpha(1f).setDuration(120).start()
-		SpringAnimation(fab, SpringAnimation.SCALE_X, 1f).apply {
-			spring.stiffness = SpringForce.STIFFNESS_LOW
-			spring.dampingRatio = SpringForce.DAMPING_RATIO_MEDIUM_BOUNCY; start()
+	private enum class Bubble { HIDDEN, SHOWING, VISIBLE, HIDING }
+
+	private var bubble = Bubble.HIDDEN
+	private var epoch = 0
+
+	private fun transition(to: Bubble) {
+		bubble = to
+		epoch++
+		ui.removeCallbacks(idleHide)
+	}
+
+	private val idleHide = Runnable {
+		// Nothing to check here: it is only ever armed in VISIBLE with the
+		// panel closed, and transition() and a finger-down both cancel it.
+		hide()
+	}
+
+	private fun armIdleHide(delayMs: Long) {
+		ui.removeCallbacks(idleHide)
+		// While the panel is open the bubble stays; closeMenu() re-arms this.
+		if (bubble == Bubble.VISIBLE && menu == null) ui.postDelayed(idleHide, delayMs)
+	}
+
+	/**
+	 * A shake: bring the bubble up, or keep it up a while longer if it is
+	 * already there. Never opens the panel; that is a tap on the bubble.
+	 */
+	private fun reveal() {
+		when (bubble) {
+			Bubble.HIDDEN -> {
+				// Own small window (system overlay) or plain visibility
+				// (Activity). Either way nothing outside the bubble becomes
+				// touchable.
+				host.showChild(fab, fabX, fabY, fabSize, fabSize)
+				fab.visibility = View.VISIBLE
+				fab.alpha = 0f
+				fab.scaleX = 0.4f; fab.scaleY = 0.4f
+				popIn()
+			}
+			// Caught on the way out: the window is still there, so turn the
+			// animation around from wherever it got to. showChild() only
+			// re-positions here, in case the resting spot changed meanwhile.
+			Bubble.HIDING -> {
+				host.showChild(fab, fabX, fabY, fabSize, fabSize)
+				popIn()
+			}
+			Bubble.SHOWING -> {}
+			Bubble.VISIBLE -> armIdleHide(IDLE_MS)
 		}
-		SpringAnimation(fab, SpringAnimation.SCALE_Y, 1f).apply {
-			spring.stiffness = SpringForce.STIFFNESS_LOW
-			spring.dampingRatio = SpringForce.DAMPING_RATIO_MEDIUM_BOUNCY; start()
+		// Feedback goes through the bubble, not `root`: in connector mode root
+		// is never attached, and haptics on a detached view are dropped. The
+		// post lands once the bubble's window is attached.
+		fab.post { haptic(fab, strong = true) }
+	}
+
+	private fun popIn() {
+		transition(Bubble.SHOWING)
+		val started = epoch
+		tweenTo(fab, alpha = 1f, scale = 1f, durationMs = 240, ease = ::easeOutBack) {
+			if (epoch != started) return@tweenTo
+			transition(Bubble.VISIBLE)
+			armIdleHide(IDLE_MS)
 		}
 	}
 
-	private fun hideFab() {
-		if (menu != null) return   // don't hide while the panel is open
-		fab.animate().alpha(0f).scaleX(0.4f).scaleY(0.4f).setDuration(160)
-			.withEndAction { fab.visibility = View.GONE }.start()
+	/** Skips the rest of the pop-in; used when the tester touches it early. */
+	private fun settleVisible() {
+		cancelTween(fab)
+		fab.alpha = 1f
+		fab.scaleX = 1f; fab.scaleY = 1f
+		transition(Bubble.VISIBLE)
 	}
 
-	// Snap the fab to the nearest of the four screen corners (hot corners).
+	/** Shrinks the bubble away and, once gone, removes its window. */
+	private fun hide() {
+		when (bubble) {
+			Bubble.HIDDEN, Bubble.HIDING -> return
+			Bubble.SHOWING, Bubble.VISIBLE -> {}
+		}
+		transition(Bubble.HIDING)
+		val started = epoch
+		tweenTo(fab, alpha = 0f, scale = 0.4f, durationMs = 160) {
+			if (epoch != started) return@tweenTo
+			remove()
+		}
+	}
+
+	/** Takes the bubble off screen right now, animation or not. */
+	private fun remove() {
+		transition(Bubble.HIDDEN)
+		cancelTween(fab)
+		// Removing the window (not just the view) is what hands every touch
+		// back to the app underneath.
+		host.hideChild(fab)
+	}
+
+	/** Builds the dismiss target lazily; it exists only during a drag. */
+	private fun dismissTargetView(): View {
+		dismissTarget?.let { return it }
+		val v = TextView(activity).apply {
+			text = "✕"
+			setTextColor(Color.WHITE)
+			textSize = 22f
+			gravity = Gravity.CENTER
+			background = GradientDrawable().apply {
+				shape = GradientDrawable.OVAL
+				setColor(Color.parseColor("#CC2A2140"))
+			}
+			elevation = dpf(4f)
+			outlineProvider = ViewOutlineProvider.BACKGROUND
+		}
+		dismissTarget = v
+		return v
+	}
+
+	private fun dismissTargetPosition(): Pair<Int, Int> {
+		val (w, h) = screenSize()
+		return Pair(
+			(w - dismissSize) / 2,
+			h - dismissSize - safeBottom() - dp(28),
+		)
+	}
+
+	private fun showDismissTarget() {
+		val v = dismissTargetView()
+		val (x, y) = dismissTargetPosition()
+		host.showChild(v, x, y, dismissSize, dismissSize)
+		v.alpha = 0f
+		v.scaleX = 1f; v.scaleY = 1f
+		tweenTo(v, alpha = 1f, scale = 1f, durationMs = 120)
+	}
+
+	private fun hideDismissTarget() {
+		val v = dismissTarget ?: return
+		host.hideChild(v)
+	}
+
+	/** True when the bubble's centre is over the dismiss target. */
+	private fun overDismissTarget(): Boolean {
+		if (dismissTarget == null) return false
+		val (tx, ty) = dismissTargetPosition()
+		val cx = fabX + fabSize / 2
+		val cy = fabY + fabSize / 2
+		val tcx = tx + dismissSize / 2
+		val tcy = ty + dismissSize / 2
+		val dx = (cx - tcx).toFloat()
+		val dy = (cy - tcy).toFloat()
+		// A generous radius: dropping "near enough" should count, the way it
+		// does in every chat-head implementation.
+		return sqrt(dx * dx + dy * dy) < dismissSize
+	}
+
+	/** Moves the bubble to a screen position, clamped inside the safe area. */
+	private fun moveFab(x: Int, y: Int) {
+		val (w, h) = screenSize()
+		fabX = x.coerceIn(0, w - fabSize)
+		fabY = y.coerceIn(safeTop(), h - fabSize - safeBottom())
+		if (host.transient) {
+			host.showChild(fab, fabX, fabY, fabSize, fabSize)
+		} else {
+			val p = fab.layoutParams as FrameLayout.LayoutParams
+			p.leftMargin = fabX
+			p.topMargin = fabY
+			fab.layoutParams = p
+		}
+	}
+
+	/**
+	 * Hot corners: let go of the bubble and it springs to the nearest corner,
+	 * the way a chat head does. Animated in screen space so it works whether the
+	 * bubble is a window (connector mode) or a view (hosted mode).
+	 */
 	private fun snapToCorner() {
-		val p = fab.layoutParams as FrameLayout.LayoutParams
-		val w = root.width; val h = root.height
-		if (w == 0 || h == 0) return
+		val (w, h) = screenSize()
 		val margin = dp(16)
-		val cx = p.leftMargin + fab.width / 2
-		val cy = p.topMargin + fab.height / 2
-		val targetL = if (cx < w / 2) margin else w - fab.width - margin
-		val targetT = if (cy < h / 2) safeTop() + dp(56)
-			else h - fab.height - safeBottom() - dp(24)
-		SpringAnimation(fab, object : androidx.dynamicanimation.animation.FloatPropertyCompat<View>("l") {
-			override fun getValue(v: View) = (v.layoutParams as FrameLayout.LayoutParams).leftMargin.toFloat()
-			override fun setValue(v: View, value: Float) {
-				val q = v.layoutParams as FrameLayout.LayoutParams
-				q.leftMargin = value.toInt(); v.layoutParams = q
+		val targetX = if (fabX + fabSize / 2 < w / 2) margin else w - fabSize - margin
+		val targetY = if (fabY + fabSize / 2 < h / 2) safeTop() + dp(56)
+			else h - fabSize - safeBottom() - dp(24)
+
+		val fromX = fabX
+		val fromY = fabY
+		snap?.let { ui.removeCallbacks(it) }
+		val start = SystemClock.uptimeMillis()
+		val step = object : Runnable {
+			override fun run() {
+				val t = easeOut(((SystemClock.uptimeMillis() - start).toFloat() / 220)
+					.coerceIn(0f, 1f))
+				moveFab(lerp(fromX.toFloat(), targetX.toFloat(), t).toInt(),
+					lerp(fromY.toFloat(), targetY.toFloat(), t).toInt())
+				if (t < 1f) ui.postDelayed(this, FRAME_MS) else snap = null
 			}
-		}, targetL.toFloat()).apply {
-			spring.stiffness = SpringForce.STIFFNESS_MEDIUM
-			spring.dampingRatio = SpringForce.DAMPING_RATIO_LOW_BOUNCY; start()
 		}
-		SpringAnimation(fab, object : androidx.dynamicanimation.animation.FloatPropertyCompat<View>("t") {
-			override fun getValue(v: View) = (v.layoutParams as FrameLayout.LayoutParams).topMargin.toFloat()
-			override fun setValue(v: View, value: Float) {
-				val q = v.layoutParams as FrameLayout.LayoutParams
-				q.topMargin = value.toInt(); v.layoutParams = q
-			}
-		}, targetT.toFloat()).apply {
-			spring.stiffness = SpringForce.STIFFNESS_MEDIUM
-			spring.dampingRatio = SpringForce.DAMPING_RATIO_LOW_BOUNCY; start()
-		}
+		snap = step
+		step.run()
 	}
+
+	/** The in-flight corner snap, so a new grab can stop it. */
+	private var snap: Runnable? = null
 
 	// ---- shake ------------------------------------------------------------
 
 	override fun onSensorChanged(e: SensorEvent) {
-		val g = sqrt(
-			(e.values[0] * e.values[0] +
-				e.values[1] * e.values[1] +
-				e.values[2] * e.values[2]).toDouble()) / SensorManager.GRAVITY_EARTH
-		if (g > 2.7) {
-			val now = System.currentTimeMillis()
-			if (now - lastShake > 1200) {
-				lastShake = now
-				activity.runOnUiThread { haptic(root, strong = true); revealFab() }
-			}
-		}
+		if (!shake.onSample(e.timestamp, e.values[0], e.values[1], e.values[2])) return
+		Log.i(TAG, "shake")
+		reveal()
 	}
 
 	override fun onAccuracyChanged(s: Sensor?, a: Int) {}
@@ -364,8 +738,8 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 			setBackgroundColor(Color.parseColor("#99000000"))
 			setOnClickListener { closeMenu() }
 			alpha = 0f
-			animate().alpha(1f).setDuration(150).start()
 		}
+		tweenTo(scrim, alpha = 1f, scale = 1f, durationMs = 150)
 
 		val sheet = LinearLayout(activity).apply {
 			orientation = LinearLayout.VERTICAL
@@ -377,6 +751,11 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 			// Swallow taps so they don't fall through to the scrim.
 			setOnClickListener { }
 		}
+
+		// Swipe down to dismiss. The sheet already draws a grabber, so the
+		// gesture is the one people will try first; without it the handle is
+		// decoration that lies about what the sheet does.
+		attachSwipeToDismiss(sheet)
 
 		// Grabber
 		sheet.addView(View(activity).apply {
@@ -453,44 +832,16 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 		})
 		statusCard.addView(statusLine, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3); bottomMargin = dp(3) })
+		menuProgress = TextView(activity).apply {
+			setTextColor(ink)
+			textSize = 12.5f
+			setPadding(0, dp(8), 0, 0)
+			statusCard.addView(this)
+		}
 		row("session", RhrSessionService.currentCode.ifEmpty { "—" })
-		row("vm", RhrSessionService.currentVm.ifEmpty { "—" }, mono = true)
-		val cacheMb = RhrSessionService.assetCacheSizeBytes() / (1024 * 1024)
-		row("cache", "$cacheMb MB")
 		sheet.addView(statusCard, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT,
 			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
-
-		// Recovery: wipe the cached per-project asset stores (next sync cold).
-		sheet.addView(iconRow("✕", "Clear cached apps (next sync cold)", primary = false) {
-			RhrSessionService.clearAssetCaches()
-			closeMenu()
-		}, LinearLayout.LayoutParams(
-			ViewGroup.LayoutParams.MATCH_PARENT,
-			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
-
-		// Deliberate fault injection — QA/state-machine testing only.
-		sheet.addView(TextView(activity).apply {
-			text = "Test faults"
-			setTextColor(inkDim)
-			textSize = 11f
-			letterSpacing = 0.08f
-			typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-			setPadding(0, dp(18), 0, dp(6))
-		})
-		fun faultRow(glyph: String, label: String, fault: String) {
-			sheet.addView(iconRow(glyph, label, primary = false) {
-				RhrSessionService.debugInjectFault(fault)
-				closeMenu()
-			}, LinearLayout.LayoutParams(
-				ViewGroup.LayoutParams.MATCH_PARENT,
-				ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
-		}
-		faultRow("↻", "Relay loss (close socket)", "relay-loss")
-		faultRow("⚠", "Force retrying", "status-retrying")
-		faultRow("✖", "Force rejected", "status-rejected")
-		faultRow("◐", "Stall reload phase", "phase-reloading")
-		faultRow("✓", "Reset state", "clear")
 
 		// Actions
 		sheet.addView(iconRow("↻", "Reconnect", primary = true) {
@@ -499,6 +850,40 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 			closeMenu()
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
+
+		// The tester's own way back to a clean app. Offered only while a
+		// developer is attached, because a hot restart is theirs to perform:
+		// without one to ask, the row would be a button that does nothing.
+		// Worded "the app" rather than "restart" alone, so it is not read as a
+		// third sibling of Reconnect and Disconnect.
+		val restart = iconRow("⟲", "Restart the app — back to a clean start", primary = false) {
+			activity.startService(
+				Intent(activity, RhrSessionService::class.java).putExtra("cmd", "restart_guest"))
+			closeMenu()
+		}
+		menuRestart = restart
+		sheet.addView(restart, LinearLayout.LayoutParams(
+			ViewGroup.LayoutParams.MATCH_PARENT,
+			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+
+		// Pause, not Stop: ending a session while the phone stays available just
+		// lets the next recovery loop take it again a second later, which reads
+		// as the button not working. This is what actually gives the phone back.
+		val isPaused = RhrSessionService.status == "paused"
+		sheet.addView(
+			iconRow(
+				if (isPaused) "▶" else "⏸",
+				if (isPaused) "Resume — let developers connect" else "Pause — keep this phone to myself",
+				primary = false,
+			) {
+				activity.startService(
+					Intent(activity, RhrSessionService::class.java)
+						.putExtra("cmd", if (isPaused) "resume" else "pause"))
+				closeMenu()
+			},
+			LinearLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT,
+				ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
 		sheet.addView(iconRow("✕", "Disconnect — back to lobby", primary = false) {
 			// Stop the tunnel, then restart the process cleanly into the lobby.
@@ -528,7 +913,9 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 			// Let the new task come up, then quietly end this process so the
 			// stale guest engine is gone (no visible crash — the app is already
 			// foregrounding the fresh lobby task).
-			activity.finishAffinity()
+			// Only meaningful when we are an Activity; the process exit below
+			// is what actually clears the stale guest engine either way.
+			(activity as? Activity)?.finishAffinity()
 			Runtime.getRuntime().exit(0)
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
@@ -551,10 +938,18 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 		sheetLp.leftMargin = dp(12); sheetLp.rightMargin = dp(12)
 		sheetLp.bottomMargin = safeBottom() + dp(12)
 		scrim.addView(sheet, sheetLp)
-		root.addView(scrim, FrameLayout.LayoutParams(
-			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+		// The panel is SUPPOSED to capture touches — it has a scrim, and tapping
+		// outside the sheet closes it. So a full-screen window is right here,
+		// and it exists only while the panel is open.
+		if (host.transient) {
+			host.showModal(scrim)
+		} else {
+			root.addView(scrim, FrameLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+		}
 		sheet.post { springIn(sheet, sheet.height.toFloat().coerceAtLeast(dpf(200f))) }
 		menu = scrim
+		render()
 	}
 
 	private fun iconRow(
@@ -579,109 +974,139 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 		}, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 		setOnClickListener {
 			haptic(it, strong = true)
-			it.animate().scaleX(0.97f).scaleY(0.97f).setDuration(70)
-				.withEndAction { it.animate().scaleX(1f).scaleY(1f).setDuration(90).start() }
-				.start()
+			it.scaleX = 0.97f; it.scaleY = 0.97f
+			scaleTo(it, 1f)
 			onTap()
+		}
+	}
+
+	/**
+	 * Drag the panel down to dismiss it, the way any bottom sheet behaves.
+	 *
+	 * Past roughly a third of its height (or on a fast flick) it closes;
+	 * anything less springs back, so a mis-swipe never loses the panel. The
+	 * sheet is dragged with a plain translation rather than a layout change —
+	 * cheaper per frame, and it cannot disturb the window geometry that keeps
+	 * touches passing through to the app underneath.
+	 */
+	private fun attachSwipeToDismiss(sheet: View) {
+		var downY = 0f
+		var startTranslation = 0f
+		var dragging = false
+		var lastY = 0f
+		var lastT = 0L
+		var velocity = 0f
+
+		sheet.setOnTouchListener { v, e ->
+			when (e.action) {
+				MotionEvent.ACTION_DOWN -> {
+					downY = e.rawY
+					startTranslation = v.translationY
+					lastY = e.rawY
+					lastT = System.currentTimeMillis()
+					velocity = 0f
+					dragging = false
+					// Don't claim the gesture yet: a tap on a button inside the
+					// sheet must still reach it.
+					false
+				}
+				MotionEvent.ACTION_MOVE -> {
+					val dy = e.rawY - downY
+					if (!dragging && dy > dp(8)) dragging = true
+					if (dragging) {
+						// Downward only; dragging up should not lift the sheet
+						// off the bottom of the screen.
+						v.translationY = (startTranslation + dy).coerceAtLeast(0f)
+						val now = System.currentTimeMillis()
+						val dt = (now - lastT).coerceAtLeast(1L)
+						velocity = (e.rawY - lastY) / dt * 1000f
+						lastY = e.rawY
+						lastT = now
+					}
+					dragging
+				}
+				MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+					if (!dragging) return@setOnTouchListener false
+					val far = v.translationY > v.height / 3f
+					val flung = velocity > dpf(900f)
+					val from = v.translationY
+					if (far || flung) {
+						tween(v, 160, onEnd = { closeMenu() }) { t ->
+							v.translationY = lerp(from, v.height.toFloat(), t)
+						}
+					} else {
+						tween(v, 200) { t -> v.translationY = lerp(from, 0f, t) }
+					}
+					true
+				}
+				else -> false
+			}
 		}
 	}
 
 	private fun closeMenu() {
 		menu?.let { m ->
-			m.animate().alpha(0f).setDuration(140).withEndAction {
-				root.removeView(m)
-			}.start()
+			tweenTo(m, alpha = 0f, scale = 1f, durationMs = 140) {
+				if (host.transient) host.hideModal(m) else root.removeView(m)
+			}
 		}
 		menu = null
-		// Panel closed → let the fab idle-hide again shortly.
-		fab.removeCallbacks(hideFabRunnable)
-		fab.postDelayed(hideFabRunnable, 3000)
+		render()
+		menuProgress = null
+		menuRestart = null
+		// Panel closed: the bubble may idle away again, a little sooner than
+		// after a shake since the tester has just been looking at it.
+		armIdleHide(IDLE_AFTER_PANEL_MS)
 	}
 
 	// ---- render -----------------------------------------------------------
 
 	private fun render() {
-		val phase = RhrSessionService.progressPhase
-		val done = RhrSessionService.progressDone
-		val total = RhrSessionService.progressTotal
-		when (phase) {
-			"assets" -> {
-				showCard()
-				bar.isIndeterminate = false
-				val pct = if (total > 0) (done * 1000 / total) else 0
-				bar.progress = pct
-				cardLabel.text = "Syncing assets"
-				cardPct.text = "${pct / 10}%"
-				cardPct.visibility = View.VISIBLE
-			}
-			"syncing" -> {
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = "Syncing your app…"
-				cardPct.visibility = View.GONE
-			}
-			"awaiting_restart" -> {
-				showCard()
-				bar.isIndeterminate = false
-				bar.progress = bar.max
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"App synced — awaiting Hot Restart (taking a while — check the developer's terminal)"
-				else
-					"App synced — awaiting Hot Restart"
-				cardPct.visibility = View.GONE
-			}
-			"restarting" -> {
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"Restart is taking a while — check the developer's terminal"
-				else
-					"Restarting your app…"
-				cardPct.visibility = View.GONE
-			}
-			"reloading" -> {
-				showCard()
-				bar.isIndeterminate = true
-				cardLabel.text = if (RhrSessionService.phaseStalled)
-					"Reload is taking a while — check the developer's terminal"
-				else
-					"Reloading…"
-				cardPct.visibility = View.GONE
-			}
-			else -> {
-				val st = RhrSessionService.status
-				when (st) {
-					"connected", "idle" -> hideCard()
-					"waiting_dev" -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Waiting for developer…"
-						cardPct.visibility = View.GONE
-					}
-					"rejected" -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Session not found — check the code, retrying…"
-						cardPct.visibility = View.GONE
-					}
-					"retrying", "closed" -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Can't reach relay — retrying…"
-						cardPct.visibility = View.GONE
-					}
-					else -> {
-						showCard()
-						bar.isIndeterminate = true
-						cardLabel.text = "Connection: $st…"
-						cardPct.visibility = View.GONE
-					}
-				}
-			}
+		if (!attached) return
+		// What to say is decided by [SessionBanner], which is pure and unit
+		// tested; this only paints it. The two used to be one `when` block
+		// here and a second, differently-wrong one in the Flutter lobby.
+		val banner = SessionBanner.of(
+			phase = RhrSessionService.progressPhase,
+			status = RhrSessionService.status,
+			done = RhrSessionService.progressDone.toLong(),
+			total = RhrSessionService.progressTotal.toLong(),
+			message = RhrSessionService.progressMessage,
+			stalled = RhrSessionService.phaseStalled,
+			foreignApp = RhrSessionService.updatingForeignApp,
+		)
+		menuRestart?.visibility = if (RhrSessionService.status == "connected" &&
+			RhrSessionService.progressPhase !in setOf("restarting", "reloading")) View.VISIBLE else View.GONE
+		menuProgress?.apply {
+			text = banner.label
+			visibility = if (banner.isVisible) View.VISIBLE else View.GONE
 		}
+		if (!banner.isVisible || menu != null) {
+			hideCard()
+			return
+		}
+		showCard()
+		cardLabel.text = banner.label
+		val pct = banner.progress
+		bar.isIndeterminate = pct == null
+		if (pct != null) bar.progress = pct
+		// The number is only worth showing while it is still moving. On a
+		// finished or failed transfer it is noise beside a label that
+		// already says what happened.
+		val showPct = pct != null &&
+			banner.style == SessionBanner.Style.DETERMINATE &&
+			pct < 1000
+		cardPct.text = if (pct != null) "${pct / 10}%" else ""
+		cardPct.visibility = if (showPct) View.VISIBLE else View.GONE
 	}
 
 	private fun showCard() {
+		if (host.transient) {
+			card.visibility = View.VISIBLE
+			host.showChild(card, dp(12), safeTop() + dp(10),
+				screenSize().first - dp(24), ViewGroup.LayoutParams.WRAP_CONTENT, touchable = false)
+			return
+		}
 		if (card.visibility != View.VISIBLE) {
 			card.visibility = View.VISIBLE
 			card.alpha = 0f
@@ -691,9 +1116,33 @@ class DevOverlay(private val activity: Activity) : SensorEventListener {
 	}
 
 	private fun hideCard() {
+		if (host.transient) {
+			host.hideChild(card)
+			card.visibility = View.GONE
+			return
+		}
 		if (card.visibility == View.VISIBLE) {
 			card.animate().alpha(0f).translationY(-dpf(12f)).setDuration(160)
 				.withEndAction { card.visibility = View.GONE }.start()
 		}
+	}
+
+	private companion object {
+		const val TAG = "rhr_overlay"
+		/** Tween step; ~60 Hz is plenty for chrome this small. */
+		const val FRAME_MS = 16L
+
+		fun easeOut(t: Float): Float = 1 - (1 - t) * (1 - t)
+
+		/** Overshoots a little past 1 and settles, the chat-head pop. */
+		fun easeOutBack(t: Float): Float {
+			val c = 1.70158f
+			val u = t - 1
+			return 1 + (c + 1) * u * u * u + c * u * u
+		}
+		/** How long the bubble lingers over the tester's app after a shake. */
+		const val IDLE_MS = 5_000L
+		/** Shorter linger after the panel closes: the tester just used it. */
+		const val IDLE_AFTER_PANEL_MS = 3_000L
 	}
 }
