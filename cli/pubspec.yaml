@@ -13,9 +13,6 @@ dependencies:
   qr: ^3.0.2
   crypto: ^3.0.0
   pub_semver: ^2.2.0
-  webrtc_dart: ^0.25.3
-
-dependency_overrides:
   webrtc_dart:
     path: ../third_party/webrtc_dart
 

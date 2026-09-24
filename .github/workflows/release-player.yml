@@ -39,6 +39,22 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Verify installed CLI dependencies
+        env:
+          PUB_CACHE: ${{ runner.temp }}/rhr-cli-install-cache
+        run: |
+          dart pub global activate --source git "$GITHUB_WORKSPACE" --git-path cli --git-ref "$GITHUB_SHA"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          config = Path(os.environ["PUB_CACHE"]) / "global_packages/rhr_cli/.dart_tool/package_config.json"
+          packages = json.loads(config.read_text())["packages"]
+          webrtc = next(package for package in packages if package["name"] == "webrtc_dart")
+          assert webrtc["rootUri"].rstrip("/").endswith("/third_party/webrtc_dart"), webrtc["rootUri"]
+          print("Installed CLI uses the repository's patched WebRTC package.")
+          PY
+          dart pub global run rhr_cli:rhr --version
+
       - name: Build player APK (debug)
         working-directory: player
         env:
