@@ -1,8 +1,11 @@
 package dev.rhr.rhr_player
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import org.json.JSONObject
+import org.webrtc.CandidatePairChangeEvent
 import org.webrtc.DataChannel
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
@@ -222,6 +225,11 @@ internal class RhrDirectTransport(
 		override fun onDataChannel(channel: DataChannel) {
 			bindChannel(channel)
 		}
+		override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent) {
+			val path = describePath(event) ?: return
+			Log.i(TAG, "selected path $path (${event.reason})")
+			sendSignal(path.toString())
+		}
 		override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
 		override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
 		override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
@@ -299,6 +307,55 @@ internal class RhrDirectTransport(
 		if (remoteMids.isNotEmpty() && candidate.sdpMid !in remoteMids) return
 		Log.i(TAG, "adding remote ICE candidate mid=${candidate.sdpMid} index=${candidate.sdpMLineIndex}")
 		peer?.addIceCandidate(candidate)
+	}
+
+	/**
+	 * The route ICE settled on, for the developer's log: whether it is IPv4 or
+	 * IPv6, and which candidate types met. Nothing else records this, and it
+	 * is the fact that separates "these networks cannot connect directly"
+	 * from a bug. Sent as `path`, not `direct_path`: CLIs before this message
+	 * treat an unknown `direct_*` type as a protocol violation.
+	 */
+	private fun describePath(event: CandidatePairChangeEvent): JSONObject? {
+		val local = candidateFields(event.local.sdp) ?: return null
+		val remote = candidateFields(event.remote.sdp) ?: return null
+		return JSONObject()
+			.put("t", "path")
+			.put("network", activeNetwork())
+			.put("family", local.family)
+			.put("protocol", local.protocol)
+			.put("local", local.type)
+			.put("remote", remote.type)
+	}
+
+	private class CandidateFields(val protocol: String, val family: String, val type: String)
+
+	/** `candidate:<foundation> <component> <protocol> <priority> <address> <port> typ <type> …` */
+	private fun candidateFields(sdp: String): CandidateFields? {
+		val fields = sdp.removePrefix("a=").trim().split(Regex("\\s+"))
+		if (fields.size < 8 || fields[6] != "typ") return null
+		val address = fields[4]
+		val family = when {
+			address.endsWith(".local") -> "mdns"
+			address.contains(':') -> "ipv6"
+			else -> "ipv4"
+		}
+		return CandidateFields(fields[2].lowercase(), family, fields[7])
+	}
+
+	/** The phone's default network. With Wi-Fi and cellular both up, ICE can
+	 *  still pick the other one; the cellular-only tests this serves have one. */
+	private fun activeNetwork(): String {
+		val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
+		val capabilities = connectivity?.getNetworkCapabilities(connectivity.activeNetwork)
+			?: return "none"
+		return when {
+			capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+			capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+			capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+			capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+			else -> "other"
+		}
 	}
 
 	private fun extractMids(sdp: String): Set<String> {

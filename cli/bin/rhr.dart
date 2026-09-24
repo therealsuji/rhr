@@ -24,6 +24,7 @@ import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/session_link.dart';
 import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
+import 'package:rhr_cli/direct_path.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/local_relay.dart';
@@ -819,6 +820,11 @@ Future<int?> _runSession({
           bridgeDeadline.value = DateTime.now().add(
             const Duration(minutes: 40),
           );
+        }
+        final path = describeDirectPath(m);
+        if (path != null) {
+          stderr.writeln('[rhr] $path');
+          return;
         }
         preparation?.handleMessage(m);
         if (preparation != null && m['t'] == 'info') return;
