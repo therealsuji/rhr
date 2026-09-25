@@ -31,13 +31,6 @@ final class DirectSessionTransport implements SessionTransport {
     this._relay, {
     this.offerTimeout = const Duration(seconds: 20),
     this.connectionTimeout = const Duration(seconds: 20),
-    // A send waits on the peer's receive window, so this has to outlast a
-    // phone that is briefly full — which is ordinary mid-restart, when a 40 MB
-    // kernel is going out faster than the engine drains it. Four seconds
-    // failed sessions that were about to succeed; the ICE layer already tears
-    // down a genuinely dead path at roughly 30s (six consent misses), so this
-    // sits just inside that and does not mask real loss.
-    this.sendTimeout = const Duration(seconds: 25),
   }) {
     _payloadReady.future.ignore();
     _directZone = Zone.current.fork(
@@ -109,7 +102,6 @@ final class DirectSessionTransport implements SessionTransport {
   final RelayControlTransport _relay;
   final Duration offerTimeout;
   final Duration connectionTimeout;
-  final Duration sendTimeout;
   final _events = StreamController<Object>();
   final _payloadReady = Completer<void>();
   late final Zone _directZone;
@@ -168,7 +160,10 @@ final class DirectSessionTransport implements SessionTransport {
       );
     }
     try {
-      await _peer.send(message).timeout(sendTimeout);
+      // No deadline here: the peer fails a send only when the phone stops
+      // acknowledging data, which is what separates a dead path from a
+      // slow cellular link still moving the backlog.
+      await _peer.send(message);
     } on Object catch (error, stack) {
       final failure = DirectTransportFailure(
         'direct WebRTC payload send failed: $error',

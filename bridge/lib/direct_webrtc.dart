@@ -144,24 +144,33 @@ final class DirectWebRtcPeer {
   /// without letting an asset push queue the whole bundle in memory.
   static const _bufferHighWater = 1024 * 1024;
 
+  /// The previous send's completion. Every send waits for it before queueing,
+  /// so frames reach the channel in call order. Callers fire sends without
+  /// awaiting them; letting each wait for room on its own released them in
+  /// whatever order their timers fired, which scrambled a tunnel stream.
+  Future<void> _sendTail = Future.value();
+
   Future<void> send(Uint8List frame) async {
     _ensureOpen();
     final channel = _channel;
     if (channel == null) {
       throw StateError('the direct data channel has not been negotiated');
     }
+    final completion = Completer<void>();
+    final turn = _sendTail;
+    _sendTail = completion.future.then((_) {}, onError: (_) {});
+    await turn;
     final ready = _channelReady;
     if (ready != null && !ready.isCompleted) await ready.future;
     // webrtc_dart 0.25.x starts SCTP transmission fire-and-forget from
     // sendBinary(). A SACK can therefore enter _transmit while the previous
     // call is still walking its sent queue; the package's unhandled
     // ConcurrentModificationError used to take down the whole CLI isolate.
-    // Keep the send future alive until the channel drains and contain any
-    // late package error in this peer's state stream so the transport can
-    // terminate the session instead of crashing the isolate.
-    final completion = Completer<void>();
+    // The guarded zone contains any late package error in this peer's state
+    // stream, so the transport can terminate the session instead of crashing
+    // the isolate.
     runZonedGuarded(
-      () => unawaited(_sendAndDrain(channel, frame, completion)),
+      () => unawaited(_sendWhenRoom(channel, frame, completion)),
       (Object error, StackTrace stack) {
         if (!_closed && !_state.isClosed) {
           _state.add(PeerConnectionState.failed);
@@ -174,29 +183,41 @@ final class DirectWebRtcPeer {
     await completion.future;
   }
 
-  /// Applies backpressure while a send is outstanding, then completes.
+  /// A backlog that has not shrunk for this long is a dead path. The phone
+  /// acknowledging any data counts as progress, so this measures a stall,
+  /// not how long a slow link takes to clear a megabyte: at 1 Mbit/s that is
+  /// about 8 s of ordinary, working transfer.
+  static const _stallTimeout = Duration(seconds: 15);
+
+  /// Waits for room in the channel, then queues [frame].
   ///
-  /// `bufferedAmount` counts the WHOLE channel, not this frame, so waiting for
-  /// zero makes every send wait for every other send. During an asset push
-  /// that backlog reaches megabytes and never empties, so a nine-byte control
-  /// frame would sit behind it until the caller's timeout fired — and that
-  /// timeout tears down the session. Waiting instead for the buffer to fall
-  /// under a high-water mark keeps the channel from growing without bound
-  /// while letting a send finish as soon as the queue is moving.
-  Future<void> _sendAndDrain(
+  /// `bufferedAmount` counts the WHOLE channel and falls only as the phone
+  /// acknowledges data. Waiting for room before queueing keeps the backlog
+  /// near the high-water mark. Queueing first let an asset push, which sends
+  /// on many channels at once, stack megabytes above it that no fixed
+  /// deadline could fit on a slow link.
+  Future<void> _sendWhenRoom(
     dynamic channel,
     Uint8List frame,
     Completer<void> completion,
   ) async {
     try {
-      await channel.sendBinary(frame);
-      final deadline = DateTime.now().add(const Duration(seconds: 15));
-      while (channel.bufferedAmount > _bufferHighWater) {
-        if (DateTime.now().isAfter(deadline)) {
-          throw TimeoutException('direct WebRTC data channel did not drain');
+      var buffered = channel.bufferedAmount as int;
+      var progressAt = DateTime.now();
+      while (buffered > _bufferHighWater) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        final now = channel.bufferedAmount as int;
+        if (now < buffered) {
+          progressAt = DateTime.now();
+        } else if (DateTime.now().difference(progressAt) > _stallTimeout) {
+          throw TimeoutException(
+            'direct WebRTC data channel stalled: nothing acknowledged for '
+            '${_stallTimeout.inSeconds}s',
+          );
         }
-        await Future<void>.delayed(const Duration(milliseconds: 2));
+        buffered = now;
       }
+      await channel.sendBinary(frame);
       if (!completion.isCompleted) completion.complete();
     } catch (error, stack) {
       if (!completion.isCompleted) completion.completeError(error, stack);

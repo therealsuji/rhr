@@ -296,6 +296,11 @@ final class _DevFsAssetTransport implements AssetTransport {
             base64.encode(utf8.encode(devFsAssetUri(file.relativePath))),
           );
           httpRequest.add(prepared.encoded);
+          // The body gets no deadline: the tunnel paces this socket by the
+          // phone's acknowledgements, so a slow cellular link takes as long
+          // as it takes, and a dead tunnel destroys the socket, failing the
+          // write. Only the phone's answer to a fully sent file is timed.
+          await httpRequest.flush();
           final response = await httpRequest.close().timeout(
             const Duration(seconds: 60),
           );
