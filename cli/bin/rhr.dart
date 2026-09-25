@@ -20,6 +20,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
 
+import 'package:logging/logging.dart';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/session_link.dart';
 import 'package:rhr_bridge/tunnel.dart';
@@ -42,6 +43,7 @@ import 'package:rhr_cli/version.dart';
 import 'package:rhr_cli/run_preparation.dart';
 import 'package:rhr_cli/running_project.dart';
 import 'package:rhr_cli/cli_update.dart';
+import 'package:webrtc_dart/webrtc_dart.dart' show WebRtcLogging;
 
 const _usage = '''
 rhr — Expo Go for Flutter, over the internet.
@@ -129,6 +131,7 @@ const _deviceBusyExitCode = 76;
 const _relayBinaryExitCode = 77;
 
 Future<void> main(List<String> args) async {
+  if (Platform.environment['RHR_WEBRTC_LOG'] == '1') _logWebRtc();
   if (args.length == 1 &&
       (args.first == '--version' || args.first == 'version')) {
     stdout.writeln('rhr $rhrVersion');
@@ -1788,19 +1791,18 @@ Future<int> _runAttachProductFlow({
   }
   final sessionCode =
       code ?? config['code'] ?? savedCode ?? mintRhrSessionCode();
-  if (isValidRhrSessionCode(sessionCode)) {
-    savedSession.parent.createSync(recursive: true);
-    savedSession.writeAsStringSync(
-      jsonEncode({
-        'code': sessionCode,
-        'relay': relay ?? config['relay'],
-        'created': DateTime.now().toUtc().toIso8601String(),
-      }),
-      flush: true,
-    );
-    if (!Platform.isWindows)
-      await Process.run('chmod', ['600', savedSession.path]);
-  }
+  _requireValidSessionCode(sessionCode);
+  savedSession.parent.createSync(recursive: true);
+  savedSession.writeAsStringSync(
+    jsonEncode({
+      'code': sessionCode,
+      'relay': relay ?? config['relay'],
+      'created': DateTime.now().toUtc().toIso8601String(),
+    }),
+    flush: true,
+  );
+  if (!Platform.isWindows)
+    await Process.run('chmod', ['600', savedSession.path]);
   final configuredRelay = relay ?? config['relay'];
   preferDirect ??= config['direct']?.toLowerCase() != 'false';
   final localRelay = await LocalRelay.start(sessionCode);
@@ -2253,4 +2255,41 @@ Future<void> _setup(String? relay, {bool quiet = false}) async {
   Cursor/VS Code manual flow:
     Pick "rhr (remote QA phone)" as the device and use the normal Run button.
 ''');
+}
+
+/// `RHR_WEBRTC_LOG=1`: timestamped ICE, DTLS and connection-state logs from
+/// the WebRTC library on stderr, for diagnosing a direct path that drops.
+/// The per-packet loggers stay at INFO; their volume would slow the very
+/// transfer being diagnosed.
+void _logWebRtc() {
+  hierarchicalLoggingEnabled = true;
+  WebRtcLogging.root.level = Level.FINE;
+  for (final perPacket in [
+    WebRtcLogging.sctp,
+    WebRtcLogging.datachannel,
+    WebRtcLogging.transportDemux,
+    WebRtcLogging.dtlsRecord,
+    WebRtcLogging.dtlsCipher,
+    WebRtcLogging.srtp,
+  ]) {
+    perPacket.level = Level.INFO;
+  }
+  WebRtcLogging.root.onRecord.listen(
+    (r) => stderr.writeln(
+      '${r.time.toIso8601String()} ${r.level.name} [${r.loggerName}] '
+      '${r.message}',
+    ),
+  );
+}
+
+/// The phone rejects a malformed code without saying so, which leaves both
+/// ends waiting on a session that can never form. Refuse it here instead.
+void _requireValidSessionCode(String code) {
+  if (isValidRhrSessionCode(code)) return;
+  stderr.writeln(
+    '[rhr] "$code" is not a session code. Codes look like rhr-7kqp-3mzx-t9fa: '
+    'three groups of four from a-z and 2-9, without i, l, o, 0 or 1. '
+    'Leave out --code to get a new one.',
+  );
+  exit(64);
 }
