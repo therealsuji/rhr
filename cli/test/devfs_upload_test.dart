@@ -107,13 +107,31 @@ void main() {
   });
 
   test('bases prefer the same file, then the most recent', () {
-    final bases = DevFsBases()
+    final dir = Directory.systemTemp.createTempSync('rhr-bases-');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final bases = DevFsBases(dir)
       ..confirm('a', 'sha-a', Uint8List(1))
       ..confirm('b', 'sha-b', Uint8List(2));
     expect(bases.baseFor('a')!.sha, 'sha-a');
     expect(bases.baseFor('c')!.sha, 'sha-b');
     bases.forget();
     expect(bases.baseFor('a'), isNull);
+  });
+
+  test('a fresh CLI still knows what the phone kept', () {
+    final dir = Directory.systemTemp.createTempSync('rhr-bases-');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    DevFsBases(dir)
+      ..confirm('a', 'sha-a', Uint8List.fromList([1]))
+      ..confirm('b', 'sha-b', Uint8List.fromList([2]))
+      ..confirm('c', 'sha-c', Uint8List.fromList([3]));
+
+    final reloaded = DevFsBases(dir);
+    expect(reloaded.baseFor('c')!.bytes, [3]);
+    expect(reloaded.baseFor('b')!.sha, 'sha-b');
+    // Only the newest two are kept, on disk as in memory.
+    expect(reloaded.baseFor('a')!.sha, 'sha-c');
+    expect(File('${dir.path}/sha-a').existsSync(), isFalse);
   });
 
   test('reads a response status', () {

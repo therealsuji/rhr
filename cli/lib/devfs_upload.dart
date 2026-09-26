@@ -153,11 +153,41 @@ final class HttpRequestReader {
   }
 }
 
-/// Files this CLI process has seen the player store, most recent first, so a
-/// later upload can be sent as a delta against one of them.
+/// Files the player has confirmed storing, most recent first, so a later
+/// upload can be sent as a delta against one of them.
+///
+/// Kept on disk under [directory] (the project's `.dart_tool/rhr`), because
+/// the player keeps its copies across restarts too: a fresh CLI, after a
+/// reconnect or a new `rhr run`, still sends its first restart as a delta.
+/// A copy the phone has lost costs one whole upload (see [forget]).
 final class DevFsBases {
+  DevFsBases(this.directory) {
+    final index = _index;
+    if (!index.existsSync()) return;
+    try {
+      for (final entry
+          in (jsonDecode(index.readAsStringSync()) as List)
+              .cast<Map<String, dynamic>>()) {
+        final sha = entry['sha'] as String;
+        final file = File('${directory.path}/$sha');
+        if (file.existsSync()) {
+          _bases.add((
+            uri: entry['uri'] as String,
+            sha: sha,
+            bytes: file.readAsBytesSync(),
+          ));
+        }
+      }
+    } on Object {
+      forget();
+    }
+  }
+
+  final Directory directory;
   static const _kept = 2;
   final _bases = <({String uri, String sha, Uint8List bytes})>[];
+
+  File get _index => File('${directory.path}/bases.json');
 
   /// The best base for [uri]: its own previous version, else the most recent
   /// file. A hot restart's kernel is nearly the same as the kernel the asset
@@ -174,11 +204,37 @@ final class DevFsBases {
     _bases.removeWhere((b) => b.sha == sha || b.uri == uri);
     _bases.insert(0, (uri: uri, sha: sha, bytes: bytes));
     if (_bases.length > _kept) _bases.removeLast();
+    _save();
   }
 
   /// The player no longer holds what we thought (it was reinstalled, or its
   /// cache was cleared): send whole files until it confirms new ones.
-  void forget() => _bases.clear();
+  void forget() {
+    _bases.clear();
+    _save();
+  }
+
+  void _save() {
+    try {
+      directory.createSync(recursive: true);
+      final kept = {for (final base in _bases) base.sha};
+      for (final base in _bases) {
+        final file = File('${directory.path}/${base.sha}');
+        if (!file.existsSync()) file.writeAsBytesSync(base.bytes);
+      }
+      for (final file in directory.listSync().whereType<File>()) {
+        final name = file.uri.pathSegments.last;
+        if (name != 'bases.json' && !kept.contains(name)) file.deleteSync();
+      }
+      _index.writeAsStringSync(
+        jsonEncode([
+          for (final base in _bases) {'uri': base.uri, 'sha': base.sha},
+        ]),
+      );
+    } on FileSystemException {
+      // A read-only project still works; it just sends whole files later.
+    }
+  }
 }
 
 /// The request RHR sends the player in place of [put]: the whole file, or a

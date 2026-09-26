@@ -1153,7 +1153,8 @@ Future<int?> _runSession({
     // A hot reload's incremental kernel or a small asset is not worth a
     // delta or keeping as a base; it goes as Flutter wrote it.
     final small = put.uncompressedSize < devFsDeltaMinimumBytes;
-    final base = small ? null : _devFsBases.baseFor(uri);
+    final bases = _devFsBasesFor(project);
+    final base = small ? null : bases.baseFor(uri);
     final rewritten = small ? null : rewriteDevFsPut(put, base);
     final request = rewritten?.request ?? plainDevFsPut(put);
     final channel = nextChannel++;
@@ -1173,11 +1174,11 @@ Future<int?> _runSession({
       case 409:
         // The phone no longer has that base. Dropping the connection makes
         // Flutter retry the upload, and the retry goes whole.
-        _devFsBases.forget();
+        bases.forget();
         sock.destroy();
         return;
       case 200 when rewritten != null:
-        _devFsBases.confirm(uri, rewritten.sha, rewritten.content);
+        bases.confirm(uri, rewritten.sha, rewritten.content);
         final sent = rewritten.request.length;
         if (base != null) {
           stderr.writeln(
@@ -2433,6 +2434,10 @@ void _requireValidSessionCode(String code) {
   exit(64);
 }
 
-/// Files the phone has confirmed storing, kept for the life of this process
-/// so a reconnect still sends hot-restart kernels as deltas.
-final _devFsBases = DevFsBases();
+/// Files the phone has confirmed storing, per project (see [DevFsBases]).
+final _devFsBasesByProject = <String, DevFsBases>{};
+
+DevFsBases _devFsBasesFor(String project) => _devFsBasesByProject.putIfAbsent(
+  project,
+  () => DevFsBases(Directory('$project/.dart_tool/rhr/devfs-bases')),
+);
