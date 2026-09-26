@@ -49,6 +49,16 @@ void main() {
     File('${local.path}/android/src/Plugin.kt')
       ..createSync(recursive: true)
       ..writeAsStringSync('v1');
+    write('pubspec.lock', '''
+packages:
+  local:
+    dependency: "direct main"
+    description:
+      path: "${local.path}"
+      relative: false
+    source: path
+    version: "1.0.0"
+''');
     plugins([
       {'name': 'local', 'path': '${local.path}/'},
     ]);

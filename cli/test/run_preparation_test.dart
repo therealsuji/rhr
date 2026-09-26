@@ -108,11 +108,6 @@ void main() {
     () async {
       final directory = Directory.systemTemp.createTempSync('rhr-preparation-');
       addTearDown(() => directory.deleteSync(recursive: true));
-      File('${directory.path}/android/app/build.gradle')
-        ..createSync(recursive: true)
-        ..writeAsStringSync(
-          'android { defaultConfig { applicationId "com.example.app" } }',
-        );
       final phone = Phone();
       final preparation = RunPreparation(
         transport: phone,
@@ -143,13 +138,11 @@ void main() {
           ),
         ),
       );
-      // Only a read of what is installed: the tester is asked for nothing
-      // before the developer approves the build.
+      // With nothing built yet there is nothing to compare, and the tester
+      // is asked for nothing before the developer approves the build.
       expect(
-        phone.messages
-            .where((message) => message['t'] == 'run_request')
-            .map((message) => message['action']),
-        ['inspect'],
+        phone.messages.where((message) => message['t'] == 'run_request'),
+        isEmpty,
       );
       expect(
         phone.messages.where((message) => message['phase'] == 'building'),

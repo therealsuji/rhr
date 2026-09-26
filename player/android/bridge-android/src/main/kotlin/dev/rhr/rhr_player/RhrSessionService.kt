@@ -132,10 +132,15 @@ class RhrSessionService : Service() {
 		// Deliberate fault injection for QA / state-machine testing. Hidden
 		// behind the dev menu's "Test faults" section; not reachable by normal
 		// users. Transport faults close live connections; status and phase
-		// faults only change the UI state.
+		// faults only change the UI state. debugRebuildDelayMs holds each
+		// rebuilt DevFS upload back, so a reconnect can land mid-upload.
+		@Volatile var debugRebuildDelayMs = 0L
+
 		fun debugInjectFault(name: String) {
 			when (name) {
+				"slow-devfs-rebuild" -> debugRebuildDelayMs = 60_000
 				"clear" -> {
+					debugRebuildDelayMs = 0
 					setProgress("", 0, 0)
 					status = if (current?.reconnectThread?.isAlive == true) "waiting_dev" else "idle"
 				}
@@ -314,6 +319,11 @@ class RhrSessionService : Service() {
 	// Per-channel unacked byte counts; readers block on the lock when full.
 	private val unacked = ConcurrentHashMap<Int, Int>()
 	private val flowLock = Object()
+	// Bumped under flowLock whenever the channel table resets. Channel numbers
+	// restart at 1 for every developer connection, so work that outlives one
+	// (a DevFS rebuild) must not write into a new connection's channel of the
+	// same number.
+	@Volatile private var channelEpoch = 0L
 	private var reconnectThread: Thread? = null
 	// A reconnect loop belongs to the session code it was created for. The
 	// service can receive a new code while the old OkHttp callback is still
@@ -382,7 +392,12 @@ class RhrSessionService : Service() {
 		}
 
 		override fun onLost(network: android.net.Network) {
-			if (network == defaultNetwork) defaultNetwork = null
+			if (network != defaultNetwork) return
+			defaultNetwork = null
+			// Its sockets are dead. Failing the relay socket now lets the loop
+			// redial the moment another network is up, instead of after a ping
+			// timeout on the old one.
+			if (!stopped.get()) ws?.cancel()
 		}
 	}
 
@@ -1118,7 +1133,7 @@ class RhrSessionService : Service() {
 		when (op) {
 			OP_OPEN -> {
 				synchronized(flowLock) { pending[channel] = java.io.ByteArrayOutputStream() }
-				sniffers[channel] = DevFsDelta.Sniffer()
+				sniffers[channel] = DevFsDelta.Sniffer(channelEpoch)
 				openChannel(channel)
 			}
 			OP_DATA -> {
@@ -1146,8 +1161,11 @@ class RhrSessionService : Service() {
 	 * connects. The connect thread flushes pending bytes and publishes the
 	 * socket under this same lock, so no data falls between those steps.
 	 */
-	private fun deliver(channel: Int, bytes: ByteArray, offset: Int, length: Int): Boolean =
+	private fun deliver(
+		channel: Int, bytes: ByteArray, offset: Int, length: Int, epoch: Long = channelEpoch,
+	): Boolean =
 		synchronized(flowLock) {
+			if (epoch != channelEpoch) return false
 			try {
 				val sock = sockets[channel]
 				if (sock != null) {
@@ -1181,7 +1199,7 @@ class RhrSessionService : Service() {
 		if (sniffer.bytes.size() < end) return
 		sniffers.remove(channel)
 		val body = sniffer.bytes.toByteArray().copyOfRange(head.bodyStart, end)
-		Thread { forwardUpload(channel, head, body) }.apply { isDaemon = true }.start()
+		Thread { forwardUpload(channel, sniffer.epoch, head, body) }.apply { isDaemon = true }.start()
 	}
 
 	private fun passThrough(channel: Int) {
@@ -1190,28 +1208,44 @@ class RhrSessionService : Service() {
 	}
 
 	/** Rebuilds an RHR upload and sends the VM the plain PUT it expects. A
-	 *  missing base or a bad hash answers 409; the CLI resends the whole file. */
-	private fun forwardUpload(channel: Int, head: DevFsDelta.Head, body: ByteArray) {
-		val forward = DevFsDelta.rebuild(File(cacheDir, "rhr-devfs-bases"), head, body)
-		if (forward == null) {
-			Log.w(TAG, "DevFS upload ch=$channel: base missing or hash mismatch, asking for the whole file")
-			val answer = DevFsDelta.missingBase
-			sendBinaryFrame(encodeData(channel, answer, answer.size))
-			closeChannel(channel, notifyPeer = true)
-			return
-		}
+	 *  missing base or a bad hash answers 409; the CLI resends the whole file.
+	 *  Runs on its own thread, so it only touches [channel] while [epoch] is
+	 *  still the current connection's. */
+	private fun forwardUpload(channel: Int, epoch: Long, head: DevFsDelta.Head, body: ByteArray) {
+		var forward: DevFsDelta.Forward? = null
 		try {
-			if (!deliver(channel, forward.head, 0, forward.head.size)) return
-			forward.inlineBody?.let { deliver(channel, it, 0, it.size) }
+			forward = DevFsDelta.rebuild(File(cacheDir, "rhr-devfs-bases"), head, body)
+			if (debugRebuildDelayMs > 0) {
+				Log.i(TAG, "DevFS upload ch=$channel: debug delay ${debugRebuildDelayMs}ms (epoch $epoch)")
+				Thread.sleep(debugRebuildDelayMs)
+				Log.i(TAG, "DevFS upload ch=$channel: delivering now (epoch $epoch, current $channelEpoch)")
+			}
+			if (forward == null) {
+				Log.w(TAG, "DevFS upload ch=$channel: base missing or hash mismatch, asking for the whole file")
+				val answer = DevFsDelta.missingBase
+				synchronized(flowLock) {
+					if (epoch != channelEpoch) return
+					sendBinaryFrame(encodeData(channel, answer, answer.size))
+					closeChannel(channel, notifyPeer = true)
+				}
+				return
+			}
+			if (!deliver(channel, forward.head, 0, forward.head.size, epoch)) return
+			forward.inlineBody?.let { deliver(channel, it, 0, it.size, epoch) }
 			forward.body?.inputStream()?.use { input ->
 				val buffer = ByteArray(64 * 1024)
 				while (true) {
 					val n = input.read(buffer)
-					if (n < 0 || !deliver(channel, buffer, 0, n)) break
+					if (n < 0 || !deliver(channel, buffer, 0, n, epoch)) break
 				}
 			}
+		} catch (e: Exception) {
+			Log.w(TAG, "DevFS upload ch=$channel failed: $e")
+			synchronized(flowLock) {
+				if (epoch == channelEpoch) closeChannel(channel, notifyPeer = true)
+			}
 		} finally {
-			forward.body?.delete()
+			forward?.body?.delete()
 		}
 	}
 
@@ -1282,6 +1316,7 @@ class RhrSessionService : Service() {
 	}
 
 	private fun cleanupChannels() {
+		synchronized(flowLock) { channelEpoch += 1 }
 		for (ch in sockets.keys.toList()) closeChannel(ch, notifyPeer = false)
 		pending.clear()
 		sniffers.clear()

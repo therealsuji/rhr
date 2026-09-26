@@ -770,6 +770,13 @@ Future<int?> _runSession({
   // teardown so the flutter child and the listener are cleaned up first.
   int? fatalExit;
   final sockets = <int, Socket>{};
+  // Every connection Flutter made to the tunneled VM service, including ones
+  // still being read or held by a DevFS upload: ending the session closes
+  // them all, which is what fails anything waiting on one.
+  final accepted = <Socket>{};
+  // Completes when this attempt tears down. Anything that waits on the phone
+  // (a window to open, an answer to arrive) also waits on this.
+  final sessionOver = Completer<void>();
   final flow = FlowControl();
   // Channels carrying a rewritten DevFS upload: the phone's answer is read
   // here, not handed straight to Flutter, so a missing base can be retried.
@@ -977,6 +984,17 @@ Future<int?> _runSession({
             for (final difference in report.blockers) {
               stderr.writeln('  - $difference');
             }
+            // A player update carries a Flutter runtime, never a project's
+            // native code. A project that needs its own app gets it from
+            // `rhr run`, which builds it with the beacon the player finds it by.
+            if (compatibility.nativeDifferencesFrom(raw).isNotEmpty) {
+              stderr.writeln(
+                '[rhr] This project needs its own debug app, which a player '
+                'update cannot provide. Run `rhr run` instead; it builds and '
+                'installs it.',
+              );
+              exit(78);
+            }
             if (updatePolicy == PlayerUpdatePolicy.never || updateAttempted) {
               stderr.writeln(
                 updateAttempted
@@ -1180,8 +1198,14 @@ Future<int?> _runSession({
   var nextChannel = 1;
 
   /// Writes [bytes] to [channel], pausing whenever its window is full.
-  Future<void> sendOnChannel(int channel, Uint8List bytes) async {
+  /// False when the phone closed the channel or the session ended first.
+  Future<bool> sendOnChannel(
+    int channel,
+    Uint8List bytes,
+    Completer<void> closed,
+  ) async {
     for (var start = 0; start < bytes.length; start += maxTunnelPayload) {
+      if (closed.isCompleted || sessionOver.isCompleted) return false;
       final end = min(start + maxTunnelPayload, bytes.length);
       sendPayload(
         encodeFrame(opData, channel, Uint8List.sublistView(bytes, start, end)),
@@ -1189,9 +1213,10 @@ Future<int?> _runSession({
       if (flow.sent(channel, end - start)) {
         final open = Completer<void>();
         flow.onWindowOpen(channel, open.complete);
-        await open.future;
+        await Future.any([open.future, closed.future, sessionOver.future]);
       }
     }
+    return true;
   }
 
   /// Sends Flutter's DevFS upload as a delta against a file the phone kept
@@ -1209,11 +1234,15 @@ Future<int?> _runSession({
     final answer = (bytes: BytesBuilder(), closed: Completer<void>());
     devFsAnswers[channel] = answer;
     sendPayload(encodeFrame(opOpen, channel));
+    var sent = false;
     try {
-      await sendOnChannel(channel, request);
-      await answer.closed.future;
-    } on Object {
+      sent = await sendOnChannel(channel, request, answer.closed);
+      if (sent) await Future.any([answer.closed.future, sessionOver.future]);
+    } finally {
       devFsAnswers.remove(channel);
+    }
+    // Cut short: dropping Flutter's connection makes it retry the upload.
+    if (!sent || !answer.closed.isCompleted) {
       sock.destroy();
       return;
     }
@@ -1305,9 +1334,10 @@ Future<int?> _runSession({
 
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   server.listen((sock) {
+    accepted.add(sock);
     // Socket write failures (peer reset mid-transfer) surface on `done`;
     // unhandled they crash the process.
-    sock.done.catchError((_) {});
+    sock.done.catchError((_) {}).whenComplete(() => accepted.remove(sock));
     // Until the first request head shows whether this is a DevFS upload the
     // phone can rebuild from a delta, hold the bytes. Everything else is
     // tunnelled byte for byte, exactly as before.
@@ -1414,15 +1444,12 @@ Future<int?> _runSession({
     reloadFeedbackTimer?.cancel();
     preparation?.close();
     keepalive.cancel();
+    if (!sessionOver.isCompleted) sessionOver.complete();
     await server.close();
-    for (final s in sockets.values.toList()) {
+    for (final s in accepted.toList()) {
       s.destroy();
     }
     sockets.clear();
-    for (final answer in devFsAnswers.values.toList()) {
-      answer.closed.completeError(const SocketException('session ended'));
-    }
-    devFsAnswers.clear();
     // The session loop reconnects, so the handler must go with this attempt
     // or every retry stacks another one.
     await interrupts.cancel();
@@ -1775,30 +1802,6 @@ Future<bool> _updatePlayerOverTheWire({
   required _DeadlineHolder deadline,
   required void Function(PlayerUpdateSender) attach,
 }) async {
-  // Which payload fixes this? A generic player cannot carry project-owned
-  // Android sources, so a project with its own platform channels is never
-  // fixed by rebuilding the player — it needs its own debug APK, which the
-  // player installs and then tunnels. See notes/UPDATE_SCENARIOS.md.
-  final unsupported = readUnsupportedAndroidInputs(project);
-  final needsOwnApk = unsupported.isNotEmpty;
-
-  if (needsOwnApk) {
-    stderr.writeln(
-      '[rhr] this project has its own Android code, which a generic player '
-      'cannot run:',
-    );
-    for (final input in unsupported.take(5)) {
-      stderr.writeln('  - $input');
-    }
-    if (unsupported.length > 5) {
-      stderr.writeln('  … ${unsupported.length} files total');
-    }
-    stderr.writeln(
-      '[rhr] building your own app instead; the player will install it and '
-      'connect to it.',
-    );
-  }
-
   if (policy == PlayerUpdatePolicy.prompt) {
     if (!stdin.hasTerminal) {
       stderr.writeln(
@@ -1809,10 +1812,8 @@ Future<bool> _updatePlayerOverTheWire({
       return false;
     }
     stderr.write(
-      needsOwnApk
-          ? '[rhr] build and install your app on the device? [Y/n] '
-          : '[rhr] update the player over the wire to Flutter '
-                '${local.frameworkVersion}? [Y/n] ',
+      '[rhr] update the player over the wire to Flutter '
+      '${local.frameworkVersion}? [Y/n] ',
     );
     final answer =
         (await terminalInput
@@ -1828,13 +1829,7 @@ Future<bool> _updatePlayerOverTheWire({
     }
   }
 
-  final sender = needsOwnApk
-      ? PlayerUpdateSender(
-          transport,
-          kind: UpdateKind.app,
-          target: readProjectApplicationId(project),
-        )
-      : PlayerUpdateSender(transport);
+  final sender = PlayerUpdateSender(transport);
   attach(sender);
   try {
     // The build takes minutes. Say so on the phone, which is otherwise
@@ -1846,19 +1841,14 @@ Future<bool> _updatePlayerOverTheWire({
     // the player; keep the bridge wait from expiring under either.
     deadline.value = DateTime.now().add(const Duration(minutes: 20));
     final flutterExecutable = projectFlutterExecutable(project);
-    final apk = needsOwnApk
-        ? await buildUpdateProjectApk(
-            project: project,
-            flutterExecutable: flutterExecutable,
-          )
-        : await buildUpdatePlayerApk(
-            project: project,
-            template: await resolvePlayerTemplate(),
-            frameworkRevision: local.frameworkRevision,
-            flutterExecutable: flutterExecutable,
-          );
+    final apk = await buildUpdatePlayerApk(
+      project: project,
+      template: await resolvePlayerTemplate(),
+      frameworkRevision: local.frameworkRevision,
+      flutterExecutable: flutterExecutable,
+    );
     stderr.writeln(
-      '[rhr] streaming ${needsOwnApk ? 'your app' : 'player update'} '
+      '[rhr] streaming player update '
       '(${(apk.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB)…',
     );
     var lastReported = 0;
@@ -1905,9 +1895,7 @@ Future<bool> _updatePlayerOverTheWire({
       PlayerUpdateOutcome.pendingUser =>
         '[rhr] confirm the install on the device, then reopen the rhr '
             'player; the session resumes automatically.',
-      PlayerUpdateOutcome.installed =>
-        '[rhr] app installed on the device — start a session against it '
-            'from the player.',
+      PlayerUpdateOutcome.installed => '[rhr] update installed on the device.',
     });
     return true;
   } on PlayerUpdateFailure catch (failure) {

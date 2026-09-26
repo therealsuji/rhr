@@ -7,7 +7,6 @@ import 'package:crypto/crypto.dart';
 import 'apk_identity.dart';
 import 'beacon_build.dart';
 import 'flutter_compatibility.dart';
-import 'player_builder.dart';
 import 'player_update.dart';
 import 'project_apk.dart';
 import 'relay_race.dart';
@@ -292,21 +291,21 @@ final class RunPreparation {
       // Decide what needs doing before asking anyone for anything: the
       // developer approves real work, and the tester is never walked through
       // setup for a build the developer then declines.
-      final package = apk == null
-          ? readProjectApplicationId(project)
-          : (await readApkIdentity(apk)).package;
-      final installed = await request('inspect', package: package);
-      final current =
-          apk != null &&
-          installed['debuggable'] == true &&
-          installed['apkSha256'] ==
-              (await sha256.bind(apk.openRead()).first).toString();
+      var current = false;
       if (apk == null) {
         await _approve(
           "Build this project's debug app and install it on the phone.",
         );
-      } else if (!current) {
-        await _approve('Install the current debug build of $package.');
+      } else {
+        final package = (await readApkIdentity(apk)).package;
+        final installed = await request('inspect', package: package);
+        current =
+            installed['debuggable'] == true &&
+            installed['apkSha256'] ==
+                (await sha256.bind(apk.openRead()).first).toString();
+        if (!current) {
+          await _approve('Install the current debug build of $package.');
+        }
       }
       // The overlay carries the session controls, and holding it is what
       // lets the player open the app from the background.
@@ -328,6 +327,9 @@ final class RunPreparation {
         await recordProjectApk(project, inputs, projectInputs.dart, apk);
         apkDart = projectInputs.dart;
       }
+      // The package comes from the APK, not the Gradle file: a build type's
+      // applicationIdSuffix only shows up in what Gradle produced.
+      final package = (await readApkIdentity(apk)).package;
       if (current) {
         phase('checking', 'The correct debug app is already installed.');
       } else {

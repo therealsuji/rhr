@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+import 'flutter_compatibility.dart';
+
 /// A content hash of everything that decides a project's native build: the
 /// resolved dependencies, the Android plugins Flutter registered, the
 /// project's own `android/` tree, and the Android sources of plugins that
@@ -12,8 +14,8 @@ import 'package:crypto/crypto.dart';
 /// change cannot reach a running app by hot reload or restart; noticing it is
 /// what turns a silent MissingPluginException into a clear rebuild.
 ///
-/// Published plugins are covered by `pubspec.lock`: their sources in the pub
-/// cache never change for a given version. `.flutter-plugins-dependencies`
+/// Published and git plugins are covered by `pubspec.lock`: their sources
+/// never change for a given resolved version. `.flutter-plugins-dependencies`
 /// is hashed by its plugin lists only, since Flutter rewrites its
 /// `date_created` on every `pub get`.
 Future<String> nativeFingerprint(String project) async {
@@ -42,6 +44,7 @@ Future<String> nativeFingerprint(String project) async {
   await addTree(Directory('$root/android'));
 
   final plugins = File('$root/.flutter-plugins-dependencies');
+  final local = readPathPackages(root);
   if (plugins.existsSync()) {
     try {
       final decoded = jsonDecode(plugins.readAsStringSync());
@@ -51,7 +54,7 @@ Future<String> nativeFingerprint(String project) async {
         if (plugin is! Map<String, dynamic>) continue;
         parts.add('plugin:${plugin['name']}:${plugin['path']}');
         final path = plugin['path'];
-        if (path is String && !path.contains('/.pub-cache/')) {
+        if (path is String && local.contains(plugin['name'])) {
           await addTree(Directory('$path/android'));
         }
       }

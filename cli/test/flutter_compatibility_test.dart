@@ -329,4 +329,46 @@ flutter:
       });
     },
   );
+
+  test('a path plugin with Android code needs its own app', () async {
+    final project = await Directory.systemTemp.createTemp('rhr_path_plugin_');
+    addTearDown(() => project.delete(recursive: true));
+    for (final name in ['forked', 'published']) {
+      final plugin = Directory('${project.path}/$name')..createSync();
+      File('${plugin.path}/pubspec.yaml').writeAsStringSync('version: 1.0.0\n');
+      Directory('${plugin.path}/android').createSync();
+    }
+    File('${project.path}/.flutter-plugins-dependencies').writeAsStringSync(
+      jsonEncode({
+        'plugins': {
+          'android': [
+            {'name': 'forked', 'path': '${project.path}/forked/'},
+            {'name': 'published', 'path': '${project.path}/published/'},
+          ],
+        },
+      }),
+    );
+    File('${project.path}/pubspec.lock').writeAsStringSync('''
+packages:
+  forked:
+    dependency: "direct overridden"
+    description:
+      path: "forked"
+      relative: true
+    source: path
+    version: "1.0.0"
+  published:
+    dependency: transitive
+    description:
+      name: published
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.0"
+''');
+
+    expect(readUnsupportedAndroidInputs(project.path), [
+      'forked: plugin from a local path; its Android code is not in the '
+          'generic player',
+    ]);
+  });
 }

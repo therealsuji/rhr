@@ -65,7 +65,9 @@ internal object DevFsDelta {
 		val baseSha = head.headers[DELTA_BASE]
 		if (baseSha != null && !SHA256_HEX.matches(baseSha)) return null
 		storeDir.mkdirs()
-		val part = File(storeDir, "$sha.part")
+		// Temporary files are this upload's own: an overlapping retry of the
+		// same file rebuilds side by side, and both publish the same bytes.
+		val part = File.createTempFile("$sha-", ".part", storeDir)
 		val digest = MessageDigest.getInstance("SHA-256")
 		try {
 			part.outputStream().buffered().use { out ->
@@ -85,11 +87,16 @@ internal object DevFsDelta {
 			prune(storeDir)
 			// A whole-file upload is already the gzip the VM wants.
 			if (baseSha == null) return Forward(vmHead(head, body.size.toLong()), null, body)
-			val gz = File(storeDir, "$sha.gz")
-			stored.inputStream().use { input ->
-				object : GZIPOutputStream(gz.outputStream().buffered()) {
-					init { def.setLevel(Deflater.BEST_SPEED) }
-				}.use { input.copyTo(it) }
+			val gz = File.createTempFile("$sha-", ".gz", storeDir)
+			try {
+				stored.inputStream().use { input ->
+					object : GZIPOutputStream(gz.outputStream().buffered()) {
+						init { def.setLevel(Deflater.BEST_SPEED) }
+					}.use { input.copyTo(it) }
+				}
+			} catch (e: Exception) {
+				gz.delete()
+				throw e
 			}
 			return Forward(vmHead(head, gz.length()), gz, null)
 		} catch (_: Exception) {
@@ -158,8 +165,10 @@ internal object DevFsDelta {
 			?.sortedByDescending { it.lastModified() }
 			?.drop(KEPT_BASES)
 			?.forEach { it.delete() }
-		storeDir.listFiles { f -> f.name.endsWith(".gz") }?.forEach {
-			if (System.currentTimeMillis() - it.lastModified() > 60_000) it.delete()
+		// Each upload deletes its own temporary files; these are what a killed
+		// process left behind.
+		storeDir.listFiles { f -> f.name.endsWith(".gz") || f.name.endsWith(".part") }?.forEach {
+			if (System.currentTimeMillis() - it.lastModified() > 60 * 60_000) it.delete()
 		}
 	}
 
@@ -177,8 +186,9 @@ internal object DevFsDelta {
 		}
 	}
 
-	/** Collects one channel's bytes until the request is decided. */
-	class Sniffer {
+	/** Collects one channel's bytes until the request is decided. [epoch] is
+	 *  the connection the channel was opened on. */
+	class Sniffer(val epoch: Long) {
 		val bytes = ByteArrayOutputStream()
 		var head: Head? = null
 

@@ -291,14 +291,11 @@ final class _DevFsAssetTransport implements AssetTransport {
             base64.encode(utf8.encode(devFsAssetUri(file.relativePath))),
           );
           httpRequest.add(prepared.encoded);
-          // The body gets no deadline: the tunnel paces this socket by the
-          // phone's acknowledgements, so a slow cellular link takes as long
-          // as it takes, and a dead tunnel destroys the socket, failing the
-          // write. Only the phone's answer to a fully sent file is timed.
-          await httpRequest.flush();
-          final response = await httpRequest.close().timeout(
-            const Duration(seconds: 60),
-          );
+          // No deadline: the local proxy may hold the whole body before the
+          // tunnel carries it, so the wait for an answer includes the entire
+          // transfer, and a slow cellular link takes as long as it takes. A
+          // stalled tunnel ends the session, which closes this connection.
+          final response = await httpRequest.close();
           final body = await response.transform(utf8.decoder).join();
           if (body.contains('"error"')) {
             throw Exception('DevFS write rejected: $body');

@@ -37,6 +37,8 @@ dependencies {
     // Native WebRTC data channel for direct tunnel payloads. The relay carries
     // signaling and control messages only unless relay-only mode is explicit.
     implementation("io.github.webrtc-sdk:android:144.7559.12")
+    // JVM tests for the pure-Kotlin DevFS delta rebuild.
+    testImplementation("junit:junit:4.13.2")
 }
 
 

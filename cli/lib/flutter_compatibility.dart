@@ -151,10 +151,7 @@ final class ProjectCompatibilityProfile {
       FlutterCompatibility.fromJson(player),
     );
     final blockers = [...report.blockers, ...nativeDifferencesFrom(player)];
-    return CompatibilityReport(
-      List.unmodifiable(blockers),
-      report.warnings,
-    );
+    return CompatibilityReport(List.unmodifiable(blockers), report.warnings);
   }
 }
 
@@ -228,6 +225,24 @@ FlutterCompatibility readProjectFlutterCompatibility(String project) {
     throw const FormatException('invalid Flutter version metadata');
   }
   return FlutterCompatibility.fromJson(json);
+}
+
+/// The packages `pubspec.lock` resolves from a local path. Unlike a
+/// published or git version, their sources change without the lock changing.
+Set<String> readPathPackages(String project) {
+  final lock = File('$project/pubspec.lock');
+  if (!lock.existsSync()) return const {};
+  final packages = <String>{};
+  String? current;
+  for (final line in lock.readAsLinesSync()) {
+    final entry = RegExp(r'^  (\S+):\s*$').firstMatch(line);
+    if (entry != null) {
+      current = entry.group(1);
+    } else if (current != null && line.trim() == 'source: path') {
+      packages.add(current);
+    }
+  }
+  return packages;
 }
 
 final class AndroidPluginSource {
@@ -406,11 +421,22 @@ List<String> androidPermissionDifferences({
 }
 
 List<String> readUnsupportedAndroidInputs(String project) {
-  final androidApp = Directory('$project/android/app');
-  if (!androidApp.existsSync()) return const [];
   final unsupported = <String>[];
 
-  final sourceRoot = Directory('${androidApp.path}/src');
+  // A path plugin's Android code is whatever is on disk, so a player built
+  // with a published version of the same plugin cannot stand in for it.
+  final local = readPathPackages(project);
+  for (final plugin in readAndroidPluginSources(project)) {
+    if (local.contains(plugin.name) &&
+        Directory('${plugin.path}/android').existsSync()) {
+      unsupported.add(
+        '${plugin.name}: plugin from a local path; its Android code is not in '
+        'the generic player',
+      );
+    }
+  }
+
+  final sourceRoot = Directory('$project/android/app/src');
   if (sourceRoot.existsSync()) {
     const nativeExtensions = {
       '.java',
