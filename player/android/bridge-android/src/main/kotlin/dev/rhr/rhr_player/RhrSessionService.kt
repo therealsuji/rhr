@@ -356,6 +356,34 @@ class RhrSessionService : Service() {
 	override fun onCreate() {
 		super.onCreate()
 		RhrSessionService.current = this
+		if (android.os.Build.VERSION.SDK_INT >= 24) {
+			getSystemService(android.net.ConnectivityManager::class.java)
+				?.registerDefaultNetworkCallback(networkCallback)
+		}
+	}
+
+	// The phone's default network. Sockets are bound to the network they were
+	// opened on, so when it changes (Wi-Fi to cellular and back) the relay
+	// socket and the direct path are dead even before they notice: OkHttp's
+	// ping and ICE consent take up to ~30 s to say so. Acting on the change
+	// itself makes a handover a reconnect, not an outage.
+	@Volatile private var defaultNetwork: android.net.Network? = null
+
+	private val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+		override fun onAvailable(network: android.net.Network) {
+			val previous = defaultNetwork
+			defaultNetwork = network
+			if (previous != null && previous != network && !stopped.get()) {
+				Log.i(TAG, "[$sessionCode] default network changed; reconnecting now")
+				ws?.cancel()
+			}
+			// Back from no network at all: cut short a backoff of up to 30 s.
+			synchronized(flowLock) { flowLock.notifyAll() }
+		}
+
+		override fun onLost(network: android.net.Network) {
+			if (network == defaultNetwork) defaultNetwork = null
+		}
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -491,6 +519,14 @@ class RhrSessionService : Service() {
 	}
 
 	override fun onDestroy() {
+		if (android.os.Build.VERSION.SDK_INT >= 24) {
+			try {
+				getSystemService(android.net.ConnectivityManager::class.java)
+					?.unregisterNetworkCallback(networkCallback)
+			} catch (_: IllegalArgumentException) {
+				// Never registered.
+			}
+		}
 		stopped.set(true)
 		ws?.close(1000, "service destroyed")
 		directTransport?.close()
