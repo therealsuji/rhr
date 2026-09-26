@@ -82,8 +82,6 @@ class RhrPlayerUpdater(
 	private var finished = false
 	private var lastDataAt = 0L
 
-	/** Wire encoding agreed for this transfer: "gzip" or "identity". */
-	private var encoding = "identity"
 
 	override fun handleBegin(message: JSONObject) {
 		val id = message.optInt("id")
@@ -99,20 +97,11 @@ class RhrPlayerUpdater(
 			transferId = id
 			expectedSize = size
 			expectedSha256 = sha
-			installKind = message.optString("kind", "player")
+			installKind = message.getString("kind")
 			installTarget = message.optString("target", "")
 			received = 0
 			commitRequested = false
 			finished = false
-			// An APK stores its native libraries uncompressed so Android can
-			// mmap them, which leaves ~a third of the transfer compressible.
-			// The dev offers what it can encode; we pick gzip when offered
-			// and otherwise stay on the raw stream, so either side can be
-			// older than the other.
-			val offered = message.optJSONArray("encodings")
-			encoding = if (offered != null &&
-				(0 until offered.length()).any { offered.optString(it) == "gzip" }
-			) "gzip" else "identity"
 			val dir = File(context.filesDir, "updates").apply { mkdirs() }
 			// One in-flight update at a time; a stale file from a dead
 			// transfer is simply overwritten.
@@ -121,15 +110,15 @@ class RhrPlayerUpdater(
 			// digest and the byte count both sit AFTER decompression and the
 			// verification below is identical either way.
 			digest = MessageDigest.getInstance("SHA-256")
-			// Counting/hashing sits at the FILE end of the chain, so an
-			// identity transfer and a gzip transfer verify identically.
+			// The dev always sends the APK gzipped. Counting and hashing sit
+			// at the FILE end of the chain, after decompression.
 			val counting = CountingSink(FileOutputStream(file), digest!!)
 			sink = counting
-			output = if (encoding == "gzip") GzipSink(counting) else counting
+			output = GzipSink(counting)
 		}
 		active = this
-		Log.i(TAG, "update transfer $id started ($size bytes, $encoding)")
-		status(id, "ready", encoding = encoding)
+		Log.i(TAG, "update transfer $id started ($size bytes)")
+		status(id, "ready")
 	}
 
 	override fun handleData(frame: ByteArray) {
@@ -333,13 +322,10 @@ class RhrPlayerUpdater(
 		id: Int,
 		state: String,
 		message: String? = null,
-		encoding: String? = null,
 	) {
 		val payload = JSONObject().put("t", "update_status").put("id", id)
 			.put("state", state)
 		if (message != null) payload.put("message", message)
-		// The dev only compresses once we have said we can decode it.
-		if (encoding != null) payload.put("encoding", encoding)
 		try {
 			sendText(payload.toString())
 		} catch (e: Exception) {

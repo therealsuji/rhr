@@ -9,7 +9,6 @@ void main() {
   test('a beacon build trusts the player that announced itself', () {
     expect(
       beaconPlayerFrom({
-        'beacon': 1,
         'playerPackage': 'dev.rhr.rhr_player',
         'playerCertificate': certificate,
       }),
@@ -17,11 +16,9 @@ void main() {
     );
   });
 
-  test('older players and malformed identities keep the adb route', () {
-    expect(beaconPlayerFrom({'playerPackage': 'dev.rhr.rhr_player'}), isNull);
+  test('a malformed identity keeps the adb route', () {
     expect(
       beaconPlayerFrom({
-        'beacon': 1,
         'playerPackage': 'dev.rhr.rhr_player',
         'playerCertificate': 'not-a-hash',
       }),

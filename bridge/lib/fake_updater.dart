@@ -41,18 +41,12 @@ class FakeUpdater implements RhrUpdateHandler {
   FakeUpdater({
     required this.sendText,
     required this.outcome,
-    required this.acceptGzip,
     this.confirmDelay = const Duration(milliseconds: 250),
     this.onEvent,
   });
 
   final void Function(String message) sendText;
   final FakeInstallOutcome outcome;
-
-  /// Whether to accept the dev's gzip offer. False exercises the raw path
-  /// and the negotiation's "a device that chooses nothing gets the stream
-  /// exactly as before" branch.
-  final bool acceptGzip;
 
   /// How long Android's confirmation sheet "stays up" for
   /// [FakeInstallOutcome.pendingUser].
@@ -64,7 +58,6 @@ class FakeUpdater implements RhrUpdateHandler {
   int _transferId = 0;
   int _expectedSize = 0;
   String _expectedSha = '';
-  bool _gzip = false;
   bool _finished = false;
   bool _commitRequested = false;
 
@@ -107,33 +100,24 @@ class FakeUpdater implements RhrUpdateHandler {
     _transferId = message['id'] as int? ?? 0;
     _expectedSize = message['size'] as int? ?? 0;
     _expectedSha = message['sha256'] as String? ?? '';
-    final offered =
-        (message['encodings'] as List?)?.cast<String>() ?? const <String>[];
-    _gzip = acceptGzip && offered.contains('gzip');
-    _onEvent('begin id=$_transferId size=$_expectedSize gzip=$_gzip');
+    _onEvent('begin id=$_transferId size=$_expectedSize');
 
-    if (_gzip) {
-      final input = _inflateInput = StreamController<List<int>>();
-      _inflateDone = input.stream
-          .transform(gzip.decoder)
-          .forEach(_decoded.add)
-          .catchError((Object error) {
-            _fail('gunzip failed: $error');
-          });
-    }
+    final input = _inflateInput = StreamController<List<int>>();
+    _inflateDone = input.stream
+        .transform(gzip.decoder)
+        .forEach(_decoded.add)
+        .catchError((Object error) {
+          _fail('gunzip failed: $error');
+        });
 
-    _status('ready', extra: {if (_gzip) 'encoding': 'gzip'});
+    _status('ready');
   }
 
   @override
   void handleData(Uint8List payload) {
     if (_finished) return;
     _wireBytes += payload.length;
-    if (_gzip) {
-      _inflateInput?.add(payload);
-    } else {
-      _decoded.add(payload);
-    }
+    _inflateInput?.add(payload);
     // The dev may commit before the tail arrives on the direct path, so the
     // completion check lives here too, not only in handleCommit.
     if (_commitRequested) unawaited(_finishIfComplete());
@@ -149,20 +133,17 @@ class FakeUpdater implements RhrUpdateHandler {
 
   /// Verifies and installs once every byte has arrived.
   ///
-  /// With gzip the arrival test has to be on the DECODED length: the wire
-  /// length is whatever the compressor produced and says nothing about
-  /// whether the stream is complete.
+  /// The arrival test is on the DECODED length: the wire length is whatever
+  /// the compressor produced and says nothing about whether the stream is
+  /// complete.
   Future<void> _finishIfComplete() async {
     if (_finished) return;
-    if (_gzip) {
-      // Closing the sink flushes the inflater's tail; only then is the
-      // decoded length authoritative.
-      await _inflateInput?.close();
-      await _inflateDone;
-      _inflateInput = null;
-    }
+    // Closing the sink flushes the inflater's tail; only then is the decoded
+    // length authoritative.
+    await _inflateInput?.close();
+    await _inflateDone;
+    _inflateInput = null;
     if (_decoded.length < _expectedSize) {
-      if (!_gzip) return; // more frames still coming
       _fail('transfer incomplete: ${_decoded.length} of $_expectedSize bytes');
       return;
     }

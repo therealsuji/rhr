@@ -255,12 +255,6 @@ final class RunPreparation {
 
   Future<PreparedRun> run() async {
     final info = await _connected(_firstInfo.future);
-    if (info['runProtocol'] != 1) {
-      throw StateError(
-        'This player needs the connection-first RHR update. Install a current player before using rhr run. '
-        '`rhr attach` remains available for manual sessions.',
-      );
-    }
     _deviceId = '${info['deviceId']}';
     phase(
       'checking',
@@ -403,13 +397,11 @@ final class RunPreparation {
   }
 }
 
-/// The player a beacon build should trust, when this player takes beacon
-/// reports and says who it is.
+/// The player a beacon build should trust, as the player announced itself.
 BeaconPlayer? beaconPlayerFrom(Map<String, dynamic> info) {
   final package = info['playerPackage'];
   final certificate = info['playerCertificate'];
-  if (info['beacon'] != 1 ||
-      package is! String ||
+  if (package is! String ||
       certificate is! String ||
       !RegExp(r'^[0-9a-f]{64}$').hasMatch(certificate)) {
     return null;

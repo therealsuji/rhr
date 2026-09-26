@@ -30,6 +30,7 @@ Future<void> syncAssets({
   int maxConcurrentUploads = 4,
   AssetTransport? transport,
   AssetProgress? onProgress,
+
   /// Called when the push is done. The flag says whether anything actually
   /// changed, so a caller that only needs to act on new assets — a hot
   /// restart, say — can skip the work when there are none.
@@ -96,13 +97,7 @@ Future<void> syncAssets({
     final stat = file.statSync();
     if (entry['size'] != stat.size) return false;
     final hash = entry['sha256'];
-    if (hash is! String) {
-      // Manifest written by an older rhr (size+mtime only). Fall back to the
-      // old check so upgrading doesn't force a full re-upload; the entry gains
-      // a hash the next time this file is pushed.
-      return entry['mtime'] == stat.modified.millisecondsSinceEpoch;
-    }
-    return hash == hashOf(file.readAsBytesSync());
+    return hash is String && hash == hashOf(file.readAsBytesSync());
   }
 
   final allFiles = assetDir

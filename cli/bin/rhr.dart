@@ -761,7 +761,8 @@ Future<int?> _runSession({
   // Channels carrying a rewritten DevFS upload: the phone's answer is read
   // here, not handed straight to Flutter, so a missing base can be retried.
   final devFsAnswers = <int, ({BytesBuilder bytes, Completer<void> closed})>{};
-  // Whether this player rebuilds delta uploads (announced in its info).
+  // Whether this host rebuilds delta uploads (announced in its info). The
+  // Android player does; the pure-Dart desktop bridge does not.
   var devFsDelta = false;
   DirectTransportFailure? directFailure;
   PlayerUpdateFailure? preparationRetry;
@@ -887,11 +888,7 @@ Future<int?> _runSession({
         }
         if (m['t'] == 'info' && !vmReady.isCompleted) {
           final announcedAssetStoreId = m['assetStoreId'];
-          final announcedHost =
-              m['host'] ??
-              (m['compatibility'] is Map<String, dynamic>
-                  ? (m['compatibility'] as Map<String, dynamic>)['host']
-                  : null);
+          final announcedHost = m['host'];
           final hostKind = announcedHost is String ? announcedHost : 'player';
           if (hostKind == 'connector') {
             // Connector mode tunnels a THIRD-party app's VM service — the
@@ -918,8 +915,8 @@ Future<int?> _runSession({
               announcedAssetStoreId.isEmpty ||
               raw is! Map<String, dynamic>) {
             stderr.writeln(
-              '[rhr] COMPATIBILITY_BLOCKED: reinstall a current rhr player; '
-              'its runtime or asset-store identity is missing.',
+              '[rhr] COMPATIBILITY_BLOCKED: the player announced no runtime '
+              'or asset-store identity.',
             );
             exit(78);
           }
@@ -1284,8 +1281,8 @@ Future<int?> _runSession({
       onDone: closeRaw,
       onError: (Object _) => closeRaw(),
     );
-    // A player without delta support gets the channel opened at accept,
-    // as it always did.
+    // A host that cannot rebuild deltas (the pure-Dart desktop bridge) gets
+    // the channel opened at accept.
     if (sniffing == null) openRaw(Uint8List(0));
   });
 
@@ -1960,11 +1957,7 @@ Future<int> _runAttachProductFlow({
   );
   final qrPayload = configuredRelay == null && localRelay == null
       ? sessionCode
-      : jsonEncode({
-          'code': sessionCode,
-          'relay': deviceRelays.first,
-          'relays': deviceRelays,
-        });
+      : jsonEncode({'code': sessionCode, 'relays': deviceRelays});
   final qr = renderTerminalQr(qrPayload);
   final deepLink = sessionConnectionLink(sessionCode, deviceRelays);
   final link = sessionConnectionWebLink(deepLink).toString();

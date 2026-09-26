@@ -9,8 +9,8 @@
 //
 // Its first implementation is the desktop fake device, which writes the
 // payload to a temp file and answers as a phone would. That is what lets the
-// CLI's whole update path — the phases, the flow control, the gzip
-// negotiation, the terminal states — run in CI with no phone in the room.
+// CLI's whole update path — the phases, the flow control, the gzip stream,
+// the terminal states — run in CI with no phone in the room.
 
 import 'dart:typed_data';
 
@@ -18,21 +18,20 @@ import 'dart:typed_data';
 ///
 /// Wire protocol, dev → device unless noted (mirrors `player_update.dart`):
 ///
-///   {"t":"update_begin", id, size, sha256, kind, encodings?, target?}
-///   binary opUpdateData frames                  the payload, flow-controlled
+///   {"t":"update_begin", id, size, sha256, kind, target?}
+///   binary opUpdateData frames                  the gzipped payload, flow-controlled
 ///   {"t":"update_commit", id}                   the stream is complete
 ///
 /// and back, device → dev, as `{"t":"update_status","id":N,"state":…}`:
 ///
-///   "ready"         accepted; chunks may flow. Carries the chosen
-///                   "encoding" when the device took one of the offered ones.
+///   "ready"         accepted; chunks may flow
 ///   "committed"     verified and handed to the installer
 ///   "pending_user"  the OS is asking the tester to confirm
 ///   "installed"     confirmed on the device
 ///   "failure"       with a "message" saying why
 ///
-/// A device that never answers "ready" is the supported downgrade signal:
-/// the dev side times out with an explicit "update it manually once".
+/// A device that never answers "ready" has no updater; the dev side times
+/// out and reports it.
 abstract interface class RhrUpdateHandler {
   /// The dev announced a transfer. Answer "ready" to accept it.
   void handleBegin(Map<String, dynamic> message);

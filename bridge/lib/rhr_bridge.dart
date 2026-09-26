@@ -64,8 +64,8 @@ class RhrBridge {
   /// Host-provided hook for over-the-wire APK updates, matching the Android
   /// player's `RhrSessionService.updateHandlerFactory`. Left null, update
   /// frames are ignored and the dev side surfaces its "did not acknowledge"
-  /// timeout — which is the correct behaviour for a host that ships no
-  /// updater, and the downgrade path the CLI already documents.
+  /// timeout, which is the correct behaviour for a host that ships no
+  /// updater.
   static RhrUpdateHandlerFactory? updateHandlerFactory;
 
   /// The handler for the current session, built on the first update message.
@@ -385,7 +385,7 @@ class RhrBridge {
   /// Anything else — hello, ping, progress, dev_gone — is not ours; the
   /// session's other machinery handles it and this returns quietly. A host
   /// with no [updateHandlerFactory] ignores update messages entirely, which
-  /// the dev side reads as "this device predates self-update".
+  /// the dev side reports as an update the device did not acknowledge.
   void _handleUpdateControl(
     String message,
     IOWebSocketChannel ws,

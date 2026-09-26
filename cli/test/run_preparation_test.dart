@@ -104,31 +104,6 @@ void main() {
     await stopped;
   });
   test(
-    'old player reports a required update instead of streaming blindly',
-    () async {
-      final phone = Phone();
-      final preparation = RunPreparation(
-        transport: phone,
-        project: '/not-a-project',
-        profile: project(),
-        policy: PlayerUpdatePolicy.always,
-      );
-      preparation.handleMessage({'t': 'info', 'compatibility': player});
-      await expectLater(
-        preparation.run(),
-        throwsA(
-          isA<StateError>().having(
-            (error) => error.message,
-            'message',
-            contains('connection-first RHR update'),
-          ),
-        ),
-      );
-      expect(phone.messages, isEmpty);
-      preparation.close();
-    },
-  );
-  test(
     'connector setup precedes build approval and ignores player SDK skew',
     () async {
       final directory = Directory.systemTemp.createTempSync('rhr-preparation-');
@@ -146,11 +121,7 @@ void main() {
         'ok': true,
         'ready': true,
       });
-      preparation.handleMessage({
-        't': 'info',
-        'runProtocol': 1,
-        'compatibility': player,
-      });
+      preparation.handleMessage({'t': 'info', 'compatibility': player});
       await expectLater(
         preparation.run(),
         throwsA(

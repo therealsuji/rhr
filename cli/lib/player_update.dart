@@ -15,8 +15,8 @@
 //       channel ids can never collide)
 //   {"t":"update_commit","id":N}                      transfer complete
 //
-// A player without the updater never answers "ready" — that is the supported
-// downgrade signal, surfaced as a clear "update it manually once" error.
+// A host without an updater (the pure-Dart bridge by default) never answers
+// "ready"; the sender reports that as a failure after 15 s.
 
 import 'dart:async';
 import 'dart:convert';
@@ -216,10 +216,6 @@ final class PlayerUpdateSender {
   Completer<void>? _stateArrived;
   var _closed = false;
 
-  /// The last status [_awaitState] accepted, for fields beyond `state`
-  /// (the encoding the player chose out of what we offered).
-  Map<String, dynamic>? _lastStatus;
-
   /// Feed one decoded text message from the transport stream. Returns true
   /// when the message belonged to this transfer (callers skip their own
   /// handling for those). opAck binary frames for the transfer id must also
@@ -256,25 +252,20 @@ final class PlayerUpdateSender {
         'size': size,
         'sha256': digest.toString(),
         'kind': kind.name,
-        // An APK keeps its native libraries STORED so Android can mmap them,
-        // which leaves roughly a third of the bytes compressible. Offered,
-        // not assumed: a player that does not answer with an encoding gets
-        // the raw stream exactly as before.
-        'encodings': ['gzip'],
         if (target.isNotEmpty) 'target': target,
       }),
     );
     await _awaitState(
       {'ready'},
       timeout: const Duration(seconds: 15),
-      onTimeout:
-          'the player did not acknowledge the update — it predates '
-          'self-update; reinstall it manually once',
+      onTimeout: 'the player did not acknowledge the update',
     );
 
-    // size and sha256 above describe the APK itself; the player verifies
-    // them after decoding, so compression never changes what is checked.
-    final useGzip = _lastStatus?['encoding'] == 'gzip';
+    // The payload always goes gzipped: an APK keeps its native libraries
+    // STORED so Android can mmap them, which leaves roughly a third of the
+    // bytes compressible. size and sha256 above describe the APK itself; the
+    // player verifies them after decoding.
+    //
     // Compress to a file before sending rather than straight down the wire.
     // Streaming through gzip.encoder means the wire length is unknown until
     // the last byte, so progress had to be reported as wire-bytes-so-far
@@ -283,24 +274,18 @@ final class PlayerUpdateSender {
     // there: the tester watched a finished transfer claim to be half done.
     // Compressing first costs one pass over a file that was just written
     // (so it is in page cache) and buys a total the bar can actually reach.
-    File? compressed;
-    if (useGzip) {
-      stderr.writeln('[rhr] compressing the transfer (gzip)');
-      compressed = File(
-        '${Directory.systemTemp.createTempSync('rhr_update').path}/payload.gz',
-      );
-      final sink = compressed.openWrite();
-      await apk.openRead().transform(gzip.encoder).pipe(sink);
-    }
-    final payload = compressed ?? apk;
+    stderr.writeln('[rhr] compressing the transfer (gzip)');
+    final compressed = File(
+      '${Directory.systemTemp.createTempSync('rhr_update').path}/payload.gz',
+    );
+    await apk.openRead().transform(gzip.encoder).pipe(compressed.openWrite());
+    final payload = compressed;
     // What the bar measures: the bytes that actually cross the wire.
     final wireSize = payload.lengthSync();
-    if (useGzip) {
-      stderr.writeln(
-        '[rhr] compressed ${(size / (1024 * 1024)).toStringAsFixed(1)} MB to '
-        '${(wireSize / (1024 * 1024)).toStringAsFixed(1)} MB',
-      );
-    }
+    stderr.writeln(
+      '[rhr] compressed ${(size / (1024 * 1024)).toStringAsFixed(1)} MB to '
+      '${(wireSize / (1024 * 1024)).toStringAsFixed(1)} MB',
+    );
 
     var sent = 0;
     try {
@@ -332,12 +317,10 @@ final class PlayerUpdateSender {
     } finally {
       // The payload can be ~60 MB; a failed transfer must not leave it in
       // the system temp directory.
-      if (compressed != null) {
-        try {
-          compressed.parent.deleteSync(recursive: true);
-        } on FileSystemException {
-          // Nothing actionable: the OS cleans its own temp directory.
-        }
+      try {
+        compressed.parent.deleteSync(recursive: true);
+      } on FileSystemException {
+        // Nothing actionable: the OS cleans its own temp directory.
       }
     }
 
@@ -389,7 +372,6 @@ final class PlayerUpdateSender {
       final state = status['state'];
       if (state is! String) continue;
       if (accepted.contains(state)) {
-        _lastStatus = status;
         return state;
       }
       if (state == 'failure') {

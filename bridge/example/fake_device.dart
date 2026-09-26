@@ -13,12 +13,11 @@
 //                       which is what makes it offer an update at all
 //   --install=<how>     what to do once a transfer verifies:
 //                       committed (default) | pending-user | installed | fail
-//   --no-gzip           decline the dev's gzip offer and take the raw stream
 //
 // The update flags are what make the CLI's whole update path runnable
 // without a phone: with --outdated the gate blocks, the CLI builds and
 // streams an APK, and this answers as the player would — so the phases, the
-// flow-control window, the gzip negotiation and every terminal state get
+// flow-control window, the gzip stream and every terminal state get
 // exercised in CI rather than only on hardware.
 import 'dart:convert';
 import 'dart:developer' show Service;
@@ -140,7 +139,6 @@ Future<void> main(List<String> args) async {
       FakeUpdater(
         sendText: sendText,
         outcome: _installOutcome(args),
-        acceptGzip: !args.contains('--no-gzip'),
         onEvent: (event) => stderr.writeln('[fake_updater] $event'),
       );
   // --connector stands in for the player tunneling a THIRD-party app: it

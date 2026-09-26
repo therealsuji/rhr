@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -106,7 +107,8 @@ void main() {
       );
       streamed.add(frame.payload);
     }
-    expect(streamed.toBytes(), apkBytes);
+    // The payload always crosses the wire gzipped.
+    expect(gzip.decode(streamed.toBytes()), apkBytes);
 
     sender.handleMessage({
       't': 'update_status',
@@ -275,9 +277,13 @@ void main() {
   test('flow control pauses at the window and resumes on ack', () async {
     final transport = _FakeTransport();
     final sender = PlayerUpdateSender(transport);
-    // Larger than one 512 KB window so the sender must block on acks.
+    // Larger than one 512 KB window even after gzip (random bytes do not
+    // compress), so the sender must block on acks.
+    final random = Random(9);
     final big = File('${tmp.path}/big.apk')
-      ..writeAsBytesSync(List<int>.filled(windowBytes + 64 * 1024, 7));
+      ..writeAsBytesSync(
+        List<int>.generate(windowBytes + 64 * 1024, (_) => random.nextInt(256)),
+      );
     final done = sender.send(big);
     await _pumpUntil(() => transport.sentText.isNotEmpty);
     final id = transport.sentText.first['id'] as int;

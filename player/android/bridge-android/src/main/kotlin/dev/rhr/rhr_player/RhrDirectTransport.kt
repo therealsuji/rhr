@@ -313,8 +313,8 @@ internal class RhrDirectTransport(
 	 * The route ICE settled on, for the developer's log: whether it is IPv4 or
 	 * IPv6, and which candidate types met. Nothing else records this, and it
 	 * is the fact that separates "these networks cannot connect directly"
-	 * from a bug. Sent as `path`, not `direct_path`: CLIs before this message
-	 * treat an unknown `direct_*` type as a protocol violation.
+	 * from a bug. Named `path`, outside the `direct_*` family, because it is a
+	 * report, not a negotiation step the CLI's signaling parser handles.
 	 */
 	private fun describePath(event: CandidatePairChangeEvent): JSONObject? {
 		val local = candidateFields(event.local.sdp) ?: return null

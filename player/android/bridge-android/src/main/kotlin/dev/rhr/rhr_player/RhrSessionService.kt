@@ -635,7 +635,6 @@ class RhrSessionService : Service() {
 
 	private fun infoMessage(): String = JSONObject()
 		.put("t", "info")
-		.put("runProtocol", if (runRequestHandler != null) 1 else 0)
 		.put("deviceName", android.os.Build.MODEL)
 		.put("deviceId", InstallationIdentity.id(this))
 		.put("vm", vmUri)
@@ -645,12 +644,11 @@ class RhrSessionService : Service() {
 		// {"t":"ready"} frame has already been consumed.
 		.put("ready", readySent)
 		.put("assetStoreId", assetStoreId)
-		// This player rebuilds DevFS uploads the CLI sends as deltas.
+		// This host rebuilds DevFS uploads the CLI sends as deltas; the
+		// pure-Dart desktop bridge does not.
 		.put("devfsDelta", 1)
-		// The player app registers the run handler and the beacon receiver
-		// together. A beacon-built app trusts exactly this package and
-		// signing certificate with its VM address.
-		.put("beacon", if (runRequestHandler != null) 1 else 0)
+		// A beacon-built app trusts exactly this package and signing
+		// certificate with its VM address.
 		.put("playerPackage", packageName)
 		.put("playerCertificate", ownCertificate)
 		// "player" | "connector", which is how the dev side decides whether to
@@ -877,10 +875,10 @@ class RhrSessionService : Service() {
 							// device can connect to the relay before the CLI subscribes;
 							// starting here keeps the first offer and ICE candidates on a
 							// live developer stream instead of losing them in the relay.
-							val connectionId = runRequest?.optString("connectionId")?.takeIf { it.isNotEmpty() }
+							val connectionId = runRequest?.optString("connectionId")
 							// Abrupt CLI exits do not send dev_gone. A new attempt owns a new peer.
 							if (preferDirect && (directFailureReported || directTransport == null ||
-								(connectionId != null && connectionId != developerConnectionId))) {
+								connectionId != developerConnectionId)) {
 								developerConnectionId = connectionId
 								directFailureReported = false
 								cleanupChannels()

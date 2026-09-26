@@ -113,7 +113,6 @@ void main() {
   /// Runs one full transfer and returns what both ends saw.
   Future<({PlayerUpdateOutcome outcome, _LoopbackTransport transport})> run({
     required FakeInstallOutcome installs,
-    bool acceptGzip = true,
     UpdateKind kind = UpdateKind.player,
     String target = '',
   }) async {
@@ -126,7 +125,6 @@ void main() {
     transport.device = FakeUpdater(
       sendText: transport.deviceSays,
       outcome: installs,
-      acceptGzip: acceptGzip,
       confirmDelay: const Duration(milliseconds: 10),
     );
     final outcome = await transport.sender.send(
@@ -151,7 +149,8 @@ void main() {
     expect(
       last.done,
       last.total,
-      reason: 'the tester reads ${(last.done * 100 / last.total).round()}% '
+      reason:
+          'the tester reads ${(last.done * 100 / last.total).round()}% '
           'for a transfer that has finished',
     );
 
@@ -179,25 +178,12 @@ void main() {
     expect(
       ratio,
       inExclusiveRange(0.3, 0.9),
-      reason: 'the payload compressed to ${(ratio * 100).round()}%, which is '
+      reason:
+          'the payload compressed to ${(ratio * 100).round()}%, which is '
           'not APK-shaped enough to exercise the mismatch',
     );
     expect(total, result.transport.device.wireBytes);
     expect(total, isNot(apkBytes.length));
-  });
-
-  test('a device that declines gzip still reports honestly', () async {
-    final result = await run(
-      installs: FakeInstallOutcome.committed,
-      acceptGzip: false,
-    );
-    expect(result.outcome, PlayerUpdateOutcome.committed);
-
-    final last = result.transport.progress.last;
-    expect(last.done, last.total);
-    // No compression was negotiated, so the wire carries the APK itself.
-    expect(last.total, apkBytes.length);
-    expect(result.transport.device.wireBytes, apkBytes.length);
   });
 
   test('an app payload waits for the install to be confirmed', () async {
@@ -209,7 +195,10 @@ void main() {
     // kind=app waits past pending_user for the terminal "installed" — the
     // tester's tap on Android's sheet.
     expect(result.outcome, PlayerUpdateOutcome.installed);
-    expect(result.transport.progress.last.done, result.transport.progress.last.total);
+    expect(
+      result.transport.progress.last.done,
+      result.transport.progress.last.total,
+    );
   });
 
   test('a player payload surfaces pending_user as its own outcome', () async {
@@ -231,7 +220,6 @@ void main() {
     transport.device = FakeUpdater(
       sendText: transport.deviceSays,
       outcome: FakeInstallOutcome.installed,
-      acceptGzip: true,
       confirmDelay: const Duration(milliseconds: 10),
     );
 
