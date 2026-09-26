@@ -67,6 +67,15 @@ object RunPreparation {
 						setupMessage = message
 						response.put("ready", message.isEmpty()).put("message", message)
 					}
+					// The beacon route needs no Wireless debugging: only the
+					// overlay the session controls are drawn in.
+					"beacon_setup" -> {
+						val message = if (Settings.canDrawOverlays(context)) ""
+							else "Allow RHR to display the session controls over your app."
+						setupAction = if (message.isEmpty()) "" else "overlay"
+						setupMessage = message
+						response.put("ready", message.isEmpty()).put("message", message)
+					}
 					"install_permission" -> {
 						val allowed = Build.VERSION.SDK_INT < 26 || context.packageManager.canRequestPackageInstalls()
 						setupAction = if (allowed) "" else "install"
@@ -77,6 +86,21 @@ object RunPreparation {
 						val pkg = packageName(request)
 						val info = context.packageManager.getApplicationInfo(pkg, 0)
 						check(info.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) { "The installed app is not a debug build." }
+						if (request.optBoolean("beacon")) {
+							val vm = launchWithBeacon(context, pkg)
+							if (!isCurrent()) return@Thread
+							selectVm(vm)
+							// The tester may close and reopen the app; its VM then
+							// listens on a new port, and the beacon reports it.
+							Beacons.onAnnounce = { reported, address ->
+								if (reported == pkg && isCurrent()) selectVm(address)
+							}
+							OverlayService.start(context)
+							response.put("vm", vm)
+							response.put("ok", true)
+							if (isCurrent()) reply(response)
+							return@Thread
+						}
 						check(AdbConnection.ensureConnected(context)) { "Wireless debugging disconnected. Complete connector setup and retry." }
 						if (!isCurrent()) return@Thread
 						check(ShellVm.launch(pkg, context)) { "The debug app has no launcher activity." }
@@ -95,6 +119,18 @@ object RunPreparation {
 			}
 			if (isCurrent()) reply(response)
 		}.start()
+	}
+
+	/** Opens [pkg] and waits for its beacon. A running app is asked to report
+	 *  again, since this player may have restarted since it last did. */
+	private fun launchWithBeacon(context: Context, pkg: String): String {
+		Beacons.forget(pkg)
+		val intent = context.packageManager.getLaunchIntentForPackage(pkg)
+			?: error("The debug app has no launcher activity.")
+		context.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+		Beacons.requestAnnounce(context, pkg)
+		return Beacons.await(pkg, 45_000)
+			?: error("The app did not report its Dart VM. Run rhr again to rebuild it.")
 	}
 
 	private fun packageName(request: JSONObject): String {

@@ -652,6 +652,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                             onPressed: () async {
                               if (_setupAction == 'install') {
                                 await _session.invokeMethod('installSettings');
+                              } else if (_setupAction == 'overlay') {
+                                await const MethodChannel(
+                                  'rhr/connector',
+                                ).invokeMethod('requestOverlay');
                               } else {
                                 await Navigator.of(context).push<void>(
                                   MaterialPageRoute(

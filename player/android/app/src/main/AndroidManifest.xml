@@ -98,6 +98,12 @@
                 android:value="Developer tooling: keeps the debug session
                     overlay available while testing another app" />
         </service>
+        <!-- Where the RHR beacon in a CLI-built debug app reports its VM
+             service address (see Beacons.kt). -->
+        <provider
+            android:name=".BeaconProvider"
+            android:authorities="${applicationId}.beacon"
+            android:exported="true" />
         <!-- PackageInstaller commit callback for the player self-update. -->
         <receiver
             android:name=".UpdateResultReceiver"

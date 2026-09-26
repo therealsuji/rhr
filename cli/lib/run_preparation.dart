@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 
 import 'apk_identity.dart';
+import 'beacon_build.dart';
 import 'flutter_compatibility.dart';
 import 'player_builder.dart';
 import 'player_update.dart';
@@ -102,7 +103,11 @@ final class RunPreparation {
     );
   }
 
-  Future<Map<String, dynamic>> request(String action, {String? package}) async {
+  Future<Map<String, dynamic>> request(
+    String action, {
+    String? package,
+    bool beacon = false,
+  }) async {
     if (_closed.isCompleted) throw const RunDisconnected();
     final id = ++_nextId;
     final response = Completer<Map<String, dynamic>>();
@@ -114,6 +119,7 @@ final class RunPreparation {
           'id': id,
           'action': action,
           if (package != null) 'package': package,
+          if (beacon) 'beacon': true,
         }),
       );
       final result = await _connected(
@@ -263,9 +269,20 @@ final class RunPreparation {
     }
     if (route == RunRoute.app) {
       phase('checking', 'This project will run as a separate debug app.');
-      await _setup('connector');
+      // A player that takes beacon reports needs no Wireless debugging: the
+      // app's build carries a beacon that hands the player its VM address.
+      final beacon = beaconPlayerFrom(info);
+      await _setup(beacon == null ? 'connector' : 'beacon_setup');
       await _setup('install_permission');
-      final inputs = await projectBuildIdentity(project, profile.flutter);
+      final projectInputs = await projectBuildIdentity(
+        project,
+        profile.flutter,
+      );
+      final inputs = [
+        projectInputs,
+        if (beacon != null)
+          'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
+      ].join('|');
       var apk = await cachedProjectApk(project, inputs);
       var approvedBuild = false;
       if (apk == null) {
@@ -274,14 +291,21 @@ final class RunPreparation {
         );
         approvedBuild = true;
         phase('building', 'Building your debug app.');
-        apk = await buildProjectDebugApk(
-          project: project,
-          output: '$project/.dart_tool/rhr/app-debug.apk',
-          flutterExecutable: projectFlutterExecutable(project),
-          targetPlatform: 'android-arm64',
-        );
+        const output = '.dart_tool/rhr/app-debug.apk';
+        apk = beacon == null
+            ? await buildProjectDebugApk(
+                project: project,
+                output: '$project/$output',
+                flutterExecutable: projectFlutterExecutable(project),
+                targetPlatform: 'android-arm64',
+              )
+            : await (await buildBeaconDebugApk(
+                project: project,
+                player: beacon,
+                targetPlatform: 'android-arm64',
+              )).copy('$project/$output');
         final afterBuild = await projectBuildIdentity(project, profile.flutter);
-        if (afterBuild != inputs) {
+        if (afterBuild != projectInputs) {
           throw StateError(
             'Build inputs changed while the APK was being built. Run rhr again before installing it.',
           );
@@ -302,7 +326,11 @@ final class RunPreparation {
         phase('checking', 'The correct debug app is already installed.');
       }
       phase('launching', 'Opening ${identity.package}.');
-      final launched = await request('launch', package: identity.package);
+      final launched = await request(
+        'launch',
+        package: identity.package,
+        beacon: beacon != null,
+      );
       final vm = Uri.parse(launched['vm'] as String);
       return PreparedRun(vm, '', route);
     }
@@ -356,6 +384,20 @@ final class RunPreparation {
       );
     return PreparedRun(vm, store, route);
   }
+}
+
+/// The player a beacon build should trust, when this player takes beacon
+/// reports and says who it is.
+BeaconPlayer? beaconPlayerFrom(Map<String, dynamic> info) {
+  final package = info['playerPackage'];
+  final certificate = info['playerCertificate'];
+  if (info['beacon'] != 1 ||
+      package is! String ||
+      certificate is! String ||
+      !RegExp(r'^[0-9a-f]{64}$').hasMatch(certificate)) {
+    return null;
+  }
+  return (package: package, certificate: certificate);
 }
 
 final class RunDisconnected implements Exception {

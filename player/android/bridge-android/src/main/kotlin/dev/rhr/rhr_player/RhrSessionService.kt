@@ -580,6 +580,23 @@ class RhrSessionService : Service() {
 		}
 	}
 
+	private val ownCertificate: String by lazy {
+		try {
+			val signers = if (android.os.Build.VERSION.SDK_INT >= 28) {
+				packageManager.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+					.signingInfo?.apkContentsSigners
+			} else {
+				@Suppress("DEPRECATION")
+				packageManager.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNATURES).signatures
+			}
+			val signer = signers?.singleOrNull() ?: return@lazy ""
+			java.security.MessageDigest.getInstance("SHA-256").digest(signer.toByteArray())
+				.joinToString("") { "%02x".format(it) }
+		} catch (_: Exception) {
+			""
+		}
+	}
+
 	private fun infoMessage(): String = JSONObject()
 		.put("t", "info")
 		.put("runProtocol", if (runRequestHandler != null) 1 else 0)
@@ -594,6 +611,12 @@ class RhrSessionService : Service() {
 		.put("assetStoreId", assetStoreId)
 		// This player rebuilds DevFS uploads the CLI sends as deltas.
 		.put("devfsDelta", 1)
+		// The player app registers the run handler and the beacon receiver
+		// together. A beacon-built app trusts exactly this package and
+		// signing certificate with its VM address.
+		.put("beacon", if (runRequestHandler != null) 1 else 0)
+		.put("playerPackage", packageName)
+		.put("playerCertificate", ownCertificate)
 		// "player" | "connector", which is how the dev side decides whether to
 		// run the compatibility gate and offer a player update.
 		//
