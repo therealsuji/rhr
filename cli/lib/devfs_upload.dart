@@ -184,20 +184,35 @@ final class DevFsBases {
   }
 
   final Directory directory;
-  static const _kept = 2;
+  // Room for the newest kernel alongside a couple of large assets; the
+  // player keeps as many (DevFsDelta.KEPT_BASES).
+  static const _kept = 3;
   final _bases = <({String uri, String sha, Uint8List bytes})>[];
 
   File get _index => File('${directory.path}/bases.json');
 
-  /// The best base for [uri]: its own previous version, else the most recent
-  /// file. A hot restart's kernel is nearly the same as the kernel the asset
-  /// sync or the previous restart delivered, whatever path they used.
+  /// The best base for [uri]: the most recent file of the same kind.
+  ///
+  /// Kernels are the uploads worth a delta, and each is nearly the same as
+  /// the one before it. Flutter alternates a restart's kernel between two
+  /// file names, so "the same file" would be two restarts old; the newest
+  /// `.dill` is the previous restart's. A large asset is only compared with
+  /// other assets.
   ({String sha, Uint8List bytes})? baseFor(String uri) {
+    final kind = _isKernel(uri);
     for (final base in _bases) {
-      if (base.uri == uri) return (sha: base.sha, bytes: base.bytes);
+      if (_isKernel(base.uri) == kind)
+        return (sha: base.sha, bytes: base.bytes);
     }
-    final latest = _bases.firstOrNull;
-    return latest == null ? null : (sha: latest.sha, bytes: latest.bytes);
+    return null;
+  }
+
+  static bool _isKernel(String uriBase64) {
+    try {
+      return utf8.decode(base64.decode(uriBase64)).endsWith('.dill');
+    } on FormatException {
+      return false;
+    }
   }
 
   void confirm(String uri, String sha, Uint8List bytes) {

@@ -106,16 +106,19 @@ void main() {
     expect(gzip.decode(received.gzippedBody), kernel);
   });
 
-  test('bases prefer the same file, then the most recent', () {
+  test('a kernel is compared with the newest kernel, not an asset', () {
     final dir = Directory.systemTemp.createTempSync('rhr-bases-');
     addTearDown(() => dir.deleteSync(recursive: true));
+    String uri(String path) => base64.encode(utf8.encode(path));
     final bases = DevFsBases(dir)
-      ..confirm('a', 'sha-a', Uint8List(1))
-      ..confirm('b', 'sha-b', Uint8List(2));
-    expect(bases.baseFor('a')!.sha, 'sha-a');
-    expect(bases.baseFor('c')!.sha, 'sha-b');
+      ..confirm(uri('lib/main.dart.dill'), 'kernel-a', Uint8List(1))
+      ..confirm(uri('lib/main.dart.swap.dill'), 'kernel-b', Uint8List(2))
+      ..confirm(uri('assets/big.png'), 'image', Uint8List(3));
+    // Flutter alternates file names; the newest kernel is the closest.
+    expect(bases.baseFor(uri('lib/main.dart.dill'))!.sha, 'kernel-b');
+    expect(bases.baseFor(uri('assets/other.png'))!.sha, 'image');
     bases.forget();
-    expect(bases.baseFor('a'), isNull);
+    expect(bases.baseFor(uri('lib/main.dart.dill')), isNull);
   });
 
   test('a fresh CLI still knows what the phone kept', () {
@@ -124,14 +127,14 @@ void main() {
     DevFsBases(dir)
       ..confirm('a', 'sha-a', Uint8List.fromList([1]))
       ..confirm('b', 'sha-b', Uint8List.fromList([2]))
-      ..confirm('c', 'sha-c', Uint8List.fromList([3]));
+      ..confirm('c', 'sha-c', Uint8List.fromList([3]))
+      ..confirm('d', 'sha-d', Uint8List.fromList([4]));
 
     final reloaded = DevFsBases(dir);
-    expect(reloaded.baseFor('c')!.bytes, [3]);
-    expect(reloaded.baseFor('b')!.sha, 'sha-b');
-    // Only the newest two are kept, on disk as in memory.
-    expect(reloaded.baseFor('a')!.sha, 'sha-c');
+    expect(reloaded.baseFor('e')!.bytes, [4]);
+    // Only the newest three are kept, on disk as in memory.
     expect(File('${dir.path}/sha-a').existsSync(), isFalse);
+    expect(File('${dir.path}/sha-b').existsSync(), isTrue);
   });
 
   test('reads a response status', () {
