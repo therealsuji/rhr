@@ -307,6 +307,10 @@ class RhrSessionService : Service() {
 	// Invariant: data frames can race the channel's TCP connect —
 	// buffer them until the socket is ready, never drop them.
 	private val pending = ConcurrentHashMap<Int, java.io.ByteArrayOutputStream>()
+	// Channels whose first request is still undecided: an RHR DevFS upload
+	// (rebuilt here from a delta, see DevFsDelta) or anything else, which is
+	// passed through untouched.
+	private val sniffers = ConcurrentHashMap<Int, DevFsDelta.Sniffer>()
 	// Per-channel unacked byte counts; readers block on the lock when full.
 	private val unacked = ConcurrentHashMap<Int, Int>()
 	private val flowLock = Object()
@@ -588,6 +592,8 @@ class RhrSessionService : Service() {
 		// {"t":"ready"} frame has already been consumed.
 		.put("ready", readySent)
 		.put("assetStoreId", assetStoreId)
+		// This player rebuilds DevFS uploads the CLI sends as deltas.
+		.put("devfsDelta", 1)
 		// "player" | "connector", which is how the dev side decides whether to
 		// run the compatibility gate and offer a player update.
 		//
@@ -1053,25 +1059,15 @@ class RhrSessionService : Service() {
 		when (op) {
 			OP_OPEN -> {
 				synchronized(flowLock) { pending[channel] = java.io.ByteArrayOutputStream() }
+				sniffers[channel] = DevFsDelta.Sniffer()
 				openChannel(channel)
 			}
 			OP_DATA -> {
-				// The connect thread flushes pending bytes and publishes the socket
-				// under this same lock. No data may fall between those two steps.
-				synchronized(flowLock) {
-					val sock = sockets[channel]
-					try {
-						if (sock != null) {
-							sock.getOutputStream().write(frame, 5, frame.size - 5)
-						} else {
-							val buffer = pending[channel] ?: return
-							buffer.write(frame, 5, frame.size - 5)
-						}
-						sendBinaryFrame(encodeAck(channel, frame.size - 5))
-					} catch (e: Exception) {
-						Log.w(TAG, "write failed ch=$channel: $e")
-						closeChannel(channel, notifyPeer = true)
-					}
+				val sniffer = sniffers[channel]
+				if (sniffer != null) {
+					sniff(channel, sniffer, frame)
+				} else if (deliver(channel, frame, 5, frame.size - 5)) {
+					sendBinaryFrame(encodeAck(channel, frame.size - 5))
 				}
 			}
 			OP_ACK -> {
@@ -1083,6 +1079,80 @@ class RhrSessionService : Service() {
 			}
 			OP_CLOSE -> closeChannel(channel, notifyPeer = false)
 			OP_UPDATE_DATA -> updater?.handleData(frame)
+		}
+	}
+
+	/**
+	 * Writes tunnel bytes to the channel's VM socket, or holds them until it
+	 * connects. The connect thread flushes pending bytes and publishes the
+	 * socket under this same lock, so no data falls between those steps.
+	 */
+	private fun deliver(channel: Int, bytes: ByteArray, offset: Int, length: Int): Boolean =
+		synchronized(flowLock) {
+			try {
+				val sock = sockets[channel]
+				if (sock != null) {
+					sock.getOutputStream().write(bytes, offset, length)
+				} else {
+					val buffer = pending[channel] ?: return false
+					buffer.write(bytes, offset, length)
+				}
+				true
+			} catch (e: Exception) {
+				Log.w(TAG, "write failed ch=$channel: $e")
+				closeChannel(channel, notifyPeer = true)
+				false
+			}
+		}
+
+	/** Holds a channel's first bytes until they show whether the request is an
+	 *  RHR DevFS upload. Anything else goes through exactly as sent. */
+	private fun sniff(channel: Int, sniffer: DevFsDelta.Sniffer, frame: ByteArray) {
+		sniffer.bytes.write(frame, 5, frame.size - 5)
+		sendBinaryFrame(encodeAck(channel, frame.size - 5))
+		if (sniffer.head == null) {
+			if (sniffer.notAPut()) return passThrough(channel)
+			val bytes = sniffer.bytes.toByteArray()
+			val head = DevFsDelta.parseHead(bytes, bytes.size) ?: return
+			if (!head.isRhrUpload || head.contentLength == null) return passThrough(channel)
+			sniffer.head = head
+		}
+		val head = sniffer.head ?: return
+		val end = head.bodyStart + (head.contentLength ?: return)
+		if (sniffer.bytes.size() < end) return
+		sniffers.remove(channel)
+		val body = sniffer.bytes.toByteArray().copyOfRange(head.bodyStart, end)
+		Thread { forwardUpload(channel, head, body) }.apply { isDaemon = true }.start()
+	}
+
+	private fun passThrough(channel: Int) {
+		val bytes = sniffers.remove(channel)?.bytes?.toByteArray() ?: return
+		deliver(channel, bytes, 0, bytes.size)
+	}
+
+	/** Rebuilds an RHR upload and sends the VM the plain PUT it expects. A
+	 *  missing base or a bad hash answers 409; the CLI resends the whole file. */
+	private fun forwardUpload(channel: Int, head: DevFsDelta.Head, body: ByteArray) {
+		val forward = DevFsDelta.rebuild(File(cacheDir, "rhr-devfs-bases"), head, body)
+		if (forward == null) {
+			Log.w(TAG, "DevFS upload ch=$channel: base missing or hash mismatch, asking for the whole file")
+			val answer = DevFsDelta.missingBase
+			sendBinaryFrame(encodeData(channel, answer, answer.size))
+			closeChannel(channel, notifyPeer = true)
+			return
+		}
+		try {
+			if (!deliver(channel, forward.head, 0, forward.head.size)) return
+			forward.inlineBody?.let { deliver(channel, it, 0, it.size) }
+			forward.body?.inputStream()?.use { input ->
+				val buffer = ByteArray(64 * 1024)
+				while (true) {
+					val n = input.read(buffer)
+					if (n < 0 || !deliver(channel, buffer, 0, n)) break
+				}
+			}
+		} finally {
+			forward.body?.delete()
 		}
 	}
 
@@ -1145,6 +1215,7 @@ class RhrSessionService : Service() {
 
 	private fun closeChannel(channel: Int, notifyPeer: Boolean) = synchronized(flowLock) {
 		pending.remove(channel)
+		sniffers.remove(channel)
 		sockets.remove(channel)?.let { try { it.close() } catch (_: Exception) {} }
 		readers.remove(channel)?.interrupt()
 		synchronized(flowLock) { unacked.remove(channel); flowLock.notifyAll() }
@@ -1154,6 +1225,7 @@ class RhrSessionService : Service() {
 	private fun cleanupChannels() {
 		for (ch in sockets.keys.toList()) closeChannel(ch, notifyPeer = false)
 		pending.clear()
+		sniffers.clear()
 	}
 
 	private fun encodeData(channel: Int, buf: ByteArray, n: Int): ByteArray =

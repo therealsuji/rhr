@@ -19,12 +19,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:logging/logging.dart';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/session_link.dart';
 import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
+import 'package:rhr_cli/devfs_upload.dart';
 import 'package:rhr_cli/direct_path.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
@@ -752,6 +754,11 @@ Future<int?> _runSession({
   int? fatalExit;
   final sockets = <int, Socket>{};
   final flow = FlowControl();
+  // Channels carrying a rewritten DevFS upload: the phone's answer is read
+  // here, not handed straight to Flutter, so a missing base can be retried.
+  final devFsAnswers = <int, ({BytesBuilder bytes, Completer<void> closed})>{};
+  // Whether this player rebuilds delta uploads (announced in its info).
+  var devFsDelta = false;
   DirectTransportFailure? directFailure;
   PlayerUpdateFailure? preparationRetry;
   // Set once `flutter attach` is running, so a restart the tester asks for
@@ -819,6 +826,7 @@ Future<int?> _runSession({
     (msg) {
       if (msg is String) {
         final m = jsonDecode(msg) as Map<String, dynamic>;
+        if (m['t'] == 'info') devFsDelta = m['devfsDelta'] == 1;
         if (preparation != null && m['t'] == 'info') {
           bridgeDeadline.value = DateTime.now().add(
             const Duration(minutes: 40),
@@ -977,7 +985,12 @@ Future<int?> _runSession({
       final f = decodeFrame(msg as List<int>);
       switch (f.op) {
         case opData:
-          sockets[f.channel]?.add(f.payload);
+          final answer = devFsAnswers[f.channel];
+          if (answer != null) {
+            answer.bytes.add(f.payload);
+          } else {
+            sockets[f.channel]?.add(f.payload);
+          }
           sendPayload(encodeAck(f.channel, f.payload.length));
         case opAck:
           if (PlayerUpdateSender.isUpdateAck(f.channel)) {
@@ -988,6 +1001,7 @@ Future<int?> _runSession({
           }
         case opClose:
           flow.forget(f.channel);
+          devFsAnswers.remove(f.channel)?.closed.complete();
           sockets.remove(f.channel)?.destroy();
       }
     },
@@ -1114,54 +1128,158 @@ Future<int?> _runSession({
   }
 
   var nextChannel = 1;
+
+  /// Writes [bytes] to [channel], pausing whenever its window is full.
+  Future<void> sendOnChannel(int channel, Uint8List bytes) async {
+    for (var start = 0; start < bytes.length; start += maxTunnelPayload) {
+      final end = min(start + maxTunnelPayload, bytes.length);
+      sendPayload(
+        encodeFrame(opData, channel, Uint8List.sublistView(bytes, start, end)),
+      );
+      if (flow.sent(channel, end - start)) {
+        final open = Completer<void>();
+        flow.onWindowOpen(channel, open.complete);
+        await open.future;
+      }
+    }
+  }
+
+  /// Sends Flutter's DevFS upload as a delta against a file the phone kept
+  /// (see devfs_upload.dart), then hands Flutter the phone's answer.
+  Future<void> uploadDevFs(Socket sock, DevFsPut put) async {
+    final uri = put.uriBase64 ?? '';
+    // A hot reload's incremental kernel or a small asset is not worth a
+    // delta or keeping as a base; it goes as Flutter wrote it.
+    final small = put.uncompressedSize < devFsDeltaMinimumBytes;
+    final base = small ? null : _devFsBases.baseFor(uri);
+    final rewritten = small ? null : rewriteDevFsPut(put, base);
+    final request = rewritten?.request ?? plainDevFsPut(put);
+    final channel = nextChannel++;
+    final answer = (bytes: BytesBuilder(), closed: Completer<void>());
+    devFsAnswers[channel] = answer;
+    sendPayload(encodeFrame(opOpen, channel));
+    try {
+      await sendOnChannel(channel, request);
+      await answer.closed.future;
+    } on Object {
+      devFsAnswers.remove(channel);
+      sock.destroy();
+      return;
+    }
+    final response = answer.bytes.takeBytes();
+    switch (httpStatus(response)) {
+      case 409:
+        // The phone no longer has that base. Dropping the connection makes
+        // Flutter retry the upload, and the retry goes whole.
+        _devFsBases.forget();
+        sock.destroy();
+        return;
+      case 200 when rewritten != null:
+        _devFsBases.confirm(uri, rewritten.sha, rewritten.content);
+        final sent = rewritten.request.length;
+        if (base != null) {
+          stderr.writeln(
+            '[rhr] sent ${(sent / 1024).ceil()} KB for a '
+            '${(put.gzippedBody.length / 1048576).toStringAsFixed(1)} MB '
+            'upload (delta against the phone\'s copy)',
+          );
+        }
+    }
+    sock.add(response);
+    await sock.flush().catchError((_) {});
+    sock.destroy();
+  }
+
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   server.listen((sock) {
-    final channel = nextChannel++;
-    sockets[channel] = sock;
     // Socket write failures (peer reset mid-transfer) surface on `done`;
     // unhandled they crash the process.
     sock.done.catchError((_) {});
-    sendPayload(encodeFrame(opOpen, channel));
+    // Until the first request head shows whether this is a DevFS upload the
+    // phone can rebuild from a delta, hold the bytes. Everything else is
+    // tunnelled byte for byte, exactly as before.
+    var sniffing = devFsDelta ? HttpRequestReader() : null;
+    int? rawChannel;
     late final StreamSubscription<Uint8List> sub;
+
+    void forward(Uint8List data) {
+      final channel = rawChannel!;
+      // Split at the SCTP limit. A dart:io read is whatever the kernel had
+      // buffered — often far more than 64 KiB on a fast machine pushing a
+      // kernel — and one oversized message makes libwebrtc close the data
+      // channel while reporting the send as successful. That is the
+      // "spontaneous disconnect" half of a session dying mid-sync.
+      for (var start = 0; start < data.length; start += maxTunnelPayload) {
+        final end = start + maxTunnelPayload < data.length
+            ? start + maxTunnelPayload
+            : data.length;
+        sendPayload(
+          encodeFrame(opData, channel, Uint8List.sublistView(data, start, end)),
+        );
+      }
+      // Pause the local reader once the window fills — this is what keeps
+      // a fast dev machine from ballooning buffers inside the relay.
+      if (flow.sent(channel, data.length)) {
+        sub.pause();
+        flow.onWindowOpen(channel, sub.resume);
+      }
+    }
+
+    void openRaw(Uint8List first) {
+      sniffing = null;
+      final channel = rawChannel = nextChannel++;
+      sockets[channel] = sock;
+      sendPayload(encodeFrame(opOpen, channel));
+      if (first.isNotEmpty) forward(first);
+    }
+
+    void closeRaw() {
+      final channel = rawChannel;
+      if (channel == null) return;
+      flow.forget(channel);
+      if (sockets.remove(channel) != null) {
+        sendPayload(encodeFrame(opClose, channel));
+      }
+    }
+
     sub = sock.listen(
       (data) {
-        // Split at the SCTP limit. A dart:io read is whatever the kernel had
-        // buffered — often far more than 64 KiB on a fast machine pushing a
-        // kernel — and one oversized message makes libwebrtc close the data
-        // channel while reporting the send as successful. That is the
-        // "spontaneous disconnect" half of a session dying mid-sync.
-        for (var start = 0; start < data.length; start += maxTunnelPayload) {
-          final end = start + maxTunnelPayload < data.length
-              ? start + maxTunnelPayload
-              : data.length;
-          sendPayload(
-            encodeFrame(
-              opData,
-              channel,
-              Uint8List.sublistView(data, start, end),
-            ),
-          );
+        final reader = sniffing;
+        if (reader == null) {
+          if (rawChannel == null) {
+            openRaw(data);
+          } else {
+            forward(data);
+          }
+          return;
         }
-        // Pause the local reader once the window fills — this is what keeps
-        // a fast dev machine from ballooning buffers inside the relay.
-        if (flow.sent(channel, data.length)) {
-          sub.pause();
-          flow.onWindowOpen(channel, sub.resume);
+        final DevFsPut? put;
+        try {
+          put = reader.add(data);
+        } on FormatException {
+          openRaw(Uint8List.fromList(reader.received));
+          return;
         }
+        final received = reader.received;
+        final looksLikePut =
+            received.length < 4 ||
+            latin1.decode(received.sublist(0, 4)) == 'PUT ';
+        final isDevFs =
+            reader.method == 'PUT' && reader.headers!['dev_fs_name'] != null;
+        if (!looksLikePut || (reader.method != null && !isDevFs)) {
+          openRaw(Uint8List.fromList(received));
+          return;
+        }
+        if (put == null) return;
+        sniffing = null;
+        unawaited(uploadDevFs(sock, put));
       },
-      onDone: () {
-        flow.forget(channel);
-        if (sockets.remove(channel) != null) {
-          sendPayload(encodeFrame(opClose, channel));
-        }
-      },
-      onError: (Object error) {
-        flow.forget(channel);
-        if (sockets.remove(channel) != null) {
-          sendPayload(encodeFrame(opClose, channel));
-        }
-      },
+      onDone: closeRaw,
+      onError: (Object _) => closeRaw(),
     );
+    // A player without delta support gets the channel opened at accept,
+    // as it always did.
+    if (sniffing == null) openRaw(Uint8List(0));
   });
 
   final local = vm.replace(host: '127.0.0.1', port: server.port);
@@ -1176,6 +1294,10 @@ Future<int?> _runSession({
       s.destroy();
     }
     sockets.clear();
+    for (final answer in devFsAnswers.values.toList()) {
+      answer.closed.completeError(const SocketException('session ended'));
+    }
+    devFsAnswers.clear();
     // The session loop reconnects, so the handler must go with this attempt
     // or every retry stacks another one.
     await interrupts.cancel();
@@ -2293,3 +2415,7 @@ void _requireValidSessionCode(String code) {
   );
   exit(64);
 }
+
+/// Files the phone has confirmed storing, kept for the life of this process
+/// so a reconnect still sends hot-restart kernels as deltas.
+final _devFsBases = DevFsBases();
