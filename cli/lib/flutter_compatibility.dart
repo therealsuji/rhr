@@ -130,24 +130,27 @@ final class ProjectCompatibilityProfile {
   final Set<String> androidPermissions;
   final List<String> unsupportedAndroidInputs;
 
+  /// What the project needs natively that the player does not have: plugins,
+  /// permissions, and native sources. Non-empty means the project must run as
+  /// its own app; each line says why. A Flutter version mismatch is not here:
+  /// that is a player update, not a separate app.
+  List<String> nativeDifferencesFrom(Map<String, dynamic> player) => [
+    ...androidPluginDifferences(
+      required: androidPlugins,
+      available: parseAndroidPluginProfile(player['androidPlugins']),
+    ),
+    ...androidPermissionDifferences(
+      required: androidPermissions,
+      available: parseAndroidPermissionProfile(player['androidPermissions']),
+    ),
+    ...unsupportedAndroidInputs,
+  ];
+
   CompatibilityReport differencesFrom(Map<String, dynamic> player) {
     final report = flutter.differencesFrom(
       FlutterCompatibility.fromJson(player),
     );
-    final blockers = [...report.blockers];
-    blockers.addAll(
-      androidPluginDifferences(
-        required: androidPlugins,
-        available: parseAndroidPluginProfile(player['androidPlugins']),
-      ),
-    );
-    blockers.addAll(
-      androidPermissionDifferences(
-        required: androidPermissions,
-        available: parseAndroidPermissionProfile(player['androidPermissions']),
-      ),
-    );
-    blockers.addAll(unsupportedAndroidInputs);
+    final blockers = [...report.blockers, ...nativeDifferencesFrom(player)];
     return CompatibilityReport(
       List.unmodifiable(blockers),
       report.warnings,

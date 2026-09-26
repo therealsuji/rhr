@@ -18,19 +18,9 @@ enum RunRoute { player, app }
 RunRoute selectRunRoute(
   ProjectCompatibilityProfile project,
   Map<String, dynamic> player,
-) {
-  final plugins = parseAndroidPluginProfile(player['androidPlugins']);
-  final missingNativeInput =
-      project.unsupportedAndroidInputs.isNotEmpty ||
-      project.androidPlugins.entries.any(
-        (entry) => plugins[entry.key] != entry.value,
-      ) ||
-      androidPermissionDifferences(
-        required: project.androidPermissions,
-        available: parseAndroidPermissionProfile(player['androidPermissions']),
-      ).isNotEmpty;
-  return missingNativeInput ? RunRoute.app : RunRoute.player;
-}
+) => project.nativeDifferencesFrom(player).isEmpty
+    ? RunRoute.player
+    : RunRoute.app;
 
 final class PreparedRun {
   const PreparedRun(
@@ -98,9 +88,11 @@ final class RunPreparation {
     _closed.future.then<T>((_) => throw const RunDisconnected()),
   ]);
 
-  void phase(String name, String message) {
+  /// Reports a step to the developer's terminal and the phone's banner.
+  /// [echo] false sends a tester-facing message to the phone only.
+  void phase(String name, String message, {bool echo = true}) {
     if (_closed.isCompleted) return;
-    stderr.writeln('[rhr] $message');
+    if (echo) stderr.writeln('[rhr] $message');
     transport.sendControl(
       jsonEncode({
         't': 'progress',
@@ -112,11 +104,7 @@ final class RunPreparation {
     );
   }
 
-  Future<Map<String, dynamic>> request(
-    String action, {
-    String? package,
-    bool beacon = false,
-  }) async {
+  Future<Map<String, dynamic>> request(String action, {String? package}) async {
     if (_closed.isCompleted) throw const RunDisconnected();
     final id = ++_nextId;
     final response = Completer<Map<String, dynamic>>();
@@ -128,7 +116,6 @@ final class RunPreparation {
           'id': id,
           'action': action,
           if (package != null) 'package': package,
-          if (beacon) 'beacon': true,
         }),
       );
       final result = await _connected(
@@ -170,19 +157,22 @@ final class RunPreparation {
       return;
     }
     if (policy == PlayerUpdatePolicy.never || !stdin.hasTerminal) {
-      throw StateError(
-        '$plan Run `rhr run --yes` to approve the required build and installation.',
-      );
+      throw ApprovalRequired(plan);
     }
     stderr.write('[rhr] Continue? [y/N] ');
-    final answer = (await _connected(
+    final answer = await _connected(
       terminalInput
           .transform(utf8.decoder)
           .transform(const LineSplitter())
-          .first,
-    )).trim().toLowerCase();
-    if (answer != 'y' && answer != 'yes')
-      throw StateError('Preparation canceled. No installation was started.');
+          .cast<String?>()
+          .firstWhere((_) => true, orElse: () => null),
+    );
+    // Input that ends without a line is no one answering, not a "no".
+    if (answer == null) throw ApprovalRequired(plan);
+    final normalized = answer.trim().toLowerCase();
+    if (normalized != 'y' && normalized != 'yes') {
+      throw ApprovalRequired(plan, declined: true);
+    }
     progress.approvedPlans.add(approval);
   }
 
@@ -271,44 +261,64 @@ final class RunPreparation {
       );
     }
     if (route == RunRoute.app) {
-      phase('checking', 'This project will run as a separate debug app.');
-      // A player that takes beacon reports needs no Wireless debugging: the
-      // app's build carries a beacon that hands the player its VM address.
+      final reasons = profile.nativeDifferencesFrom(raw);
+      phase(
+        'checking',
+        reasons.isEmpty
+            ? 'This project will run as a separate debug app (--mode app).'
+            : 'This project will run as a separate debug app: it needs native '
+                  'code the player does not include.',
+      );
+      for (final reason in reasons) stderr.writeln('[rhr]   $reason');
       final beacon = beaconPlayerFrom(info);
-      await _setup(beacon == null ? 'connector' : 'beacon_setup');
-      await _setup('install_permission');
+      if (beacon == null) {
+        throw StateError(
+          'The player did not report the package and signing certificate a '
+          'debug build should trust.',
+        );
+      }
       final projectInputs = await projectBuildIdentity(
         project,
         profile.flutter,
       );
       final inputs = [
         projectInputs.native,
-        if (beacon != null)
-          'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
+        'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
       ].join('|');
       final cached = await cachedProjectApk(project, inputs);
       var apk = cached?.apk;
       var apkDart = cached?.dart;
-      var approvedBuild = false;
+
+      // Decide what needs doing before asking anyone for anything: the
+      // developer approves real work, and the tester is never walked through
+      // setup for a build the developer then declines.
+      final package = apk == null
+          ? readProjectApplicationId(project)
+          : (await readApkIdentity(apk)).package;
+      final installed = await request('inspect', package: package);
+      final current =
+          apk != null &&
+          installed['debuggable'] == true &&
+          installed['apkSha256'] ==
+              (await sha256.bind(apk.openRead()).first).toString();
       if (apk == null) {
         await _approve(
-          "Build this project's debug APK and install it if the phone needs it.",
+          "Build this project's debug app and install it on the phone.",
         );
-        approvedBuild = true;
+      } else if (!current) {
+        await _approve('Install the current debug build of $package.');
+      }
+      // The overlay carries the session controls, and holding it is what
+      // lets the player open the app from the background.
+      await _setup('beacon_setup');
+
+      if (apk == null) {
         phase('building', 'Building your debug app.');
-        const output = '.dart_tool/rhr/app-debug.apk';
-        apk = beacon == null
-            ? await buildProjectDebugApk(
-                project: project,
-                output: '$project/$output',
-                flutterExecutable: projectFlutterExecutable(project),
-                targetPlatform: 'android-arm64',
-              )
-            : await (await buildBeaconDebugApk(
-                project: project,
-                player: beacon,
-                targetPlatform: 'android-arm64',
-              )).copy('$project/$output');
+        apk = await (await buildBeaconDebugApk(
+          project: project,
+          player: beacon,
+          targetPlatform: 'android-arm64',
+        )).copy('$project/.dart_tool/rhr/app-debug.apk');
         final afterBuild = await projectBuildIdentity(project, profile.flutter);
         if (afterBuild != projectInputs) {
           throw StateError(
@@ -318,25 +328,13 @@ final class RunPreparation {
         await recordProjectApk(project, inputs, projectInputs.dart, apk);
         apkDart = projectInputs.dart;
       }
-      final identity = await readApkIdentity(apk);
-      final expected = (await sha256.bind(apk.openRead()).first).toString();
-      final installed = await request('inspect', package: identity.package);
-      if (installed['apkSha256'] != expected ||
-          installed['debuggable'] != true) {
-        if (!approvedBuild)
-          await _approve(
-            'Install the current debug build of ${identity.package}.',
-          );
-        await _deliver(apk, player: false);
-      } else {
+      if (current) {
         phase('checking', 'The correct debug app is already installed.');
+      } else {
+        await _deliver(apk, player: false);
       }
-      phase('launching', 'Opening ${identity.package}.');
-      final launched = await request(
-        'launch',
-        package: identity.package,
-        beacon: beacon != null,
-      );
+      phase('launching', 'Opening $package.');
+      final launched = await request('launch', package: package);
       final vm = Uri.parse(launched['vm'] as String);
       return PreparedRun(
         vm,
@@ -407,6 +405,20 @@ BeaconPlayer? beaconPlayerFrom(Map<String, dynamic> info) {
     return null;
   }
   return (package: package, certificate: certificate);
+}
+
+/// Work the run needs that the developer has not approved: no terminal to
+/// ask in and no `--yes`, or a "no" at the prompt. Its own outcome, so the
+/// terminal gets the command to run and the tester gets a message meant for
+/// them, not the developer's error.
+final class ApprovalRequired implements Exception {
+  const ApprovalRequired(this.plan, {this.declined = false});
+
+  final String plan;
+  final bool declined;
+
+  @override
+  String toString() => plan;
 }
 
 final class RunDisconnected implements Exception {

@@ -80,12 +80,6 @@
             android:name=".RhrSessionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-        <!-- Connector-mode one-time Wireless Debugging pairing. Lives in the
-             shared adb-android module, so the name is fully qualified. -->
-        <service
-            android:name="dev.rhr.adb.PairingNotificationService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
         <!-- Holds the shake-to-open bubble while the tester is inside their
              own app; foreground so backgrounding the player can't kill it
              mid-session. -->

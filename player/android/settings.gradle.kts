@@ -25,4 +25,3 @@ plugins {
 
 include(":app")
 include(":bridge-android")
-include(":adb-android")

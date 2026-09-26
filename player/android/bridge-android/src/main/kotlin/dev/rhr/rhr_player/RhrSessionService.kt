@@ -848,7 +848,9 @@ class RhrSessionService : Service() {
 							Log.i(TAG, "[$sessionCode] developer left the session")
 							devLeft = true
 							if (status in DEV_PRESENT_STATES) status = "waiting_dev"
-							if (progressPhase != "preparation_failed" && progressPhase != "update_failed") {
+							// Failures, and a run waiting on the developer's approval,
+							// stay up: they tell the tester why nothing is happening.
+							if (progressPhase !in setOf("preparation_failed", "update_failed", "approval_needed", "native_changed")) {
 								setProgress("", 0, 0)
 							}
 							// The peer belonged to the developer who just left; it

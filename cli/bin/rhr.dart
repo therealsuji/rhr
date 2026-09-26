@@ -31,6 +31,7 @@ import 'package:rhr_cli/direct_path.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/local_relay.dart';
+import 'package:rhr_cli/native_fingerprint.dart';
 import 'package:rhr_cli/player_builder.dart';
 import 'package:rhr_cli/player_update.dart';
 import 'package:rhr_cli/relay_race.dart';
@@ -132,6 +133,17 @@ const _deviceBusyExitCode = 76;
 /// relay that carries signalling only, so its payloads can never get through.
 const _relayBinaryExitCode = 77;
 
+/// The run needs a build or install the developer has not approved.
+const _approvalExitCode = 79;
+
+/// Not a process exit: the session ended because native code changed, and
+/// the run loop prepares it again (building and installing what it needs).
+const _reprepare = -2;
+
+/// The command line this process was started with, so a run that stops for
+/// approval can print the exact command that continues it.
+var _invocation = const <String>[];
+
 Future<void> main(List<String> args) async {
   if (Platform.environment['RHR_WEBRTC_LOG'] == '1') _logWebRtc();
   if (args.length == 1 &&
@@ -141,6 +153,7 @@ Future<void> main(List<String> args) async {
   }
 
   if (args.isEmpty) args = ['run'];
+  _invocation = args;
 
   if (args.contains('-h') || args.contains('--help') || args.first == 'help') {
     stdout.write(_usage);
@@ -764,6 +777,11 @@ Future<int?> _runSession({
   // Whether this host rebuilds delta uploads (announced in its info). The
   // Android player does; the pure-Dart desktop bridge does not.
   var devFsDelta = false;
+  // The route this session runs, the player's runtime, and the native
+  // fingerprint the session started from (see _nativeChanged below).
+  RunRoute? sessionRoute;
+  Map<String, dynamic>? playerCompatibility;
+  String? nativeBaseline;
   DirectTransportFailure? directFailure;
   PlayerUpdateFailure? preparationRetry;
   // Set once `flutter attach` is running, so a restart the tester asks for
@@ -792,9 +810,11 @@ Future<int?> _runSession({
   if (preparation != null) {
     preparing = preparation
         .run()
-        .then((ready) {
+        .then((ready) async {
           effectiveSyncAssets = ready.route == RunRoute.player;
           staleDart = ready.staleDart;
+          sessionRoute = ready.route;
+          nativeBaseline = await nativeFingerprint(project);
           assetStoreId = ready.assetStoreId;
           if (!vmReady.isCompleted) vmReady.complete(ready.vm);
         })
@@ -803,6 +823,25 @@ Future<int?> _runSession({
             preparationRetry = error;
           } else if (error is DirectTransportFailure) {
             directFailure ??= error;
+          } else if (error is ApprovalRequired) {
+            final again = [
+              ..._invocation.where((arg) => arg != '--no-update-player'),
+              if (!_invocation.contains('--yes')) '--yes',
+            ];
+            stderr.writeln(
+              error.declined
+                  ? '[rhr] Canceled. Nothing was built or installed.'
+                  : '[rhr] Needs approval: ${error.plan}',
+            );
+            stderr.writeln(
+              '[rhr] To approve and continue: rhr ${again.join(' ')}',
+            );
+            preparation.phase(
+              'approval_needed',
+              'Waiting for your developer to approve the install.',
+              echo: false,
+            );
+            fatalExit = _approvalExitCode;
           } else if (error is! RunDisconnected) {
             preparation.phase('preparation_failed', '$error');
             fatalExit = 78;
@@ -833,7 +872,12 @@ Future<int?> _runSession({
     (msg) {
       if (msg is String) {
         final m = jsonDecode(msg) as Map<String, dynamic>;
-        if (m['t'] == 'info') devFsDelta = m['devfsDelta'] == 1;
+        if (m['t'] == 'info') {
+          devFsDelta = m['devfsDelta'] == 1;
+          if (m['compatibility'] case final Map<String, dynamic> runtime) {
+            playerCompatibility = runtime;
+          }
+        }
         if (preparation != null && m['t'] == 'info') {
           bridgeDeadline.value = DateTime.now().add(
             const Duration(minutes: 40),
@@ -1104,8 +1148,11 @@ Future<int?> _runSession({
       await Future<void>.delayed(const Duration(milliseconds: 250));
       await transport.close();
     }
+    // An exit the session chose (approval needed, a fatal preparation
+    // error, a native reprepare) outranks the direct path the phone tore down
+    // because of it; rethrowing that would only reconnect into the same stop.
     final failure = directFailure;
-    if (failure != null) {
+    if (failure != null && fatalExit == null) {
       await transport.close();
       throw failure;
     }
@@ -1194,6 +1241,68 @@ Future<int?> _runSession({
     sock.destroy();
   }
 
+  // A native change cannot reach a running app: hot reload and restart carry
+  // Dart and assets only. Every reload and restart uploads through this
+  // listener, whoever triggered it, so an upload is where to notice one.
+  // Checked at most every 2 s (a restart is a burst of uploads), one check at
+  // a time, and latched: the first check that ends the session decides.
+  Future<bool>? nativeCheck;
+  var nativeCheckedAt = DateTime(0);
+  var nativeEnded = false;
+  Future<bool> nativeChanged() {
+    final baseline = nativeBaseline;
+    if (nativeEnded) return Future.value(true);
+    if (baseline == null) return Future.value(false);
+    final recent = nativeCheck;
+    if (recent != null &&
+        DateTime.now().difference(nativeCheckedAt) <
+            const Duration(seconds: 2)) {
+      return recent;
+    }
+    nativeCheckedAt = DateTime.now();
+    return nativeCheck = () async {
+      final now = await nativeFingerprint(project);
+      if (now == baseline) return false;
+      final reasons = readProjectCompatibilityProfile(
+        project,
+      ).nativeDifferencesFrom(playerCompatibility ?? const {});
+      if (sessionRoute == RunRoute.player) {
+        if (reasons.isEmpty) {
+          // A pure-Dart dependency: the player still hosts everything.
+          nativeBaseline = now;
+          return false;
+        }
+        if (routeOverride == RunRoute.player) {
+          stderr.writeln(
+            '[rhr] Native code changed (${reasons.join('; ')}), but '
+            '--mode player keeps this project in the player: calls into it '
+            'will fail until you run without --mode player.',
+          );
+          nativeBaseline = now;
+          return false;
+        }
+      }
+      nativeEnded = true;
+      stderr.writeln(
+        sessionRoute == RunRoute.player
+            ? '[rhr] Native code changed: ${reasons.join('; ')}. The player '
+                  'cannot run it, so this project moves to its own debug app. '
+                  "Restarting the session; the app's state resets."
+            : '[rhr] Native code changed. Rebuilding the debug app; '
+                  "the app's state resets.",
+      );
+      preparation?.phase(
+        'native_changed',
+        'Your developer changed native code. RHR is rebuilding your app; '
+            'its state will reset.',
+        echo: false,
+      );
+      fatalExit = _reprepare;
+      if (!wsDied.isCompleted) wsDied.complete();
+      return true;
+    }();
+  }
+
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   server.listen((sock) {
     // Socket write failures (peer reset mid-transfer) surface on `done`;
@@ -1202,7 +1311,7 @@ Future<int?> _runSession({
     // Until the first request head shows whether this is a DevFS upload the
     // phone can rebuild from a delta, hold the bytes. Everything else is
     // tunnelled byte for byte, exactly as before.
-    var sniffing = devFsDelta ? HttpRequestReader() : null;
+    var sniffing = devFsDelta || prepareRun ? HttpRequestReader() : null;
     int? rawChannel;
     late final StreamSubscription<Uint8List> sub;
 
@@ -1276,7 +1385,19 @@ Future<int?> _runSession({
         }
         if (put == null) return;
         sniffing = null;
-        unawaited(uploadDevFs(sock, put));
+        final upload = put;
+        final original = Uint8List.fromList(received);
+        unawaited(() async {
+          // The upload that revealed a native change is refused: the session
+          // is ending, and it would only run new Dart against old native code.
+          if (await nativeChanged()) {
+            sock.destroy();
+          } else if (devFsDelta) {
+            await uploadDevFs(sock, upload);
+          } else {
+            openRaw(original);
+          }
+        }());
       },
       onDone: closeRaw,
       onError: (Object _) => closeRaw(),
@@ -1324,7 +1445,7 @@ Future<int?> _runSession({
     await wsDied.future; // keep tunneling until the relay drops
     await cleanup();
     final failure = directFailure;
-    if (failure != null) throw failure;
+    if (failure != null && fatalExit == null) throw failure;
     return fatalExit;
   }
 
@@ -1536,7 +1657,7 @@ Future<int?> _runSession({
     await flutterExit; // reap
     await cleanup();
     final failure = directFailure;
-    if (failure != null) throw failure;
+    if (failure != null && fatalExit == null) throw failure;
     return fatalExit;
   }
   if (fatalExit != null) {
@@ -1555,7 +1676,7 @@ Future<int?> _runSession({
     if (relayAlsoDied) {
       await cleanup();
       final failure = directFailure;
-      if (failure != null) throw failure;
+      if (failure != null && fatalExit == null) throw failure;
       return fatalExit; // null: reconnect
     }
   }
@@ -2019,9 +2140,11 @@ Future<int> _runAttachProductFlow({
         if (result == 0) return 0;
         if (result == _noDeviceExitCode ||
             result == _relayBinaryExitCode ||
+            result == _approvalExitCode ||
             result == 78) {
           return result!;
         }
+        if (result == _reprepare) continue;
         stderr.writeln(
           '[rhr] Flutter attach ended${result == null ? '' : ' ($result)'}.',
         );

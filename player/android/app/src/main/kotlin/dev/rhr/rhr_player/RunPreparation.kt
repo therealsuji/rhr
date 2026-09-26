@@ -6,8 +6,6 @@ import android.content.pm.PackageManager
 import org.json.JSONArray
 import android.os.Build
 import android.provider.Settings
-import dev.rhr.adb.AdbConnection
-import dev.rhr.adb.ShellVm
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -53,22 +51,8 @@ object RunPreparation {
 							} ?: emptyList<String>()))
 						}
 					}
-					"connector" -> {
-						val message = when {
-							Build.VERSION.SDK_INT < 30 -> error("Connector mode requires Android 11 or later.")
-							Settings.Global.getInt(context.contentResolver, "adb_wifi_enabled", 0) != 1 ->
-								"Enable Wireless debugging on this phone."
-							!AdbConnection.paired(context) -> "Pair this phone with RHR."
-							!AdbConnection.ensureConnected(context) -> "Reconnect Wireless debugging to RHR."
-							!Settings.canDrawOverlays(context) -> "Allow RHR to display the session controls over your app."
-							else -> ""
-						}
-						setupAction = if (message.isEmpty()) "" else "connector"
-						setupMessage = message
-						response.put("ready", message.isEmpty()).put("message", message)
-					}
-					// The beacon route needs no Wireless debugging: only the
-					// overlay the session controls are drawn in.
+					// The overlay the session controls are drawn in; holding it
+					// also lets the player open the app from the background.
 					"beacon_setup" -> {
 						val message = if (Settings.canDrawOverlays(context)) ""
 							else "Allow RHR to display the session controls over your app."
@@ -86,28 +70,14 @@ object RunPreparation {
 						val pkg = packageName(request)
 						val info = context.packageManager.getApplicationInfo(pkg, 0)
 						check(info.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) { "The installed app is not a debug build." }
-						if (request.optBoolean("beacon")) {
-							val vm = launchWithBeacon(context, pkg)
-							if (!isCurrent()) return@Thread
-							selectVm(vm)
-							// The tester may close and reopen the app; its VM then
-							// listens on a new port, and the beacon reports it.
-							Beacons.onAnnounce = { reported, address ->
-								if (reported == pkg && isCurrent()) selectVm(address)
-							}
-							OverlayService.start(context)
-							response.put("vm", vm)
-							response.put("ok", true)
-							if (isCurrent()) reply(response)
-							return@Thread
-						}
-						check(AdbConnection.ensureConnected(context)) { "Wireless debugging disconnected. Complete connector setup and retry." }
-						if (!isCurrent()) return@Thread
-						check(ShellVm.launch(pkg, context)) { "The debug app has no launcher activity." }
-						val vm = ShellVm.discoverVmUriBlocking(pkg, context, 45_000)
-							?: error("The app did not expose a Dart VM. Check its launch logs and debug build.")
+						val vm = launchWithBeacon(context, pkg)
 						if (!isCurrent()) return@Thread
 						selectVm(vm)
+						// The tester may close and reopen the app; its VM then
+						// listens on a new port, and the beacon reports it.
+						Beacons.onAnnounce = { reported, address ->
+							if (reported == pkg && isCurrent()) selectVm(address)
+						}
 						OverlayService.start(context)
 						response.put("vm", vm)
 					}

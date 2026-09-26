@@ -104,10 +104,15 @@ void main() {
     await stopped;
   });
   test(
-    'connector setup precedes build approval and ignores player SDK skew',
+    'approval comes before any phone setup and ignores player SDK skew',
     () async {
       final directory = Directory.systemTemp.createTempSync('rhr-preparation-');
       addTearDown(() => directory.deleteSync(recursive: true));
+      File('${directory.path}/android/app/build.gradle')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(
+          'android { defaultConfig { applicationId "com.example.app" } }',
+        );
       final phone = Phone();
       final preparation = RunPreparation(
         transport: phone,
@@ -120,23 +125,31 @@ void main() {
         'id': request['id'],
         'ok': true,
         'ready': true,
+        'installed': false,
       });
-      preparation.handleMessage({'t': 'info', 'compatibility': player});
+      preparation.handleMessage({
+        't': 'info',
+        'compatibility': player,
+        'playerPackage': 'dev.rhr.rhr_player',
+        'playerCertificate': 'a' * 64,
+      });
       await expectLater(
         preparation.run(),
         throwsA(
-          isA<StateError>().having(
-            (error) => error.message,
-            'message',
-            contains('rhr run --yes'),
+          isA<ApprovalRequired>().having(
+            (error) => error.declined,
+            'declined',
+            isFalse,
           ),
         ),
       );
+      // Only a read of what is installed: the tester is asked for nothing
+      // before the developer approves the build.
       expect(
         phone.messages
             .where((message) => message['t'] == 'run_request')
             .map((message) => message['action']),
-        ['connector', 'install_permission'],
+        ['inspect'],
       );
       expect(
         phone.messages.where((message) => message['phase'] == 'building'),

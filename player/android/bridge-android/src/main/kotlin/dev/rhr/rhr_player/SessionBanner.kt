@@ -69,8 +69,8 @@ data class SessionBanner(
 			"reload_complete" -> SessionBanner("App updated", 1000, Style.DETERMINATE)
 			"reload_failed" -> SessionBanner("Could not update the app. Check the developer’s terminal.", null, Style.FAILED, failure = "Reload failed")
 			"ready" -> SessionBanner("Your app is running", null, Style.HIDDEN)
-			"checking", "launching" -> SessionBanner(message, null, Style.BUSY)
-			"setup", "approval" -> SessionBanner(message, null, Style.WAITING)
+			"checking", "launching", "native_changed" -> SessionBanner(message, null, Style.BUSY)
+			"setup", "approval", "approval_needed" -> SessionBanner(message, null, Style.WAITING)
 			"preparation_failed" -> SessionBanner(message, null, Style.FAILED, failure = message)
 
 			"assets" -> SessionBanner(
@@ -93,9 +93,14 @@ data class SessionBanner(
 				null,
 				Style.BUSY)
 
-			// Waiting on a tap on Android's install sheet.
+			// Waiting on a tap on Android's install sheet. A debug app RHR built
+			// is new to Play Protect, which then asks to scan it; the way past
+			// is two taps the tester would not guess.
 			"install_confirm" -> SessionBanner(
-				"Confirm the install on this phone", null, Style.WAITING)
+				if (foreignApp) "Confirm the install. If Play Protect asks, tap More details, then Install without scanning"
+				else "Confirm the install on this phone",
+				null,
+				Style.WAITING)
 
 			"installed" -> SessionBanner(
 				if (foreignApp) "Your app is installed" else "Update installed",

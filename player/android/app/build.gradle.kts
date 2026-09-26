@@ -155,13 +155,6 @@ android {
     }
 
     packaging {
-        resources {
-            // BouncyCastle ships this OSGi manifest in each of its jars
-            // (bcpkix/bcutil/bcprov), and jspecify adds a fourth. They are
-            // build metadata with no runtime meaning, so drop them rather
-            // than fail the merge. Pulled in via adb-android's pairing code.
-            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
-        }
         jniLibs {
             // The debug engine bundles the Vulkan validation layer for
             // Impeller work. It is a graphics-debugging tool nothing here
@@ -195,9 +188,6 @@ dependencies {
     // Embeddable tunnel core (RhrSessionService + RhrDirectTransport live in
     // the library now; the app provides the update handler and UI).
     implementation(project(":bridge-android"))
-    // Connector mode: pair with this phone's own Wireless Debugging, find an
-    // installed debug app's VM service, and tunnel it.
-    implementation(project(":adb-android"))
     // Core library desugaring (see compileOptions above)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     // JVM tests for the pure-Kotlin shake gesture (sensors cannot be faked on

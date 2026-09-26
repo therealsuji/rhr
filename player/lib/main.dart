@@ -25,7 +25,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'account_join.dart';
-import 'connector.dart';
 import 'session_code_field.dart';
 import 'update_check.dart';
 
@@ -652,21 +651,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                             onPressed: () async {
                               if (_setupAction == 'install') {
                                 await _session.invokeMethod('installSettings');
-                              } else if (_setupAction == 'overlay') {
+                              } else {
                                 await const MethodChannel(
                                   'rhr/connector',
                                 ).invokeMethod('requestOverlay');
-                              } else {
-                                await Navigator.of(context).push<void>(
-                                  MaterialPageRoute(
-                                    builder: (_) => ConnectorScreen(
-                                      relay: _relay,
-                                      fallbackRelays: _fallbackRelays,
-                                      restoreHandler: lobbyChannelHandler,
-                                      setupOnly: true,
-                                    ),
-                                  ),
-                                );
                               }
                             },
                             child: const Text('Complete phone setup'),
