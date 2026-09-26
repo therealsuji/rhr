@@ -503,6 +503,10 @@ Future<void> main(List<String> args) async {
       // protocol violation ends the attach.
       if (failure.transient) {
         stderr.writeln('[rhr] direct path dropped: $failure');
+        if (reconnectBackoff.directPathImpossible(failure)) {
+          stderr.writeln(_noDirectPath);
+          exit(_directFailureExitCode);
+        }
       } else {
         stderr.writeln('[rhr] direct connection failed: $failure');
         exit(_directFailureExitCode);
@@ -2035,6 +2039,10 @@ Future<int> _runAttachProductFlow({
         // every other transient failure here already does.
         if (failure.transient) {
           stderr.writeln('[rhr] direct path dropped: $failure');
+          if (reconnectBackoff.directPathImpossible(failure)) {
+            stderr.writeln(_noDirectPath);
+            return _directFailureExitCode;
+          }
         } else {
           stderr.writeln('[rhr] direct connection failed: $failure');
           return _directFailureExitCode;
@@ -2441,3 +2449,14 @@ DevFsBases _devFsBasesFor(String project) => _devFsBasesByProject.putIfAbsent(
   project,
   () => DevFsBases(Directory('$project/.dart_tool/rhr/devfs-bases')),
 );
+
+/// Why RHR stops when the phone and this computer never open a direct route.
+/// RHR carries app data only directly, never through its relay, so the fix
+/// is a different network, not another retry.
+const _noDirectPath =
+    '[rhr] The phone and this computer cannot connect directly on their '
+    'current networks. They found each other through the relay, but no direct '
+    'route opened in ${ReconnectBackoff.noPathLimit} attempts. RHR sends app '
+    'data only over a direct connection. Try another network for this '
+    'computer or the phone (a phone hotspot often works), or turn off a VPN, '
+    'then run rhr again.';

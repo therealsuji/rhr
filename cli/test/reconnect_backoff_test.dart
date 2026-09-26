@@ -1,3 +1,4 @@
+import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/reconnect_backoff.dart';
 import 'package:test/test.dart';
 
@@ -33,4 +34,26 @@ void main() {
       expect(backoff.nextDelay(), Duration.zero);
     },
   );
+
+  test('three direct routes that never open in a row mean no path', () {
+    const noPath = DirectTransportFailure(
+      'ICE failed',
+      transient: true,
+      noPath: true,
+    );
+    const dropped = DirectTransportFailure('relay closed', transient: true);
+    final backoff = ReconnectBackoff();
+
+    expect(backoff.directPathImpossible(noPath), isFalse);
+    expect(backoff.directPathImpossible(noPath), isFalse);
+    // A phone that went offline is a different failure: start over.
+    expect(backoff.directPathImpossible(dropped), isFalse);
+    expect(backoff.directPathImpossible(noPath), isFalse);
+    expect(backoff.directPathImpossible(noPath), isFalse);
+    expect(backoff.directPathImpossible(noPath), isTrue);
+
+    // A session that worked proves a path exists.
+    backoff.markReady();
+    expect(backoff.directPathImpossible(noPath), isFalse);
+  });
 }

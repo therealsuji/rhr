@@ -10,7 +10,11 @@ import 'package:webrtc_dart/webrtc_dart.dart';
 import 'relay_race.dart';
 
 final class DirectTransportFailure implements Exception {
-  const DirectTransportFailure(this.message, {this.transient = false});
+  const DirectTransportFailure(
+    this.message, {
+    this.transient = false,
+    this.noPath = false,
+  });
 
   final String message;
 
@@ -19,6 +23,12 @@ final class DirectTransportFailure implements Exception {
   /// Network and data-channel failures can recover with a new connection.
   /// Protocol violations remain fatal.
   final bool transient;
+
+  /// Signaling finished and both ends had each other's candidates, but no
+  /// candidate pair ever connected. Repeated, this means the two networks
+  /// cannot reach each other directly (strict NATs, blocked UDP), which no
+  /// retry fixes.
+  final bool noPath;
 
   @override
   String toString() => message;
@@ -86,7 +96,11 @@ final class DirectSessionTransport implements SessionTransport {
           );
         } else if (state == PeerConnectionState.failed) {
           // An established path can also recover after a network interruption.
-          _fail('direct WebRTC connection failed', transient: true);
+          _fail(
+            'direct WebRTC connection failed',
+            transient: true,
+            unreachable: true,
+          );
         }
       });
       _relaySubscription = _relay.controlStream.listen(
@@ -203,6 +217,7 @@ final class DirectSessionTransport implements SessionTransport {
               'direct WebRTC negotiation failed: $error',
               stack: stack,
               transient: error is TimeoutException,
+              unreachable: error is TimeoutException,
             );
           }),
         );
@@ -255,6 +270,7 @@ final class DirectSessionTransport implements SessionTransport {
           'device direct transport failed: $message',
           notifyPeer: false,
           transient: true,
+          unreachable: true,
         );
     }
   }
@@ -268,7 +284,7 @@ final class DirectSessionTransport implements SessionTransport {
 
   Future<void> _negotiate(DirectDescriptionSignal offer) async {
     await _peer.acceptOffer(offer);
-    _stage = 'offer accepted, waiting for the data channel to open';
+    _stage = _connectingStage;
     await _peer.waitUntilOpen(timeout: connectionTimeout);
     if (_closed || _failure != null) return;
     _directReady = true;
@@ -277,16 +293,23 @@ final class DirectSessionTransport implements SessionTransport {
     stderr.writeln('[rhr] direct WebRTC/STUN payload path is ready');
   }
 
+  static const _connectingStage =
+      'offer accepted, waiting for the data channel to open';
+
+  /// [unreachable] marks a failure that, while ICE was still connecting,
+  /// means no candidate pair worked (see [DirectTransportFailure.noPath]).
   void _fail(
     String message, {
     StackTrace? stack,
     bool notifyPeer = true,
     bool transient = false,
+    bool unreachable = false,
   }) {
     if (_closed || _failure != null) return;
     final failure = _failure = DirectTransportFailure(
       _stage == 'open' ? message : '$message (stage: $_stage)',
       transient: transient,
+      noPath: unreachable && _stage == _connectingStage,
     );
     _directReady = false;
     _offerTimer?.cancel();

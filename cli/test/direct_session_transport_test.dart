@@ -166,7 +166,9 @@ void main() {
               contains('ICE failed'),
             )
             // Nothing was ever open, so a fresh offer may well succeed.
-            .having((failure) => failure.transient, 'transient', isTrue),
+            .having((failure) => failure.transient, 'transient', isTrue)
+            // No offer was negotiated yet: this says nothing about the path.
+            .having((failure) => failure.noPath, 'noPath', isFalse),
       ),
     );
     expect(relay.sent, isEmpty, reason: 'remote errors must not be echoed');
@@ -234,5 +236,48 @@ void main() {
       await device.close();
     },
     timeout: const Timeout(Duration(seconds: 20)),
+  );
+
+  test(
+    'a negotiated offer whose candidates never connect is a missing path',
+    () async {
+      final relay = _FakeControlTransport();
+      final transport = DirectSessionTransport(
+        relay,
+        connectionTimeout: const Duration(seconds: 2),
+      );
+      final subscription = transport.stream.listen((_) {}, onError: (_) {});
+      // The phone's candidates are lost on the way, as behind a NAT that
+      // filters every address this computer could try.
+      final device = DirectWebRtcPeer.localOnly(
+        onSignal: (signal) {
+          if (signal is DirectCandidateSignal) return;
+          relay.controller.add(signal.encode());
+        },
+      );
+      relay.onSend = (message) {
+        final signal = DirectSignal.decode(message);
+        if (signal is DirectDescriptionSignal && signal.type == 'answer') {
+          unawaited(device.acceptAnswer(signal));
+        }
+      };
+
+      await device.startOffer();
+      relay.controller.add(const DirectEndSignal().encode());
+
+      await expectLater(
+        transport.payloadReady,
+        throwsA(
+          isA<DirectTransportFailure>()
+              .having((failure) => failure.transient, 'transient', isTrue)
+              .having((failure) => failure.noPath, 'noPath', isTrue),
+        ),
+      );
+
+      await subscription.cancel();
+      await transport.close();
+      await device.close();
+    },
+    timeout: const Timeout(Duration(seconds: 30)),
   );
 }
