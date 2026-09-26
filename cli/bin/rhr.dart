@@ -772,6 +772,7 @@ Future<int?> _runSession({
   PlayerUpdateSender? updateSender;
   var updateAttempted = false;
   var effectiveSyncAssets = syncAssets;
+  var staleDart = false;
   final preparation = prepareRun
       ? RunPreparation(
           transport: transport,
@@ -788,6 +789,7 @@ Future<int?> _runSession({
         .run()
         .then((ready) {
           effectiveSyncAssets = ready.route == RunRoute.player;
+          staleDart = ready.staleDart;
           assetStoreId = ready.assetStoreId;
           if (!vmReady.isCompleted) vmReady.complete(ready.vm);
         })
@@ -1475,6 +1477,21 @@ Future<int?> _runSession({
           if (prepareRun && !await isProjectRunning(local, project)) {
             throw StateError(
               'The connected runtime is not running this project.',
+            );
+          }
+          if (staleDart) {
+            // The installed app predates the latest Dart edits; its APK
+            // was reused because only native changes need a new one.
+            stderr.writeln(
+              '[rhr] the installed app has older Dart code; hot restarting',
+            );
+            final pid = int.parse(
+              File(effectivePidFile).readAsStringSync().trim(),
+            );
+            await trackHotRestart(
+              vmService: local,
+              trigger: () => Process.killPid(pid, ProcessSignal.sigusr2),
+              onProgress: reportProgress,
             );
           }
         }

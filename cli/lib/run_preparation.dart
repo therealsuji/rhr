@@ -33,10 +33,19 @@ RunRoute selectRunRoute(
 }
 
 final class PreparedRun {
-  const PreparedRun(this.vm, this.assetStoreId, this.route);
+  const PreparedRun(
+    this.vm,
+    this.assetStoreId,
+    this.route, {
+    this.staleDart = false,
+  });
   final Uri vm;
   final String assetStoreId;
   final RunRoute route;
+
+  /// The installed app was built from older Dart source than the project
+  /// holds now. A hot restart after attaching brings it up to date.
+  final bool staleDart;
 }
 
 /// Reconnects reuse approvals; APK receipts independently validate build inputs.
@@ -279,11 +288,13 @@ final class RunPreparation {
         profile.flutter,
       );
       final inputs = [
-        projectInputs,
+        projectInputs.native,
         if (beacon != null)
           'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
       ].join('|');
-      var apk = await cachedProjectApk(project, inputs);
+      final cached = await cachedProjectApk(project, inputs);
+      var apk = cached?.apk;
+      var apkDart = cached?.dart;
       var approvedBuild = false;
       if (apk == null) {
         await _approve(
@@ -310,7 +321,8 @@ final class RunPreparation {
             'Build inputs changed while the APK was being built. Run rhr again before installing it.',
           );
         }
-        await recordProjectApk(project, inputs, apk);
+        await recordProjectApk(project, inputs, projectInputs.dart, apk);
+        apkDart = projectInputs.dart;
       }
       final identity = await readApkIdentity(apk);
       final expected = (await sha256.bind(apk.openRead()).first).toString();
@@ -332,7 +344,12 @@ final class RunPreparation {
         beacon: beacon != null,
       );
       final vm = Uri.parse(launched['vm'] as String);
-      return PreparedRun(vm, '', route);
+      return PreparedRun(
+        vm,
+        '',
+        route,
+        staleDart: apkDart != projectInputs.dart,
+      );
     }
     final report = profile.differencesFrom(raw);
     if (report.blockers.isNotEmpty) {
