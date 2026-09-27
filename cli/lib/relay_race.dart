@@ -61,13 +61,12 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   /// The session this race is for, so a granted claim is filed under it.
   final String _code;
 
-  // Repeated hellos share an identity; a reconnect must replace the old peer.
-  final _hello = jsonEncode({
-    't': 'hello',
-    'connectionId': base64UrlEncode(
-      List<int>.generate(16, (_) => Random.secure().nextInt(256)),
-    ),
-  });
+  /// This connection's identity. Repeated hellos share it; a reconnect gets a
+  /// new one, which is how the device knows to replace the old peer.
+  final connectionId = base64UrlEncode(
+    List<int>.generate(16, (_) => Random.secure().nextInt(256)),
+  );
+  late final _hello = jsonEncode({'t': 'hello', 'connectionId': connectionId});
 
   /// Hands a relay's claim back before its grace period runs out.
   static const _release = '{"t":"release"}';

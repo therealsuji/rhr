@@ -672,6 +672,9 @@ class RhrSessionService : Service() {
 		.put("deviceName", android.os.Build.MODEL)
 		.put("deviceId", InstallationIdentity.id(this))
 		.put("vm", vmUri)
+		// The developer hello this answers. The relay replays the last info to
+		// every developer who connects, and an attaching one waits for its own.
+		.put("answers", developerConnectionId ?: JSONObject.NULL)
 		.put("transport", activeRelayUrl)
 		// Readiness is state, not merely an edge-triggered event. A developer
 		// tool can detach and reconnect to the same live VM after the original
@@ -907,21 +910,21 @@ class RhrSessionService : Service() {
 						// that reconnected mid-session), the dev sends {"t":"hello"}
 						// and we answer with a fresh info so pairing is robust to
 						// connection order. Unknown text (e.g. pings) is ignored.
-						if (text.contains("\"hello\"") && (runRequestHandler != null || !vmUri.contains(":0/"))) {
+						// Abrupt CLI exits do not send dev_gone. A new attempt numbers its
+						// channels from 1 again, owns a new peer, and is owed an info
+						// addressed to it, whichever transport carries its payload.
+						val hello = text.contains("\"hello\"")
+						val newConnection = hello && runRequest?.optString("connectionId") != developerConnectionId
+						if (newConnection) {
+							developerConnectionId = runRequest?.optString("connectionId")
+							cleanupChannels()
+							resumeOwnVm()
+						}
+						if (hello && (runRequestHandler != null || !vmUri.contains(":0/"))) {
 							// Wait for the developer hello before creating the offer. A
 							// device can connect to the relay before the CLI subscribes;
 							// starting here keeps the first offer and ICE candidates on a
 							// live developer stream instead of losing them in the relay.
-							val connectionId = runRequest?.optString("connectionId")
-							// Abrupt CLI exits do not send dev_gone. A new attempt numbers
-							// its channels from 1 again and owns a new peer, whichever
-							// transport carries its payload.
-							val newConnection = connectionId != developerConnectionId
-							if (newConnection) {
-								developerConnectionId = connectionId
-								cleanupChannels()
-								resumeOwnVm()
-							}
 							if (preferDirect && (newConnection || directFailureReported || directTransport == null)) {
 								directFailureReported = false
 								if (!newConnection) cleanupChannels()

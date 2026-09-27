@@ -245,15 +245,20 @@ class RhrBridge {
           }
         }
 
-        ws.sink.add(
+        // [answers] names the developer hello this info replies to. The
+        // relay replays the last info to every developer who connects, so an
+        // attaching developer waits for one addressed to it.
+        void announce({String? answers}) => ws.sink.add(
           jsonEncode({
             't': 'info',
             'vm': vmUri.toString(),
             'host': host,
             if (assetStoreId != null) 'assetStoreId': assetStoreId,
             if (compatibility != null) 'compatibility': compatibility,
+            if (answers != null) 'answers': answers,
           }),
         );
+        announce();
 
         if (preferDirect) {
           direct = DirectWebRtcPeer(
@@ -285,6 +290,8 @@ class RhrBridge {
 
         await for (final msg in ws.stream) {
           if (msg is String) {
+            final hello = _helloConnection(msg);
+            if (hello != null) announce(answers: hello);
             if (preferDirect &&
                 direct != null &&
                 !directStarted &&
@@ -511,5 +518,12 @@ class RhrBridge {
     } on FormatException {
       return false;
     }
+  }
+
+  /// The connection id of a developer hello, or null for anything else.
+  static String? _helloConnection(String message) {
+    if (!_isHello(message)) return null;
+    final id = (jsonDecode(message) as Map<String, dynamic>)['connectionId'];
+    return id is String ? id : null;
   }
 }

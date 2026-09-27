@@ -948,7 +948,14 @@ Future<int?> _runSession({
             );
           return;
         }
-        if (m['t'] == 'info' && !vmReady.isCompleted && !leaving) {
+        // Only the device's answer to this connection's hello counts. The
+        // relay first replays the last info it cached, which can describe a
+        // previous developer's session: a debug app since closed, whose VM
+        // address and token no longer lead anywhere.
+        if (m['t'] == 'info' &&
+            m['answers'] == relayTransport.connectionId &&
+            !vmReady.isCompleted &&
+            !leaving) {
           final announcedAssetStoreId = m['assetStoreId'];
           final announcedHost = m['host'];
           final hostKind = announcedHost is String ? announcedHost : 'player';
