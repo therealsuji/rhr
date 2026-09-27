@@ -616,6 +616,25 @@ class RhrSessionService : Service() {
 		}.also { it.isDaemon = true; it.start() }
 	}
 
+	/**
+	 * Points the tunnel back at the player's own engine. A target app belongs
+	 * to the run that launched it: once that developer is gone the app may be
+	 * too (closed, crashed, uninstalled), and announcing its address would
+	 * hand the next developer a dead VM. Their run launches it again.
+	 *
+	 * Announced at once: the relay replays the last info to a developer who
+	 * connects, before this side hears their hello.
+	 */
+	private fun resumeOwnVm() {
+		synchronized(vmUriLock) {
+			if (watchOwnVm) return
+			watchOwnVm = true
+			vmUri = ownVmUri
+			currentVm = vmUri
+		}
+		announceInfo()
+	}
+
 	private fun announceInfo() {
 		synchronized(vmUriLock) {
 			currentVm = vmUri
@@ -876,6 +895,7 @@ class RhrSessionService : Service() {
 							directTransport?.close()
 							directTransport = null
 							directFailureReported = false
+							resumeOwnVm()
 							return
 						}
 						// Anything else is developer traffic (hello, ping, progress,
@@ -893,12 +913,18 @@ class RhrSessionService : Service() {
 							// starting here keeps the first offer and ICE candidates on a
 							// live developer stream instead of losing them in the relay.
 							val connectionId = runRequest?.optString("connectionId")
-							// Abrupt CLI exits do not send dev_gone. A new attempt owns a new peer.
-							if (preferDirect && (directFailureReported || directTransport == null ||
-								connectionId != developerConnectionId)) {
+							// Abrupt CLI exits do not send dev_gone. A new attempt numbers
+							// its channels from 1 again and owns a new peer, whichever
+							// transport carries its payload.
+							val newConnection = connectionId != developerConnectionId
+							if (newConnection) {
 								developerConnectionId = connectionId
-								directFailureReported = false
 								cleanupChannels()
+								resumeOwnVm()
+							}
+							if (preferDirect && (newConnection || directFailureReported || directTransport == null)) {
+								directFailureReported = false
+								if (!newConnection) cleanupChannels()
 								startDirectTransport(webSocket)
 							}
 							announceInfo()
@@ -1108,6 +1134,7 @@ class RhrSessionService : Service() {
 	private fun closeDirectForExpiry() {
 		directTransport?.close()
 		directTransport = null
+		resumeOwnVm()
 		setProgress("", 0, 0)
 		if (status in DEV_PRESENT_STATES) status = "waiting_dev"
 	}
@@ -1133,8 +1160,9 @@ class RhrSessionService : Service() {
 		when (op) {
 			OP_OPEN -> {
 				synchronized(flowLock) { pending[channel] = java.io.ByteArrayOutputStream() }
-				sniffers[channel] = DevFsDelta.Sniffer(channelEpoch)
-				openChannel(channel)
+				val epoch = channelEpoch
+				sniffers[channel] = DevFsDelta.Sniffer(epoch)
+				openChannel(channel, epoch)
 			}
 			OP_DATA -> {
 				val sniffer = sniffers[channel]
@@ -1249,7 +1277,10 @@ class RhrSessionService : Service() {
 		}
 	}
 
-	private fun openChannel(channel: Int) {
+	/** Connects [channel] to the VM service. Like a DevFS rebuild, the connect
+	 *  and its reader outlive the connection that opened them, so they only
+	 *  touch [channel] while [epoch] is current and the socket is still theirs. */
+	private fun openChannel(channel: Int, epoch: Long) {
 		Thread {
 			try {
 				val vm = android.net.Uri.parse(vmUri)
@@ -1258,7 +1289,7 @@ class RhrSessionService : Service() {
 				// Flush anything that arrived while we were connecting, then
 				// atomically switch the channel over to the live socket.
 				synchronized(flowLock) {
-					val buffered = pending.remove(channel)
+					val buffered = if (epoch == channelEpoch) pending.remove(channel) else null
 					if (buffered == null) {
 						// Channel was closed while we were connecting.
 						sock.close()
@@ -1276,12 +1307,13 @@ class RhrSessionService : Service() {
 						while (true) {
 							val n = input.read(buf)
 							if (n < 0) break
-							sendBinaryFrame(encodeData(channel, buf, n))
-							// Flow control: block while this channel's window is full.
 							synchronized(flowLock) {
+								if (sockets[channel] !== sock) return@Thread
+								sendBinaryFrame(encodeData(channel, buf, n))
+								// Flow control: block while this channel's window is full.
 								unacked[channel] = (unacked[channel] ?: 0) + n
 								while ((unacked[channel] ?: 0) >= WINDOW_BYTES &&
-									sockets.containsKey(channel) && !stopped.get()) {
+									sockets[channel] === sock && !stopped.get()) {
 									flowLock.wait(1000)
 									if ((unacked[channel] ?: 0) < LOW_WATER) break
 								}
@@ -1289,11 +1321,13 @@ class RhrSessionService : Service() {
 						}
 					} catch (_: Exception) {
 					} finally {
-						if (sockets.remove(channel) != null) {
-							sendBinaryFrame(encodeClose(channel))
+						synchronized(flowLock) {
+							if (sockets.remove(channel, sock)) {
+								sendBinaryFrame(encodeClose(channel))
+								unacked.remove(channel)
+							}
+							readers.remove(channel, Thread.currentThread())
 						}
-						readers.remove(channel)
-						synchronized(flowLock) { unacked.remove(channel) }
 					}
 				}
 				readers[channel] = reader
@@ -1301,7 +1335,9 @@ class RhrSessionService : Service() {
 				reader.start()
 			} catch (e: Exception) {
 				Log.w(TAG, "channel $channel: VM connect failed: $e")
-				sendBinaryFrame(encodeClose(channel))
+				synchronized(flowLock) {
+					if (epoch == channelEpoch) closeChannel(channel, notifyPeer = true)
+				}
 			}
 		}.also { it.isDaemon = true }.start()
 	}

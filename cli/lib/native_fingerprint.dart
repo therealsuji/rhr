@@ -40,11 +40,11 @@ Future<String> nativeFingerprint(String project) async {
     }
   }
 
-  await addFile(File('$root/pubspec.lock'));
+  await addFile(File('${pubRoot(root)}/pubspec.lock'));
   await addTree(Directory('$root/android'));
 
   final plugins = File('$root/.flutter-plugins-dependencies');
-  final local = readPathPackages(root);
+  final published = readPublishedPackages(root);
   if (plugins.existsSync()) {
     try {
       final decoded = jsonDecode(plugins.readAsStringSync());
@@ -54,7 +54,7 @@ Future<String> nativeFingerprint(String project) async {
         if (plugin is! Map<String, dynamic>) continue;
         parts.add('plugin:${plugin['name']}:${plugin['path']}');
         final path = plugin['path'];
-        if (path is String && local.contains(plugin['name'])) {
+        if (path is String && !published.contains(plugin['name'])) {
           await addTree(Directory('$path/android'));
         }
       }

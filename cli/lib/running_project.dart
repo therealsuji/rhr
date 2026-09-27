@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'flutter_compatibility.dart';
+
 /// Checks the root library, since replacing an isolate alone can restart the lobby.
 Future<bool> isProjectRunning(Uri vmService, String project) async {
   final root = Directory(project).resolveSymbolicLinksSync();
-  final config = File('$root/.dart_tool/package_config.json');
+  final config = File('${pubRoot(root)}/.dart_tool/package_config.json');
   final packages =
       (jsonDecode(await config.readAsString()) as Map)['packages'] as List;
   final package =

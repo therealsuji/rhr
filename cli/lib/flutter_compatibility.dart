@@ -227,10 +227,28 @@ FlutterCompatibility readProjectFlutterCompatibility(String project) {
   return FlutterCompatibility.fromJson(json);
 }
 
-/// The packages `pubspec.lock` resolves from a local path. Unlike a
-/// published or git version, their sources change without the lock changing.
-Set<String> readPathPackages(String project) {
-  final lock = File('$project/pubspec.lock');
+/// Where pub keeps the project's `pubspec.lock` and
+/// `.dart_tool/package_config.json`: the project itself, or for a pub
+/// workspace member, the workspace root it points to from `.dart_tool/pub`.
+String pubRoot(String project) {
+  final ref = File('$project/.dart_tool/pub/workspace_ref.json');
+  try {
+    final root = (jsonDecode(ref.readAsStringSync()) as Map)['workspaceRoot'];
+    if (root is String) {
+      final path = Directory.fromUri(ref.parent.uri.resolve(root)).path;
+      return path.endsWith('/') ? path.substring(0, path.length - 1) : path;
+    }
+  } on Object {
+    // Not a workspace member.
+  }
+  return project;
+}
+
+/// The packages the lock pins to a published or git version. Their sources
+/// never change for a given lock. Anything else a project depends on (a path
+/// dependency, a pub workspace member) is whatever is on disk right now.
+Set<String> readPublishedPackages(String project) {
+  final lock = File('${pubRoot(project)}/pubspec.lock');
   if (!lock.existsSync()) return const {};
   final packages = <String>{};
   String? current;
@@ -238,7 +256,8 @@ Set<String> readPathPackages(String project) {
     final entry = RegExp(r'^  (\S+):\s*$').firstMatch(line);
     if (entry != null) {
       current = entry.group(1);
-    } else if (current != null && line.trim() == 'source: path') {
+    } else if (current != null &&
+        RegExp(r'^    source: (hosted|git|sdk)\s*$').hasMatch(line)) {
       packages.add(current);
     }
   }
@@ -278,7 +297,9 @@ List<AndroidPluginSource> readAndroidPluginSources(String project) {
       }
     }
   } else {
-    final packageConfig = File('$project/.dart_tool/package_config.json');
+    final packageConfig = File(
+      '${pubRoot(project)}/.dart_tool/package_config.json',
+    );
     if (!packageConfig.existsSync()) return const [];
     final decoded = jsonDecode(packageConfig.readAsStringSync());
     final packages = decoded is Map<String, dynamic>
@@ -423,15 +444,15 @@ List<String> androidPermissionDifferences({
 List<String> readUnsupportedAndroidInputs(String project) {
   final unsupported = <String>[];
 
-  // A path plugin's Android code is whatever is on disk, so a player built
+  // A local plugin's Android code is whatever is on disk, so a player built
   // with a published version of the same plugin cannot stand in for it.
-  final local = readPathPackages(project);
+  final published = readPublishedPackages(project);
   for (final plugin in readAndroidPluginSources(project)) {
-    if (local.contains(plugin.name) &&
+    if (!published.contains(plugin.name) &&
         Directory('${plugin.path}/android').existsSync()) {
       unsupported.add(
-        '${plugin.name}: plugin from a local path; its Android code is not in '
-        'the generic player',
+        '${plugin.name}: local plugin; its Android code is not in the generic '
+        'player',
       );
     }
   }

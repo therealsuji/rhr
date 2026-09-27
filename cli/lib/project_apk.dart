@@ -18,7 +18,7 @@ Future<ProjectBuildIdentity> projectBuildIdentity(
 ) async {
   final root = Directory(project).absolute;
   final roots = <String>{root.resolveSymbolicLinksSync()};
-  final config = File('${root.path}/.dart_tool/package_config.json');
+  final config = File('${pubRoot(root.path)}/.dart_tool/package_config.json');
   if (config.existsSync()) {
     final decoded =
         jsonDecode(await config.readAsString()) as Map<String, dynamic>;

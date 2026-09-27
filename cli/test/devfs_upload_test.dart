@@ -106,19 +106,11 @@ void main() {
     expect(gzip.decode(received.gzippedBody), kernel);
   });
 
-  test('a kernel is compared with the newest kernel, not an asset', () {
-    final dir = Directory.systemTemp.createTempSync('rhr-bases-');
-    addTearDown(() => dir.deleteSync(recursive: true));
+  test('only whole programs get deltas', () {
     String uri(String path) => base64.encode(utf8.encode(path));
-    final bases = DevFsBases(dir)
-      ..confirm(uri('lib/main.dart.dill'), 'kernel-a', Uint8List(1))
-      ..confirm(uri('lib/main.dart.swap.dill'), 'kernel-b', Uint8List(2))
-      ..confirm(uri('assets/big.png'), 'image', Uint8List(3));
-    // Flutter alternates file names; the newest kernel is the closest.
-    expect(bases.baseFor(uri('lib/main.dart.dill'))!.sha, 'kernel-b');
-    expect(bases.baseFor(uri('assets/other.png'))!.sha, 'image');
-    bases.forget();
-    expect(bases.baseFor(uri('lib/main.dart.dill')), isNull);
+    expect(devFsKernel(uri('lib/main.dart.swap.dill')), isTrue);
+    expect(devFsKernel(uri('build/flutter_assets/kernel_blob.bin')), isTrue);
+    expect(devFsKernel(uri('build/flutter_assets/assets/big.png')), isFalse);
   });
 
   test('a fresh CLI still knows what the phone kept', () {
@@ -131,7 +123,7 @@ void main() {
       ..confirm('d', 'sha-d', Uint8List.fromList([4]));
 
     final reloaded = DevFsBases(dir);
-    expect(reloaded.baseFor('e')!.bytes, [4]);
+    expect(reloaded.newest!.bytes, [4]);
     // Only the newest three are kept, on disk as in memory.
     expect(File('${dir.path}/sha-a').existsSync(), isFalse);
     expect(File('${dir.path}/sha-b').existsSync(), isTrue);

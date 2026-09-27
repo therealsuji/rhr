@@ -188,7 +188,9 @@ class RhrBridge {
               ws.sink.add(DirectErrorSignal(reason).encode());
             } catch (_) {}
           }
-          unawaited(ws.sink.close(1011, 'direct WebRTC failed'));
+          // dart:io only sends 1000 or an application code (3000-4999);
+          // 1011 threw an unhandled error that ended the process.
+          unawaited(ws.sink.close(4004, 'direct WebRTC failed'));
         }
 
         Future<void> sendFrame(Uint8List frame) async {

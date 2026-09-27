@@ -18,6 +18,21 @@ const rhrDeltaBaseHeader = 'rhr-delta-base';
 /// Smaller files are cheaper to send whole than to index.
 const devFsDeltaMinimumBytes = 256 * 1024;
 
+/// Whether an upload to this DevFS path (base64, as Flutter sends it) is a
+/// whole program: a restart's `.dill`, or `kernel_blob.bin`, which every
+/// session's asset sync pushes again. Each is nearly the same as the last
+/// one, so these are the uploads a delta pays for and the only ones kept as
+/// bases. Images and fonts rarely change, and as bases they would push the
+/// kernels out.
+bool devFsKernel(String uriBase64) {
+  try {
+    final path = utf8.decode(base64.decode(uriBase64));
+    return path.endsWith('.dill') || path.endsWith('kernel_blob.bin');
+  } on FormatException {
+    return false;
+  }
+}
+
 /// One HTTP/1.1 request read from a local socket.
 final class DevFsPut {
   DevFsPut(this.target, this.headers, this.gzippedBody);
@@ -184,36 +199,19 @@ final class DevFsBases {
   }
 
   final Directory directory;
-  // Room for the newest kernel alongside a couple of large assets; the
-  // player keeps as many (DevFsDelta.KEPT_BASES).
+  // The player keeps as many (DevFsDelta.KEPT_BASES).
   static const _kept = 3;
   final _bases = <({String uri, String sha, Uint8List bytes})>[];
 
   File get _index => File('${directory.path}/bases.json');
 
-  /// The best base for [uri]: the most recent file of the same kind.
-  ///
-  /// Kernels are the uploads worth a delta, and each is nearly the same as
-  /// the one before it. Flutter alternates a restart's kernel between two
-  /// file names, so "the same file" would be two restarts old; the newest
-  /// `.dill` is the previous restart's. A large asset is only compared with
-  /// other assets.
-  ({String sha, Uint8List bytes})? baseFor(String uri) {
-    final kind = _isKernel(uri);
-    for (final base in _bases) {
-      if (_isKernel(base.uri) == kind)
-        return (sha: base.sha, bytes: base.bytes);
-    }
-    return null;
-  }
-
-  static bool _isKernel(String uriBase64) {
-    try {
-      return utf8.decode(base64.decode(uriBase64)).endsWith('.dill');
-    } on FormatException {
-      return false;
-    }
-  }
+  /// The best base for the next kernel: the most recent one. Flutter
+  /// alternates a restart's kernel between two file names, so "the same
+  /// file" would be two restarts old, and `kernel_blob.bin` holds the same
+  /// program as the `.dill` before it.
+  ({String sha, Uint8List bytes})? get newest => _bases.isEmpty
+      ? null
+      : (sha: _bases.first.sha, bytes: _bases.first.bytes);
 
   void confirm(String uri, String sha, Uint8List bytes) {
     _bases.removeWhere((b) => b.sha == sha || b.uri == uri);

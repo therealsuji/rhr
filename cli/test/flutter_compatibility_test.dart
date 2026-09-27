@@ -367,8 +367,35 @@ packages:
 ''');
 
     expect(readUnsupportedAndroidInputs(project.path), [
-      'forked: plugin from a local path; its Android code is not in the '
-          'generic player',
+      'forked: local plugin; its Android code is not in the generic player',
+    ]);
+  });
+
+  test('a pub workspace member plugin is local too', () async {
+    final root = await Directory.systemTemp.createTemp('rhr_workspace_');
+    addTearDown(() => root.delete(recursive: true));
+    final app = Directory('${root.path}/app')..createSync();
+    final plug = Directory('${root.path}/plug')..createSync();
+    File('${plug.path}/pubspec.yaml').writeAsStringSync('version: 0.0.1\n');
+    Directory('${plug.path}/android').createSync();
+    File('${app.path}/.flutter-plugins-dependencies').writeAsStringSync(
+      jsonEncode({
+        'plugins': {
+          'android': [
+            {'name': 'plug', 'path': '${plug.path}/'},
+          ],
+        },
+      }),
+    );
+    // Pub keeps the lock at the workspace root, and lists no members in it.
+    File('${root.path}/pubspec.lock').writeAsStringSync('packages:\n');
+    File('${app.path}/.dart_tool/pub/workspace_ref.json')
+      ..createSync(recursive: true)
+      ..writeAsStringSync('{"workspaceRoot": "../../.."}');
+
+    expect(pubRoot(app.path), root.path);
+    expect(readUnsupportedAndroidInputs(app.path), [
+      'plug: local plugin; its Android code is not in the generic player',
     ]);
   });
 }

@@ -69,6 +69,9 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     ),
   });
 
+  /// Hands a relay's claim back before its grace period runs out.
+  static const _release = '{"t":"release"}';
+
   /// Header naming the claim being resumed, and carrying the granted one back.
   static const _claimHeader = 'x-rhr-claim';
 
@@ -95,10 +98,11 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     final file = _claimFile;
     if (file != null && file.existsSync()) file.deleteSync();
     if (_closed) return;
-    try {
-      sendControl('{"t":"release"}');
-    } catch (_) {
-      // A socket already gone releases the claim by its own timeout.
+    // Before a winner, every candidate relay admitted this developer and
+    // holds a claim for it.
+    final winner = _winner;
+    for (final candidate in winner == null ? _candidates : [winner]) {
+      if (!candidate.closed) candidate.channel.sink.add(_release);
     }
   }
 
@@ -133,6 +137,10 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       ),
     );
     if (refusals.isNotEmpty) {
+      // The relays that admitted us each hold a claim this run will not use.
+      for (final candidate in race._candidates) {
+        if (!candidate.closed) candidate.channel.sink.add(_release);
+      }
       final drain = race.stream.listen((_) {});
       await race.close();
       await drain.cancel();
@@ -187,6 +195,8 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     socket.pingInterval = const Duration(seconds: 20);
     final channel = IOWebSocketChannel(socket);
     if (_closed || _winner != null) {
+      // Admitted too late to matter; its claim would still hold the device.
+      channel.sink.add(_release);
       await channel.sink.close();
       return;
     }
@@ -254,8 +264,14 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       // pairing can still trigger optional device-side upgrades (such as
       // direct WebRTC signaling).
       candidate.channel.sink.add(_hello);
-      for (final loser in _candidates.where((item) => item != candidate)) {
+      // A loser's claim is dead weight: left alone, its relay would hold the
+      // device for a grace period and refuse this developer's next run.
+      for (final loser in _candidates.where(
+        (item) => item != candidate && !item.closed,
+      )) {
+        loser.channel.sink.add(_release);
         unawaited(loser.channel.sink.close());
+        loser.closed = true;
       }
     }
     if (identical(_winner, candidate) && !_events.isClosed) {

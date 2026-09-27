@@ -83,8 +83,6 @@ run options:
   --no-direct           use the relay for tunnel payloads (legacy/private mode;
                         direct WebRTC is strict and enabled by default)
   --resync              ignore the local asset manifest and re-push all assets
-  --update-player       on version skew, rebuild and update the player without asking
-  --no-update-player    on version skew, hard-block instead of offering an update
 
 The player must already be installed. Flutter's normal terminal commands work:
   r to hot reload · R to hot restart · q to quit
@@ -106,6 +104,8 @@ attach options:
   --no-direct           use the relay for tunnel payloads (legacy/private mode;
                         direct WebRTC is strict and enabled by default)
   --pid-file <path>     write the flutter process pid here
+  --update-player       on version skew, rebuild and update the player without asking
+  --no-update-player    on version skew, hard-block instead of offering an update
   -h, --help            show this help
 
 Session selection, for both run and attach: --device, else --code, else
@@ -331,10 +331,7 @@ Future<void> main(List<String> args) async {
             _ => throw ArgumentError('mode must be auto, player, or app'),
           };
         case '--yes':
-        case '--update-player':
           updatePolicy = PlayerUpdatePolicy.always;
-        case '--no-update-player':
-          updatePolicy = PlayerUpdatePolicy.never;
         default:
           stderr.writeln('unknown arg: ${args[i]}');
           exit(64);
@@ -724,25 +721,39 @@ Future<int?> _runSession({
   // be caught by anyone; that is what the device's lease is for.
   void Function()? restoreTerminal;
   Process? attachProcess;
-  Future<void> leaveOnSignal(ProcessSignal signal) async {
-    restoreTerminal?.call();
-    attachProcess?.kill();
-    relayTransport.release();
-    // Tell the phone as well as the relay: releasing the claim frees the
-    // device for the next developer, but only dev_gone takes the tester off
-    // "Connected" without waiting out the lease.
+
+  // Tells the phone this developer is leaving, so the tester is taken off
+  // "Connected" without waiting out the lease. Before a relay is selected the
+  // phone has not seen this developer, so there is no one to tell.
+  void sayGoodbye() {
     try {
       transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+    } on StateError {
+      // No relay selected yet.
     } catch (error) {
       stderr.writeln('[rhr] could not tell the phone we are leaving: $error');
     }
-    // Both are WebSocket frames; exiting immediately can kill the process
-    // before they leave the socket, which is the case this handler exists to
-    // prevent. A short flush beats a 45-second lockout, and the relay's own
-    // grace still covers a CLI that dies harder than this.
+  }
+
+  // Ends the process on purpose. Releasing the claim frees the device for the
+  // next developer at once; dev_gone frees the tester's screen. Both are
+  // WebSocket frames, and exiting immediately can kill the process before
+  // they leave the socket. A short flush beats a 45-second lockout, and the
+  // relay's own grace still covers a CLI that dies harder than this.
+  var leaving = false;
+  Future<Never> leave(int exitCode) async {
+    leaving = true;
+    relayTransport.release();
+    sayGoodbye();
     await Future<void>.delayed(const Duration(milliseconds: 250));
+    exit(exitCode);
+  }
+
+  Future<void> leaveOnSignal(ProcessSignal signal) async {
+    restoreTerminal?.call();
+    attachProcess?.kill();
     // 128 + signal number, the shell's convention for a signalled process.
-    exit(switch (signal) {
+    await leave(switch (signal) {
       ProcessSignal.sigterm => 143,
       ProcessSignal.sighup => 129,
       _ => 130,
@@ -832,7 +843,7 @@ Future<int?> _runSession({
             directFailure ??= error;
           } else if (error is ApprovalRequired) {
             final again = [
-              ..._invocation.where((arg) => arg != '--no-update-player'),
+              ..._invocation,
               if (!_invocation.contains('--yes')) '--yes',
             ];
             stderr.writeln(
@@ -937,7 +948,7 @@ Future<int?> _runSession({
             );
           return;
         }
-        if (m['t'] == 'info' && !vmReady.isCompleted) {
+        if (m['t'] == 'info' && !vmReady.isCompleted && !leaving) {
           final announcedAssetStoreId = m['assetStoreId'];
           final announcedHost = m['host'];
           final hostKind = announcedHost is String ? announcedHost : 'player';
@@ -953,7 +964,8 @@ Future<int?> _runSession({
                 '[rhr] the target app announced no VM service — is it a '
                 'debug build?',
               );
-              exit(78);
+              unawaited(leave(78));
+              return;
             }
             assetStoreId = announcedAssetStoreId is String
                 ? announcedAssetStoreId
@@ -969,7 +981,8 @@ Future<int?> _runSession({
               '[rhr] COMPATIBILITY_BLOCKED: the player announced no runtime '
               'or asset-store identity.',
             );
-            exit(78);
+            unawaited(leave(78));
+            return;
           }
           assetStoreId = announcedAssetStoreId;
           final report = compatibility.differencesFrom(raw);
@@ -993,7 +1006,8 @@ Future<int?> _runSession({
                 'update cannot provide. Run `rhr run` instead; it builds and '
                 'installs it.',
               );
-              exit(78);
+              unawaited(leave(78));
+              return;
             }
             if (updatePolicy == PlayerUpdatePolicy.never || updateAttempted) {
               stderr.writeln(
@@ -1002,7 +1016,8 @@ Future<int?> _runSession({
                     : '[rhr] Rebuild/reinstall a compatible player before '
                           'streaming.',
               );
-              exit(78);
+              unawaited(leave(78));
+              return;
             }
             updateAttempted = true;
             // Tell the phone too: the tester is holding it and otherwise sees
@@ -1030,8 +1045,8 @@ Future<int?> _runSession({
                 // send is async. Exiting here truncates it, and the tester is
                 // left on a card that never explains itself — give the socket
                 // a beat to flush before the process goes.
-                await Future<void>.delayed(const Duration(milliseconds: 750));
-                exit(78);
+                await Future<void>.delayed(const Duration(milliseconds: 500));
+                await leave(78);
               }),
             );
             return;
@@ -1041,7 +1056,8 @@ Future<int?> _runSession({
             stderr.writeln(
               '[rhr] COMPATIBILITY_BLOCKED: player announced no VM service.',
             );
-            exit(78);
+            unawaited(leave(78));
+            return;
           }
           vmReady.complete(Uri.parse(vmValue));
         }
@@ -1141,6 +1157,8 @@ Future<int?> _runSession({
     await terminations.cancel();
     await hangups.cancel();
     keepalive.cancel();
+    // `rhr attach` gives up here; `rhr run` keeps the device and waits on.
+    if (!prepareRun) relayTransport.release();
     await transport.close();
     stderr.writeln(
       prepareRun
@@ -1158,11 +1176,12 @@ Future<int?> _runSession({
     await terminations.cancel();
     await hangups.cancel();
     if (fatalExit != null || preparationRetry != null) {
-      try {
-        transport.sendControl(jsonEncode({'t': 'dev_gone'}));
-      } catch (_) {
-        // The connection may have closed before preparation failed.
+      // A final exit (not a reprepare or a retry) ends the session on
+      // purpose: hand the device back now.
+      if (fatalExit != null && fatalExit != _reprepare) {
+        relayTransport.release();
       }
+      sayGoodbye();
       await Future<void>.delayed(const Duration(milliseconds: 250));
       await transport.close();
     }
@@ -1223,12 +1242,13 @@ Future<int?> _runSession({
   /// (see devfs_upload.dart), then hands Flutter the phone's answer.
   Future<void> uploadDevFs(Socket sock, DevFsPut put) async {
     final uri = put.uriBase64 ?? '';
-    // A hot reload's incremental kernel or a small asset is not worth a
-    // delta or keeping as a base; it goes as Flutter wrote it.
-    final small = put.uncompressedSize < devFsDeltaMinimumBytes;
+    // A hot reload's incremental kernel, or anything but a whole program,
+    // is not worth a delta or keeping as a base; it goes as Flutter wrote it.
+    final plain =
+        put.uncompressedSize < devFsDeltaMinimumBytes || !devFsKernel(uri);
     final bases = _devFsBasesFor(project);
-    final base = small ? null : bases.baseFor(uri);
-    final rewritten = small ? null : rewriteDevFsPut(put, base);
+    final base = plain ? null : bases.newest;
+    final rewritten = plain ? null : rewriteDevFsPut(put, base);
     final request = rewritten?.request ?? plainDevFsPut(put);
     final channel = nextChannel++;
     final answer = (bytes: BytesBuilder(), closed: Completer<void>());
@@ -1455,15 +1475,13 @@ Future<int?> _runSession({
     await interrupts.cancel();
     await terminations.cancel();
     await hangups.cancel();
+    // A final exit hands the device back; a reconnect keeps the claim.
+    if (fatalExit != null && fatalExit != _reprepare) relayTransport.release();
     // Farewell so the phone leaves "Connected" immediately instead of waiting
     // out its 45s presence lease. Harmless if the socket already died (relay
     // drop) — but a swallowed failure here is why a tester was left reading
     // "Can't reach relay — retrying…" after a clean quit, so it gets logged.
-    try {
-      transport.sendControl(jsonEncode({'t': 'dev_gone'}));
-    } catch (error) {
-      stderr.writeln('[rhr] could not tell the phone we are leaving: $error');
-    }
+    sayGoodbye();
     await transport.close();
   }
 

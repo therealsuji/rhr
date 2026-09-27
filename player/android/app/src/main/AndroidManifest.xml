@@ -79,7 +79,14 @@
         <service
             android:name=".RhrSessionService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <!-- Not dataSync: Android 15 stops dataSync services after 6 hours,
+                 and a tester's session can run all day. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Developer tooling: carries a debug session between
+                    the developer's computer and an app on this phone" />
+        </service>
         <!-- Holds the shake-to-open bubble while the tester is inside their
              own app; foreground so backgrounding the player can't kill it
              mid-session. -->
