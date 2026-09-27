@@ -11,20 +11,25 @@ rhr --help          # available commands and options
 ```
 
 If the project can run inside the player, their Flutter runtimes must match.
-Native plugin or permission differences and custom Android sources select the
-separate-app route. That route uses the project's own Flutter runtime. The
+Native plugin or permission differences, custom Android sources, and plugins
+from a local path or pub workspace select the separate-app route. That route uses the project's own Flutter runtime. The
 player's Flutter version does not need to match it.
 
-Complete any setup requested on the phone. The CLI waits for Wireless debugging,
-pairing, session-control permission, and installation permission before building
-the separate app. Android can still require confirmation for each installation.
-The CLI verifies the installed APK, opens the target app, and attaches Flutter.
-Use `r` to reload, `R` to restart, and `q` to quit.
+The separate app is built with a small RHR beacon that reports its debug
+address to the player, so it needs no Wireless debugging, USB, or computer on
+the phone's network. Complete any setup requested on the phone: permission to
+show the session controls over other apps, and permission to install apps.
+Android can still require confirmation for each installation. The CLI verifies
+the installed APK, opens the target app, and attaches Flutter. Use `r` to
+reload, `R` to restart, and `q` to quit.
 
-A cached APK is reusable only while its project inputs and bytes still match.
-Run `rhr` again after native changes or a Flutter SDK change. A recent session
-code is retained in `.dart_tool/rhr/session.json`, so retries can reconnect
-without scanning again. `--code` overrides that saved code.
+A cached APK is reusable only while its native inputs and bytes still match.
+Dart-only edits reuse it and reach the phone by hot restart. A native change
+during a session (a new plugin, an edited Android source) ends the session with
+a message and prepares the right build again, moving a hosted project to its own
+app when it needs one. A recent session code is retained in
+`.dart_tool/rhr/session.json`, so retries can reconnect without scanning again.
+`--code` overrides that saved code.
 
 Use `--mode app` to require a separate app. `--mode player` rejects detected
 native differences. Automatic native detection currently covers plugin versions,
@@ -35,8 +40,8 @@ The build currently uses `lib/main.dart`, the default debug variant, and arm64.
 An existing app with a different signing key cannot be updated in place.
 RHR reports the conflict without uninstalling the app or erasing its data.
 GitHub player builds and local runtime updates need the same signing identity.
-Older players without the preparation protocol need a compatible player update
-before using this flow. `rhr attach` remains available for an existing session.
+The CLI and the player are released together; update both to the same version.
+`rhr attach` remains available for a project the player can host.
 
 ## Install the beta
 
