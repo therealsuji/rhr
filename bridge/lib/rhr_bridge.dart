@@ -271,9 +271,12 @@ class RhrBridge {
               failDirect('direct WebRTC receive failed: $error');
             },
           );
+          // Not disconnected: one unanswered consent check reports it, and
+          // it recovers on its own (see direct_session_transport.dart).
+          // Tearing down on it aborted handshakes a busy machine was about
+          // to finish. ICE reports failed after six misses in a row.
           direct.connectionStates.listen((state) {
             if (state == PeerConnectionState.failed ||
-                state == PeerConnectionState.disconnected ||
                 state == PeerConnectionState.closed) {
               failDirect('direct WebRTC connection ${state.name}');
             }

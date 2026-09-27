@@ -241,9 +241,11 @@ class MediaTransport {
       // Start DTLS handshake (don't require remote fingerprints for backwards compat)
       await _dtlsTransport.start(requireRemoteFingerprints: false);
     } catch (e) {
+      // Reported through the state stream, not thrown: the only caller is an
+      // ICE state listener nothing awaits, so a rethrow escapes to the zone
+      // and kills the process.
       _logMedia.fine('[$debugLabel] DTLS handshake failed: $e');
-      _setState(TransportState.failed);
-      rethrow;
+      if (_state != TransportState.closed) _setState(TransportState.failed);
     }
   }
 
@@ -637,9 +639,11 @@ class IntegratedTransport {
       // Start DTLS handshake (don't require remote fingerprints for backwards compat)
       await _dtlsTransport.start(requireRemoteFingerprints: false);
     } catch (e) {
+      // Reported through the state stream, not thrown: the only caller is an
+      // ICE state listener nothing awaits, so a rethrow escapes to the zone
+      // and kills the process.
       _log.fine('[$debugLabel] DTLS handshake failed: $e');
-      _setState(TransportState.failed);
-      rethrow;
+      if (_state != TransportState.closed) _setState(TransportState.failed);
     }
   }
 

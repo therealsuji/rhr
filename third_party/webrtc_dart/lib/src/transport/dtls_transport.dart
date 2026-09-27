@@ -183,6 +183,9 @@ class RtcDtlsTransport {
   /// Subscription to DTLS state changes
   StreamSubscription<DtlsSocketState>? _dtlsStateSubscription;
 
+  /// The handshake in flight, if any; [stop] ends it.
+  Completer<void>? _handshake;
+
   /// Debug label
   String debugLabel = '';
 
@@ -331,7 +334,7 @@ class RtcDtlsTransport {
 
   /// Perform DTLS handshake with timeout and improved error handling
   Future<void> _performHandshake() async {
-    final completer = Completer<void>();
+    final completer = _handshake = Completer<void>();
     String? failureReason;
 
     _dtlsStateSubscription = dtls!.onStateChange.listen((dtlsState) {
@@ -553,6 +556,15 @@ class RtcDtlsTransport {
       return; // Already closed, nothing to do
     }
     _setState(RtcDtlsState.closed);
+
+    // A handshake still in flight ends now. Its state listener is about to
+    // go, so otherwise it would only end at its timeout, long after close.
+    final handshake = _handshake;
+    if (handshake != null && !handshake.isCompleted) {
+      handshake.completeError(
+        DtlsHandshakeException('DTLS transport closed during handshake'),
+      );
+    }
 
     await _dtlsStateSubscription?.cancel();
     _dtlsStateSubscription = null;

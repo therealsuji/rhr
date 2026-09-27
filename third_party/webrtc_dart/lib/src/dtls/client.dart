@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:webrtc_dart/src/common/logging.dart';
@@ -94,9 +95,20 @@ class DtlsClient extends DtlsSocket {
       // Start handshake via coordinator
       await _handshakeCoordinator.start();
 
-      // Send the initial ClientHello flight (non-blocking)
-      // Retransmission is handled at the transport layer with timeout
-      await _sendPendingFlights();
+      // Send the ClientHello, and resend it until the server answers. It can
+      // reach the peer before the peer's DTLS is listening (its ICE finishes
+      // a moment later) and be dropped; sent once, the handshake then stalls
+      // until its timeout. The server answers a resent ClientHello with its
+      // last flight (server_handshake.dart). Not awaited: the retries must
+      // not block connect(), and the answer arrives on the receive path.
+      unawaited(
+        _sendPendingFlights(waitForResponse: true).catchError((Object error) {
+          _log.warning('ClientHello unanswered: $error');
+          if (state == DtlsSocketState.connecting) {
+            setState(DtlsSocketState.failed);
+          }
+        }),
+      );
     } catch (e) {
       setState(DtlsSocketState.failed);
       rethrow;
