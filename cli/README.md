@@ -31,6 +31,19 @@ app when it needs one. A recent session code is retained in
 `.dart_tool/rhr/session.json`, so retries can reconnect without scanning again.
 `--code` overrides that saved code.
 
+Two explicit commands install a build and end:
+
+```bash
+rhr persist   # install a debug build of the current code, so the app keeps it
+              # after it is killed and reopened (separate-app projects only)
+rhr release   # build a release APK, with nothing of RHR in it, and install it
+```
+
+Both ask a running `rhr run` for the project to do the work, since it holds the
+phone, or connect to the phone themselves when nothing is running. A release
+build with the same package and signing key replaces the debug app; the next
+`rhr run` puts the debug app back.
+
 Use `--mode app` to require a separate app. `--mode player` rejects detected
 native differences. Automatic native detection currently covers plugin versions,
 permissions, and custom native sources. It does not establish compatibility for

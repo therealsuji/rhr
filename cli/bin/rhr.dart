@@ -45,6 +45,7 @@ import 'package:rhr_cli/usb_asset_transport.dart';
 import 'package:rhr_cli/version.dart';
 import 'package:rhr_cli/run_preparation.dart';
 import 'package:rhr_cli/running_project.dart';
+import 'package:rhr_cli/session_control.dart';
 import 'package:rhr_cli/cli_update.dart';
 import 'package:webrtc_dart/webrtc_dart.dart' show WebRtcLogging;
 
@@ -55,6 +56,9 @@ Usage:
   rhr setup [--relay <url>]   register the "rhr" Flutter device (run once)
   rhr run [options]           pair, check, prepare, and run this project
   rhr attach [options]        connect to a session and hot reload into it
+  rhr persist [options]       install a debug build of the current code, so
+                              the app keeps it after it is killed and reopened
+  rhr release [options]       build a release APK (no RHR inside) and install it
   rhr doctor                  check the local Flutter/RHR setup
   rhr login                   sign in so this machine can use account devices
   rhr logout                  forget the signed-in account
@@ -83,6 +87,12 @@ run options:
   --no-direct           use the relay for tunnel payloads (legacy/private mode;
                         direct WebRTC is strict and enabled by default)
   --resync              ignore the local asset manifest and re-push all assets
+
+persist and release options: --project, --relay, --code, --device, --no-direct.
+Both ask a running `rhr run` for the project when there is one; otherwise they
+connect to the phone themselves. persist works for projects that run as their
+own app. A release build replaces the debug app if it has the same package and
+signing key.
 
 The player must already be installed. Flutter's normal terminal commands work:
   r to hot reload · R to hot restart · q to quit
@@ -277,8 +287,68 @@ Future<void> main(List<String> args) async {
   // a list of whatever else is installed, which on a Linux box is the
   // desktop — is a bad trade for a call that is free when it is already
   // there.
-  if (args[0] == 'run' || args[0] == 'attach') {
+  if (const {'run', 'attach', 'persist', 'release'}.contains(args[0])) {
     await ensureRhrDevice();
+  }
+
+  // Explicit builds for the phone: the current code as a debug app that keeps
+  // it (persist), or a release build with nothing of RHR in it (release).
+  if (args[0] == 'persist' || args[0] == 'release') {
+    final command = args[0];
+    String project = '.';
+    String? relay;
+    String? code;
+    String? device;
+    var direct = true;
+    for (var i = 1; i < args.length; i++) {
+      if (const {
+            '--project',
+            '--relay',
+            '--code',
+            '--device',
+          }.contains(args[i]) &&
+          (i + 1 == args.length || args[i + 1].startsWith('--'))) {
+        stderr.writeln(
+          'rhr $command: ${args[i]} requires a value. Run rhr --help.',
+        );
+        exit(64);
+      }
+      switch (args[i]) {
+        case '--project':
+          project = args[++i];
+        case '--relay':
+          relay = args[++i];
+        case '--code':
+          code = args[++i];
+        case '--device':
+          device = args[++i];
+        case '--no-direct':
+          direct = false;
+        default:
+          stderr.writeln('unknown arg: ${args[i]}');
+          exit(64);
+      }
+    }
+    // A running session holds the phone, and a second CLI would be refused.
+    final answer = await sendSessionCommand(project, command);
+    if (answer != null) {
+      stderr.writeln('[rhr] ${answer.message}');
+      exit(answer.ok ? 0 : 78);
+    }
+    code =
+        await _resolveDevice(device: device, code: code, project: project) ??
+        code;
+    exit(
+      await _runAttachProductFlow(
+        project: project,
+        relay: relay,
+        code: code,
+        preferDirect: direct,
+        // Asking for the build is the approval.
+        updatePolicy: PlayerUpdatePolicy.always,
+        task: command == 'persist' ? RunTask.persist : RunTask.release,
+      ),
+    );
   }
 
   // sync assets, and automatically launch the guest app.
@@ -684,6 +754,7 @@ Future<int?> _runSession({
   bool preferDirect = false,
   PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.never,
   bool prepareRun = false,
+  RunTask task = RunTask.session,
   RunRoute? routeOverride,
   RunProgress? runProgress,
   void Function()? onReady,
@@ -741,8 +812,10 @@ Future<int?> _runSession({
   // they leave the socket. A short flush beats a 45-second lockout, and the
   // relay's own grace still covers a CLI that dies harder than this.
   var leaving = false;
+  SessionControl? sessionControl;
   Future<Never> leave(int exitCode) async {
     leaving = true;
+    unawaited(sessionControl?.close());
     relayTransport.release();
     sayGoodbye();
     await Future<void>.delayed(const Duration(milliseconds: 250));
@@ -821,6 +894,7 @@ Future<int?> _runSession({
           profile: compatibility,
           policy: updatePolicy,
           routeOverride: routeOverride,
+          task: task,
           progress: runProgress,
         )
       : null;
@@ -829,6 +903,12 @@ Future<int?> _runSession({
     preparing = preparation
         .run()
         .then((ready) async {
+          // A persist or release command finished: nothing to attach.
+          if (ready == null) {
+            fatalExit = 0;
+            if (!wsDied.isCompleted) wsDied.complete();
+            return;
+          }
           effectiveSyncAssets = ready.route == RunRoute.player;
           staleDart = ready.staleDart;
           sessionRoute = ready.route;
@@ -1467,11 +1547,102 @@ Future<int?> _runSession({
   final local = vm.replace(host: '127.0.0.1', port: server.port);
   stderr.writeln('[rhr] tunneled VM service: $local');
 
+  // `rhr persist` and `rhr release` from another terminal, for the phone this
+  // session holds (see session_control.dart). A release installed over this
+  // session's own app kills it, so the session waits for [releaseEnding]
+  // before it tears down, and then ends.
+  Completer<void>? releaseEnding;
+  var controlBusy = false;
+  Future<SessionAnswer> control(String command) async {
+    final prepared = preparation!;
+    if (controlBusy) {
+      return (
+        ok: false,
+        message: 'This session is already persisting or installing a build.',
+        then: null,
+      );
+    }
+    controlBusy = true;
+    try {
+      switch (command) {
+        case 'persist':
+          if (sessionRoute != RunRoute.app) {
+            return (
+              ok: false,
+              message:
+                  'This project runs inside the player, and persist only '
+                  'works for projects that run as their own app.',
+              then: null,
+            );
+          }
+          stderr.writeln(
+            '[rhr] Persisting: rebuilding your app from the current code and '
+            'reinstalling it. The session reattaches afterwards.',
+          );
+          final persisted = prepared.progress.requestPersist();
+          fatalExit = _reprepare;
+          if (!wsDied.isCompleted) wsDied.complete();
+          await persisted;
+          return (
+            ok: true,
+            message: 'The app on the phone now starts with the current code.',
+            then: null,
+          );
+        case 'release':
+          stderr.writeln('[rhr] Building and installing a release build.');
+          final replacesThisApp = sessionRoute == RunRoute.app;
+          final ending = replacesThisApp ? Completer<void>() : null;
+          releaseEnding = ending;
+          try {
+            await prepared.release();
+          } catch (_) {
+            releaseEnding = null;
+            ending?.complete();
+            rethrow;
+          }
+          if (ending == null) {
+            return (
+              ok: true,
+              message: 'The release build is installed.',
+              then: null,
+            );
+          }
+          return (
+            ok: true,
+            message:
+                'The release build is installed. It replaced the debug app, '
+                'so the rhr session has ended.',
+            then: () {
+              stderr.writeln(
+                '[rhr] The release build replaced the debug app, so this '
+                'session has ended. Run rhr again to go back to the debug app.',
+              );
+              fatalExit = 0;
+              ending.complete();
+              if (!wsDied.isCompleted) wsDied.complete();
+            },
+          );
+        default:
+          return (ok: false, message: 'Unknown command: $command', then: null);
+      }
+    } on Object catch (error) {
+      stderr.writeln('[rhr] $command failed: $error');
+      return (ok: false, message: '$error', then: null);
+    } finally {
+      controlBusy = false;
+    }
+  }
+
+  sessionControl = preparation == null
+      ? null
+      : await SessionControl.serve(project, control);
+
   Future<void> cleanup() async {
     reloadFeedbackTimer?.cancel();
     preparation?.close();
     keepalive.cancel();
     if (!sessionOver.isCompleted) sessionOver.complete();
+    await sessionControl?.close();
     await server.close();
     for (final s in accepted.toList()) {
       s.destroy();
@@ -1703,6 +1874,9 @@ Future<int?> _runSession({
     flutterExit.then((c) => c),
     wsDied.future.then((_) => const _RelayEnded()),
   ]);
+  // Installing a release over this session's app is what just ended Flutter;
+  // finish that install before anything is torn down.
+  await releaseEnding?.future;
   sessionActive = false;
   if (ended is _RelayEnded) {
     proc.kill();
@@ -2022,6 +2196,7 @@ Future<int> _runAttachProductFlow({
   bool resync = false,
   PlayerUpdatePolicy updatePolicy = PlayerUpdatePolicy.prompt,
   RunRoute? routeOverride,
+  RunTask task = RunTask.session,
 }) async {
   if (!File('$project/pubspec.yaml').existsSync()) {
     stderr.writeln(
@@ -2146,6 +2321,7 @@ Future<int> _runAttachProductFlow({
           preferDirect: preferDirect,
           updatePolicy: updatePolicy,
           prepareRun: true,
+          task: task,
           runProgress: runProgress,
           routeOverride: routeOverride,
           onReady: reconnectBackoff.markReady,

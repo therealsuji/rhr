@@ -1,9 +1,13 @@
 import 'dart:io';
 
 final class ApkIdentity {
-  const ApkIdentity(this.package, this.certificate);
+  const ApkIdentity(this.package, this.certificate, {required this.debuggable});
   final String package;
   final String certificate;
+
+  /// Debug builds are what RHR attaches to; `rhr release` sends the other
+  /// kind on purpose.
+  final bool debuggable;
 }
 
 Future<ApkIdentity> readApkIdentity(File apk) async {
@@ -47,12 +51,11 @@ Future<ApkIdentity> readApkIdentity(File apk) async {
           'Could not verify the built APK package and signing identity with Android build tools.',
         );
       }
-      if (!'${manifest.stdout}'.contains('application-debuggable')) {
-        throw StateError(
-          'The built APK is not debuggable. RHR requires a debug build.',
-        );
-      }
-      return ApkIdentity(package, certificate);
+      return ApkIdentity(
+        package,
+        certificate,
+        debuggable: '${manifest.stdout}'.contains('application-debuggable'),
+      );
     }
   }
   throw StateError(

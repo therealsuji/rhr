@@ -151,4 +151,31 @@ void main() {
       preparation.close();
     },
   );
+
+  test(
+    'persist refuses a project the player hosts, before touching the phone',
+    () async {
+      final phone = Phone();
+      final preparation = RunPreparation(
+        transport: phone,
+        project: Directory.systemTemp.path,
+        profile: project(),
+        policy: PlayerUpdatePolicy.always,
+        task: RunTask.persist,
+      );
+      // Nothing native the player lacks: the player route.
+      preparation.handleMessage({'t': 'info', 'compatibility': player});
+      await expectLater(
+        preparation.run(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('runs inside the player'),
+          ),
+        ),
+      );
+      expect(phone.messages.where((m) => m['t'] == 'run_request'), isEmpty);
+    },
+  );
 }

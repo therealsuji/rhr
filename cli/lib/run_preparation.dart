@@ -14,6 +14,19 @@ import 'terminal_io.dart';
 
 enum RunRoute { player, app }
 
+/// What a connection to the phone is for: a dev session, or one of the
+/// explicit commands that install a build and end.
+enum RunTask {
+  session,
+
+  /// `rhr persist`: install a debug build of the current code, so the app
+  /// still runs it after it is killed and reopened.
+  persist,
+
+  /// `rhr release`: install a release build, with nothing of RHR in it.
+  release,
+}
+
 RunRoute selectRunRoute(
   ProjectCompatibilityProfile project,
   Map<String, dynamic> player,
@@ -41,6 +54,22 @@ final class PreparedRun {
 final class RunProgress {
   final approvedPlans = <String>{};
   bool playerUpdateSubmitted = false;
+
+  Completer<void>? _persist;
+
+  /// `rhr persist` sent to a running session: its next preparation installs
+  /// a debug build of the current code, then attaches as usual. Completes
+  /// once that build is installed.
+  Future<void> requestPersist() => (_persist ??= Completer<void>()).future;
+
+  bool get persistRequested => _persist != null;
+
+  void _settlePersist([Object? error]) {
+    final persist = _persist;
+    _persist = null;
+    if (persist == null) return;
+    error == null ? persist.complete() : persist.completeError(error);
+  }
 }
 
 /// Owns preparation on the same connection that later carries the VM tunnel.
@@ -51,6 +80,7 @@ final class RunPreparation {
     required this.profile,
     required this.policy,
     this.routeOverride,
+    this.task = RunTask.session,
     RunProgress? progress,
   }) : progress = progress ?? RunProgress();
 
@@ -59,6 +89,7 @@ final class RunPreparation {
   final ProjectCompatibilityProfile profile;
   final PlayerUpdatePolicy policy;
   final RunRoute? routeOverride;
+  final RunTask task;
   final RunProgress progress;
   String _deviceId = '';
   final _firstInfo = Completer<Map<String, dynamic>>();
@@ -175,8 +206,19 @@ final class RunPreparation {
     progress.approvedPlans.add(approval);
   }
 
-  Future<void> _deliver(File apk, {required bool player}) async {
+  Future<void> _deliver(
+    File apk, {
+    required bool player,
+    bool debuggable = true,
+  }) async {
     final identity = await readApkIdentity(apk);
+    if (identity.debuggable != debuggable) {
+      throw StateError(
+        debuggable
+            ? 'The built APK is not debuggable. RHR requires a debug build.'
+            : 'The release build is debuggable. Check the release build type.',
+      );
+    }
     final installed = await request('inspect', package: identity.package);
     if (installed['installed'] == true &&
         !(installed['certificates'] is List &&
@@ -231,9 +273,10 @@ final class RunPreparation {
       }
       final expected = (await sha256.bind(apk.openRead()).first).toString();
       final actual = await request('inspect', package: identity.package);
-      if (actual['apkSha256'] != expected || actual['debuggable'] != true) {
+      if (actual['apkSha256'] != expected ||
+          actual['debuggable'] != debuggable) {
         throw StateError(
-          'Android reported installation, but the expected debug APK is not installed.',
+          'Android reported installation, but the expected APK is not installed.',
         );
       }
     } finally {
@@ -242,17 +285,40 @@ final class RunPreparation {
     }
   }
 
-  Future<PreparedRun> run() async {
+  /// Prepares the phone and returns the VM to attach to, or null once a
+  /// [task] other than a session has finished.
+  Future<PreparedRun?> run() async {
+    try {
+      return await _prepare();
+    } catch (error) {
+      progress._settlePersist(error);
+      rethrow;
+    }
+  }
+
+  Future<PreparedRun?> _prepare() async {
     final info = await _connected(_firstInfo.future);
     _deviceId = '${info['deviceId']}';
     phase(
       'checking',
       'Phone connected: ${info['deviceName'] ?? 'Android'}. Checking the project.',
     );
+    if (task == RunTask.release) {
+      await release();
+      return null;
+    }
     final raw = info['compatibility'];
     if (raw is! Map<String, dynamic>)
       throw const FormatException('The player did not report its runtime.');
     final route = routeOverride ?? selectRunRoute(profile, raw);
+    final persist = task == RunTask.persist || progress.persistRequested;
+    if (persist && route == RunRoute.player) {
+      throw StateError(
+        'This project runs inside the player, and persist only works for '
+        'projects that run as their own app. It is not supported yet for '
+        'player-hosted projects.',
+      );
+    }
     if (routeOverride == RunRoute.player &&
         selectRunRoute(profile, raw) == RunRoute.app) {
       throw StateError(
@@ -285,17 +351,23 @@ final class RunPreparation {
         'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
       ].join('|');
       final cached = await cachedProjectApk(project, inputs);
-      var apk = cached?.apk;
-      var apkDart = cached?.dart;
+      // A plain run reuses an APK with older Dart and hot restarts it;
+      // persisting is asking for an APK that holds the current Dart.
+      final stale = persist && cached?.dart != projectInputs.dart;
+      var apk = stale ? null : cached?.apk;
+      var apkDart = stale ? null : cached?.dart;
 
       // Decide what needs doing before asking anyone for anything: the
       // developer approves real work, and the tester is never walked through
       // setup for a build the developer then declines.
+      // Asking to persist is the approval.
       var current = false;
       if (apk == null) {
-        await _approve(
-          "Build this project's debug app and install it on the phone.",
-        );
+        if (!persist) {
+          await _approve(
+            "Build this project's debug app and install it on the phone.",
+          );
+        }
       } else {
         final package = (await readApkIdentity(apk)).package;
         final installed = await request('inspect', package: package);
@@ -303,7 +375,7 @@ final class RunPreparation {
             installed['debuggable'] == true &&
             installed['apkSha256'] ==
                 (await sha256.bind(apk.openRead()).first).toString();
-        if (!current) {
+        if (!current && !persist) {
           await _approve('Install the current debug build of $package.');
         }
       }
@@ -334,6 +406,14 @@ final class RunPreparation {
         phase('checking', 'The correct debug app is already installed.');
       } else {
         await _deliver(apk, player: false);
+      }
+      if (persist) {
+        progress._settlePersist();
+        phase(
+          'installed',
+          'The app on the phone now starts with the current code.',
+        );
+        if (task == RunTask.persist) return null;
       }
       phase('launching', 'Opening $package.');
       final launched = await request('launch', package: package);
@@ -394,6 +474,29 @@ final class RunPreparation {
         'Android bundle build failed:\n${build.stdout}\n${build.stderr}',
       );
     return PreparedRun(vm, store, route);
+  }
+
+  /// Builds the project's release APK, signed the way the project signs
+  /// releases, with no beacon and nothing of RHR in it, and installs it
+  /// through the player. Hot reload does not reach the result, by design.
+  Future<void> release() async {
+    phase('building', 'Building a release build of your app.');
+    final build = await Process.run(projectFlutterExecutable(project), [
+      'build',
+      'apk',
+      '--release',
+    ], workingDirectory: project);
+    if (build.exitCode != 0) {
+      throw StateError(
+        'Release build failed:\n${build.stdout}\n${build.stderr}',
+      );
+    }
+    await _deliver(
+      File('$project/build/app/outputs/flutter-apk/app-release.apk'),
+      player: false,
+      debuggable: false,
+    );
+    phase('installed', 'The release build is installed.');
   }
 }
 
