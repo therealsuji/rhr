@@ -223,6 +223,30 @@ abstract class IceConnection {
 }
 
 /// Basic ICE connection implementation
+/// The pair a connectivity check from [remoteHost]:[remotePort] proves:
+/// the one whose local candidate owns the socket the check arrived on
+/// ([ownsSocket]), preferring a host candidate over a server reflexive one
+/// sharing its socket. Null when no known pair fits.
+CandidatePair? pairProvenByCheck(
+  Iterable<CandidatePair> pairs,
+  String remoteHost,
+  int remotePort,
+  bool Function(RTCIceCandidate local) ownsSocket,
+) =>
+    (pairs
+            .where((p) =>
+                p.remoteCandidate.host == remoteHost &&
+                p.remoteCandidate.port == remotePort &&
+                ownsSocket(p.localCandidate))
+            .toList()
+          ..sort((a, b) => _baseFirst(a.localCandidate, b.localCandidate)))
+        .firstOrNull;
+
+/// A server reflexive candidate shares its host candidate's socket; the host
+/// candidate is the base the traffic actually uses.
+int _baseFirst(RTCIceCandidate a, RTCIceCandidate b) =>
+    (a.type == 'host' ? 0 : 1) - (b.type == 'host' ? 0 : 1);
+
 class IceConnectionImpl implements IceConnection {
   bool _iceControlling;
   String _localUsername;
@@ -564,8 +588,7 @@ class IceConnectionImpl implements IceConnection {
       return;
     }
 
-    final stunAddress = stunAddresses.first;
-    _log.fine(' STUN: Using address ${stunAddress.address}');
+    _log.fine(' STUN: Resolved ${stunAddresses.length} address(es)');
 
     // Create a copy to avoid concurrent modification
     final hostCandidates =
@@ -591,6 +614,16 @@ class IceConnectionImpl implements IceConnection {
         if (socket == null) {
           _log.fine(
               '[ICE] STUN: No socket for foundation ${hostCandidate.foundation}');
+          continue;
+        }
+        // The server's address must be the socket's family: an IPv4 socket
+        // cannot send to the IPv6 address a lookup may list first.
+        final stunAddress = stunAddresses
+            .where((a) => a.type == socket.address.type)
+            .firstOrNull;
+        if (stunAddress == null) {
+          _log.fine(
+              '[ICE] STUN: No ${socket.address.type.name} address for $stunHost');
           continue;
         }
 
@@ -1224,12 +1257,6 @@ class IceConnectionImpl implements IceConnection {
     // Always add FINGERPRINT for ICE (RFC 8445 requires it)
     response.addFingerprint();
 
-    // RFC 8445 Section 7.2.1.4: Triggered checks
-    // When receiving a STUN request, handle it as a triggered check regardless
-    // of ICE role. This ensures both sides see the pair as succeeded.
-    // Note: werift always calls checkIncoming regardless of role
-    _handleTriggeredCheck(address.address, port);
-
     // CRITICAL: Send response from the SAME socket that received the request.
     // This is required for NAT traversal - the response must come from the same
     // local IP:port that received the request.
@@ -1259,6 +1286,15 @@ class IceConnectionImpl implements IceConnection {
           'local port=${sendSocket.port}, hex=$hexPreview');
       if (_trySendDatagram(sendSocket, responseBytes, address, port)) {
         _log.fine(' Sent STUN response to ${address.address}:$port');
+        // RFC 8445 Section 7.3.1.4: a triggered check, handled regardless of
+        // role so both sides see the pair succeed (werift's checkIncoming).
+        // Only once the response is out: a socket that could not send it,
+        // such as a ULA one, has not proven the pair works.
+        _handleTriggeredCheck(
+          address.address,
+          port,
+          receivingSocket: receivingSocket,
+        );
       } else {
         _log.fine(' Failed to send STUN response to ${address.address}:$port');
       }
@@ -1427,81 +1463,77 @@ class IceConnectionImpl implements IceConnection {
     _earlyChecksDone = true;
   }
 
-  /// Handle a triggered check - when controlled agent receives a check from controlling
-  /// This allows the controlled agent to succeed connectivity based on the controlling agent's check
-  void _handleTriggeredCheck(String remoteHost, int remotePort) {
-    // Find the candidate pair matching this remote address
-    for (final pair in _checkList) {
-      if (pair.remoteCandidate.host == remoteHost &&
-          pair.remoteCandidate.port == remotePort) {
-        // Mark this pair as succeeded (we received a valid check and responded)
-        if (pair.state != CandidatePairState.succeeded) {
-          _log.fine(' Triggered check succeeded for $remoteHost:$remotePort');
-          pair.updateState(CandidatePairState.succeeded);
+  /// Handles a connectivity check the remote agent sent us (RFC 8445
+  /// Section 7.3.1.4): the pair it proves works is the one whose local
+  /// candidate owns [receivingSocket], the socket the request arrived on and
+  /// our response left from. Matching on the remote address alone picked
+  /// whichever local candidate came first, which could be a socket that
+  /// cannot send to that remote at all.
+  ///
+  /// The first proven pair is nominated, whatever the role. RFC 8445
+  /// Section 7.3.1.5 has the controlled agent wait for USE-CANDIDATE, but
+  /// this agent starts DTLS as soon as ICE connects and needs a pair to send
+  /// on, and its own controlling side does not put USE-CANDIDATE on every
+  /// check: waiting failed one session in three under load.
+  ///
+  /// [receivingSocket] is null for TCP/TURN, where the remote address is all
+  /// there is to match.
+  void _handleTriggeredCheck(
+    String remoteHost,
+    int remotePort, {
+    RawDatagramSocket? receivingSocket,
+  }) {
+    bool ownsSocket(RTCIceCandidate local) =>
+        receivingSocket == null ||
+        _sockets[local.foundation] == receivingSocket;
 
-          // First successful pair transitions to connected
-          if (_state == IceState.checking) {
-            _setState(IceState.connected);
-          }
+    var pair =
+        pairProvenByCheck(_checkList, remoteHost, remotePort, ownsSocket);
 
-          // Nominate this pair
-          if (_nominated == null) {
-            _nominated = pair;
-            _setState(IceState.completed);
-          }
-        }
+    if (pair == null) {
+      // No matching pair: the remote is a peer reflexive candidate (RFC 8445
+      // Section 7.3.1.3), such as a real address behind an mDNS hostname.
+      final local = (_localCandidates.where(ownsSocket).toList()
+            ..sort(_baseFirst))
+          .firstOrNull;
+      if (local == null) {
+        _log.fine(
+            '[ICE] No local candidate owns the socket a check from $remoteHost:$remotePort arrived on');
         return;
       }
-    }
-
-    // No matching pair found - create peer reflexive candidate (RFC 5245 Section 7.2.1.3)
-    // This handles the case where remote candidate was added with mDNS hostname (.local)
-    // but binding request arrives from actual IP address
-    _log.fine(
-        '[ICE] Creating peer reflexive candidate for $remoteHost:$remotePort');
-
-    // Create peer reflexive remote candidate
-    final prflxCandidate = RTCIceCandidate(
-      foundation: 'prflx${_remoteCandidates.length}',
-      component: 1,
-      transport: 'UDP',
-      priority: 2130706431, // High priority for prflx
-      host: remoteHost,
-      port: remotePort,
-      type: 'prflx',
-    );
-
-    // Add to remote candidates
-    _remoteCandidates.add(prflxCandidate);
-
-    // Create pairs with all local candidates
-    for (final localCandidate in _localCandidates) {
-      final pairId =
-          '${localCandidate.foundation}-${prflxCandidate.foundation}';
-      final pair = CandidatePair(
-        id: pairId,
-        localCandidate: localCandidate,
+      _log.fine(
+          '[ICE] Creating peer reflexive candidate for $remoteHost:$remotePort');
+      final prflxCandidate = RTCIceCandidate(
+        foundation: 'prflx${_remoteCandidates.length}',
+        component: 1,
+        transport: 'UDP',
+        priority: 2130706431, // High priority for prflx
+        host: remoteHost,
+        port: remotePort,
+        type: 'prflx',
+      );
+      _remoteCandidates.add(prflxCandidate);
+      pair = CandidatePair(
+        id: '${local.foundation}-${prflxCandidate.foundation}',
+        localCandidate: local,
         remoteCandidate: prflxCandidate,
         iceControlling: iceControlling,
       );
       _checkList.add(pair);
+    }
 
-      // Mark this new pair as succeeded immediately
+    if (pair.state != CandidatePairState.succeeded) {
       _log.fine(
-          '[ICE] Triggered check succeeded for prflx $remoteHost:$remotePort');
+          '[ICE] Triggered check succeeded for ${pair.localCandidate.host}:${pair.localCandidate.port} -> $remoteHost:$remotePort');
       pair.updateState(CandidatePairState.succeeded);
-
-      // First successful pair transitions to connected
       if (_state == IceState.checking) {
         _setState(IceState.connected);
       }
+    }
 
-      // Nominate this pair if none nominated yet
-      if (_nominated == null) {
-        _nominated = pair;
-        _setState(IceState.completed);
-      }
-      return; // Only need one pair
+    if (_nominated == null) {
+      _nominated = pair;
+      _setState(IceState.completed);
     }
   }
 
