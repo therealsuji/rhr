@@ -1099,10 +1099,15 @@ class IceConnectionImpl implements IceConnection {
       // Nominate the successful pair
       _nominated = successPair;
       _setState(IceState.completed);
-    } else {
+    } else if (_nominated == null) {
       // No successful pairs found
       _setState(IceState.failed);
     }
+    // Otherwise our own checks all failed but the remote's checks proved a
+    // pair (a triggered check), which is nominated and working. Behind a
+    // cellular carrier that drops unsolicited inbound packets this is the
+    // normal case, and failing here tore down a working connection.
+    // Consent checks decide whether that pair keeps working.
   }
 
   /// Set up socket listener for incoming data
