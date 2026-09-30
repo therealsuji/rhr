@@ -14,7 +14,7 @@
 // process already presents the service on 127.0.0.1, so Flutter connects
 // straight to it.
 //
-// Usage: dart run device_run.dart --relay <wss://...> --code <session>
+// Usage: rhr device-run --relay <wss://...> --code <session>
 //
 import 'dart:async';
 import 'dart:convert';
@@ -30,7 +30,8 @@ import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/terminal_qr.dart';
 
-Future<void> main(List<String> args) async {
+/// `rhr device-run`: the runDebug command of the `rhr` Flutter device.
+Future<void> runDeviceRun(List<String> args) async {
   String? relay;
   String? code;
   var preferDirect = true;

@@ -4,6 +4,9 @@ Run `rhr` from a Flutter project, then scan the QR or enter the printed code
 in RHR Player. The phone connects first. The CLI checks the phone and chooses
 whether to host the project in the player or run a separate debug app.
 
+Once per machine, from a terminal where `flutter` works, run `rhr setup`. It
+lets any shell and coding agent run `rhr` (see the main README).
+
 ```bash
 rhr                 # inspect, pair, and ask before required builds/installations
 rhr run --yes       # approve required builds/installations, including from an agent

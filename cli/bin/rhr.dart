@@ -36,6 +36,8 @@ import 'package:rhr_cli/player_builder.dart';
 import 'package:rhr_cli/player_update.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/account_auth.dart';
+import 'package:rhr_cli/agent_launcher.dart';
+import 'package:rhr_cli/device_run.dart';
 import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/restart_tracker.dart';
 import 'package:rhr_cli/reconnect_backoff.dart';
@@ -53,7 +55,8 @@ const _usage = '''
 rhr — Expo Go for Flutter, over the internet.
 
 Usage:
-  rhr setup [--relay <url>]   register the "rhr" Flutter device (run once)
+  rhr setup [--relay <url>]   once per machine: let any shell and agent run rhr,
+                              and register the "rhr" Flutter device
   rhr run [options]           pair, check, prepare, and run this project
   rhr attach [options]        connect to a session and hot reload into it
   rhr persist [options]       install a debug build of the current code, so
@@ -215,7 +218,26 @@ Future<void> main(List<String> args) async {
     for (var i = 1; i < args.length; i++) {
       if (args[i] == '--relay') relay = args[++i];
     }
+    // SSH commands and agent tools read no shell config, so without this
+    // they find neither rhr nor the dart it runs on. First, so the device
+    // registered below runs rhr through it.
+    final launcher = await installLauncher();
+    stderr.writeln('[rhr] ${launcher.message}');
     await _setup(relay);
+    if (!launcher.ok) {
+      stderr.writeln(
+        '[rhr] Setup is done except one step: agents and SSH commands cannot '
+        'run rhr until $launcherPath is written (see above).',
+      );
+      exit(1);
+    }
+    if (!await rhrOnBarePath()) {
+      stderr.writeln(
+        '[rhr] rhr still does not run from a bare shell; check $launcherPath.',
+      );
+      exit(1);
+    }
+    stderr.writeln('[rhr] ✅ setup complete. Any shell and agent can run rhr.');
     exit(0);
   }
 
@@ -223,7 +245,7 @@ Future<void> main(List<String> args) async {
   // The custom device's runDebug command — delegate to the standalone helper so
   // there's a single implementation of the tunnel+QR handshake.
   if (args[0] == 'device-run') {
-    await _deviceRun(args.sublist(1));
+    await runDeviceRun(args.sublist(1));
     exit(0);
   }
 
@@ -289,6 +311,12 @@ Future<void> main(List<String> args) async {
   // there.
   if (const {'run', 'attach', 'persist', 'release'}.contains(args[0])) {
     await ensureRhrDevice();
+    if (!Platform.isWindows && !File(launcherPath).existsSync()) {
+      stderr.writeln(
+        '[rhr] Agents and SSH commands cannot find rhr on this machine yet. '
+        'Run `rhr setup` once to fix that.',
+      );
+    }
   }
 
   // Explicit builds for the phone: the current code as a debug app that keeps
@@ -614,6 +642,18 @@ Future<int> _doctor() async {
   stdout.writeln('[OK] rhr $rhrVersion');
 
   var healthy = true;
+  // What an SSH command or an agent's tool shell sees: the system PATH and
+  // no shell config.
+  if (await rhrOnBarePath()) {
+    stdout.writeln('[OK] rhr runs from a bare shell (agents, SSH commands)');
+  } else {
+    healthy = false;
+    stdout.writeln(
+      '[FAIL] rhr does not run from a bare shell, so agents and SSH commands '
+      'cannot use it',
+    );
+    stdout.writeln('       run `rhr setup` once on this machine');
+  }
   try {
     final flutter = await Process.run('flutter', ['--version', '--machine']);
     if (flutter.exitCode != 0) {
@@ -2173,18 +2213,6 @@ Future<void> _syncAssetsAfterAttach(
   );
 }
 
-/// The custom device's runDebug command. Delegates to device_run.dart (the
-/// single implementation of the tunnel + QR handshake), passing args through.
-Future<void> _deviceRun(List<String> args) async {
-  final here = File.fromUri(Platform.script).parent.path;
-  final proc = await Process.start(Platform.resolvedExecutable, [
-    'run',
-    '$here/device_run.dart',
-    ...args,
-  ], mode: ProcessStartMode.inheritStdio);
-  exit(await proc.exitCode);
-}
-
 /// Builds for Android and then uses Flutter's supported attach path. Unlike a
 /// custom device run, this gives Dart native-assets hooks the correct Android
 /// target and allows Flutter to replace the generic player's root isolate.
@@ -2605,20 +2633,67 @@ Future<int> _login() async {
 /// `rhr setup`: enable Flutter custom devices and register the `rhr` device so
 /// the QA phone appears in the device picker. Idempotent — re-running refreshes
 /// the entry.
-/// Registers the `rhr` Flutter device when it is missing, so a session on a
-/// fresh machine works without a separate `rhr setup` step. Quiet when the
-/// device is already there, and never fatal: if registration fails, the
-/// attach below reports the real problem with Flutter's own message.
+/// The command the `rhr` Flutter device runs `device-run` with: a path that
+/// outlives updates. Registering a path into the running script's folder
+/// pinned whichever checkout or pub cache snapshot ran setup, and went stale
+/// when that moved.
+List<String> _stableRhrCommand() {
+  if (File(launcherPath).existsSync()) return [launcherPath];
+  final installed = installedRhr();
+  if (installed != null) return [installed];
+  // A source checkout: run it the way it runs now.
+  return [
+    Platform.resolvedExecutable,
+    'run',
+    File.fromUri(Platform.script).absolute.path,
+  ];
+}
+
+/// The registered `rhr` device's runDebug command, or null when there is no
+/// such device.
+Future<List<String>?> _registeredRunDebug() async {
+  final listed = await Process.run('flutter', ['custom-devices', 'list']);
+  final file = RegExp(
+    r'List of custom devices in "([^"]+)"',
+  ).firstMatch('${listed.stdout}')?.group(1);
+  if (file == null || !File(file).existsSync()) return null;
+  final devices =
+      (jsonDecode(File(file).readAsStringSync()) as Map)['custom-devices'];
+  for (final device in devices is List ? devices : const []) {
+    if (device is Map && device['id'] == 'rhr' && device['runDebug'] is List) {
+      return [for (final part in device['runDebug'] as List) '$part'];
+    }
+  }
+  return null;
+}
+
+/// Registers the `rhr` Flutter device when it is missing or runs a command
+/// that no longer exists, so a session works without a separate `rhr setup`
+/// step. Keeps a relay the developer registered. Quiet when the device is
+/// right, and never fatal: if registration fails, the attach below reports
+/// the real problem with Flutter's own message.
 Future<void> ensureRhrDevice() async {
+  List<String>? registered;
   try {
-    final listed = await Process.run('flutter', ['custom-devices', 'list']);
-    if ('${listed.stdout}'.contains('id: rhr')) return;
-  } on ProcessException {
+    registered = await _registeredRunDebug();
+  } on Object {
     return;
   }
-  stderr.writeln('[rhr] registering the "rhr" Flutter device (first run)…');
+  final expected = [..._stableRhrCommand(), 'device-run'];
+  if (registered != null &&
+      registered.length >= expected.length &&
+      Iterable.generate(
+        expected.length,
+      ).every((i) => registered![i] == expected[i])) {
+    return;
+  }
+  final relayAt = registered?.indexOf('--relay') ?? -1;
+  final relay = relayAt >= 0 && relayAt + 1 < registered!.length
+      ? registered[relayAt + 1]
+      : null;
+  stderr.writeln('[rhr] registering the "rhr" Flutter device…');
   try {
-    await _setup(null, quiet: true);
+    await _setup(relay, quiet: true);
   } on Object catch (error) {
     stderr.writeln('[rhr] could not register the device automatically: $error');
     stderr.writeln('[rhr] run `rhr setup` if the attach below fails.');
@@ -2643,13 +2718,6 @@ Future<void> _setup(String? relay, {bool quiet = false}) async {
     exit(1);
   }
 
-  // Register the helper directly. Pointing back through this main executable
-  // adds an unnecessary wrapper and can contend with an active `rhr run`.
-  final deviceRunScript = File.fromUri(
-    Platform.script.resolve('device_run.dart'),
-  ).absolute.path;
-  final dartExe = Platform.resolvedExecutable;
-
   // Flutter rejects android-* platforms here; null works (defaults to a linux
   // target internally but still drives our tunnel fine — verified).
   final device = {
@@ -2663,7 +2731,7 @@ Future<void> _setup(String? relay, {bool quiet = false}) async {
     'postBuild': ['true'],
     'install': ['true'],
     'uninstall': ['true'],
-    'runDebug': [dartExe, 'run', deviceRunScript, '--relay', relay],
+    'runDebug': [..._stableRhrCommand(), 'device-run', '--relay', relay],
     'forwardPort': null,
     'forwardPortSuccessRegex': null,
     'screenshot': null,
@@ -2696,7 +2764,7 @@ Future<void> _setup(String? relay, {bool quiet = false}) async {
   }
 
   stderr.writeln('''
-[rhr] ✅ setup complete.
+[rhr] The "rhr" Flutter device is registered.
 
   Relay: $relay
 

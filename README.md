@@ -62,12 +62,12 @@ The Dart relay in [`relay/`](relay/) is for dev and single-server self-hosting. 
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.9
+  --git-ref v0.1.0-beta.16
 
-rhr doctor
+~/.pub-cache/bin/rhr setup
 ```
 
-If `rhr` isn't found, add `$HOME/.pub-cache/bin` to `PATH` (`%LOCALAPPDATA%\Pub\Cache\bin` on Windows).
+Run `rhr setup` once, from a terminal where `flutter` works. It writes `/usr/local/bin/rhr` (asking for sudo), a small launcher that carries this terminal's Flutter, Java and Android SDK. After that `rhr` works from any shell, including SSH commands and coding agents, which read no shell config. `rhr doctor` checks all of it. On Windows, add `%LOCALAPPDATA%\Pub\Cache\bin` to `PATH` instead.
 
 **4. Run from your project.**
 
@@ -135,16 +135,17 @@ Fault-injected USB run recovered without falling back to wireless; independent i
 
 ## Installing the CLI
 
-Same one-liner as above — locked to the beta tag:
+Same as above, locked to the beta tag:
 
 ```bash
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.9
+  --git-ref v0.1.0-beta.16
+~/.pub-cache/bin/rhr setup
 ```
 
-One-time setup. After that, `rhr run` from any Flutter project. `rhr doctor` checks Flutter and whether the USB asset fast path is available.
+After that, `rhr run` from any Flutter project, by you or an agent. `rhr update` moves to a newer release; run `rhr setup` again only after moving Flutter, Java or the Android SDK. `rhr doctor` checks that rhr runs from a bare shell, Flutter, and whether the USB asset fast path is available.
 
 ## Repo layout
 
