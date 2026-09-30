@@ -1,1 +1,1 @@
-const rhrVersion = '0.1.0-beta.16';
+const rhrVersion = '0.1.0-beta.17';
