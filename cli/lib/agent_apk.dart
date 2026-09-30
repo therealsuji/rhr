@@ -58,10 +58,7 @@ Future<File> _publishedAgent() async {
   final base =
       'https://github.com/therealsuji/rhr/releases/download/v$rhrVersion';
   final sums = String.fromCharCodes(await _download('$base/SHA256SUMS'));
-  final expected = RegExp(
-    '^([0-9a-f]{64})\\s+\\*?${RegExp.escape(name)}\$',
-    multiLine: true,
-  ).firstMatch(sums)?.group(1);
+  final expected = checksumIn(sums, name);
   if (expected == null) {
     throw StateError('The v$rhrVersion release lists no checksum for $name.');
   }
@@ -76,6 +73,12 @@ Future<File> _publishedAgent() async {
   partial.renameSync(cached.path);
   return cached;
 }
+
+/// The SHA-256 [name] has in a `sha256sum` listing, or null if it has none.
+String? checksumIn(String sums, String name) => RegExp(
+  '^([0-9a-f]{64}) [ *]${RegExp.escape(name)}\$',
+  multiLine: true,
+).firstMatch(sums)?.group(1);
 
 Future<List<int>> _download(String url) async {
   final client = HttpClient();
