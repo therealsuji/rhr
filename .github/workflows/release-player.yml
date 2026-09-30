@@ -92,10 +92,24 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify --print-certs build/app/outputs/flutter-apk/app-debug.apk | tee "$RUNNER_TEMP/rhr-player-signature.txt"
           CERTIFICATES=$(sed -n 's/^.* certificate SHA-256 digest: //p' "$RUNNER_TEMP/rhr-player-signature.txt" | sort -u)
           test "$CERTIFICATES" = "$(cat tool/release-signing.sha256)"
+          # RHR Agent, the accessibility add-on the player installs for
+          # device control (rhr mcp). A separate APK because Play Protect
+          # blocks browser installs of any APK with an accessibility service.
+          # It only serves a player signed with its own key, so it is signed
+          # with the same one.
+          (cd android && ./gradlew :agent:assembleDebug \
+            -Prhr.agentVersion="$VERSION" -Prhr.agentVersionCode="$BUILD_NUMBER")
+          AGENT_BUILD=build/agent/outputs/apk/debug/agent-debug.apk
+          AGENT_CERTIFICATES=$("$BUILD_TOOLS/apksigner" verify --print-certs "$AGENT_BUILD" | sed -n 's/^.* certificate SHA-256 digest: //p' | sort -u)
+          test "$AGENT_CERTIFICATES" = "$(cat tool/release-signing.sha256)"
           mkdir -p release
           APK="rhr-player-${VERSION}-android-arm64.apk"
+          AGENT="rhr-agent-${VERSION}.apk"
           cp build/app/outputs/flutter-apk/app-debug.apk "release/$APK"
-          sha256sum "release/$APK" > release/SHA256SUMS
+          cp "$AGENT_BUILD" "release/$AGENT"
+          # Bare file names: the CLI checks the agent it downloads against
+          # this file (cli/lib/agent_apk.dart).
+          (cd release && sha256sum "$APK" "$AGENT" > SHA256SUMS)
           flutter --version --machine | jq 'del(.flutterRoot)' > release/FLUTTER_VERSION.json
           cat > release/RELEASE_MANIFEST.txt <<EOF
           rhr Player ${VERSION}

@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">RHR Agent</string>
+    <string name="service_description">Lets the developer\'s agent see the screen and tap on this phone while an RHR session is connected. It does nothing when no session is connected. Turn it off here at any time.</string>
+    <string name="status_off">RHR Agent is off.\n\nTurn it on to let the developer\'s agent see the screen and tap on this phone during an RHR session. It does nothing when no session is connected.\n\nIf the switch is greyed out, open App info first, tap ⋮, then Allow restricted settings.</string>
+    <string name="status_on">RHR Agent is on.\n\nDuring an RHR session, the developer\'s agent can see the screen and tap on this phone. The RHR player shows when it does.</string>
+    <string name="allow_restricted">Open App info</string>
+    <string name="turn_on">Turn on</string>
+    <string name="turn_off">Turn off</string>
+</resources>

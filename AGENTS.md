@@ -18,6 +18,7 @@ See `README.md` for the full concept and the platform analysis (iOS is the hard 
 | `relay/` | Local-dev relay, same protocol, runs on a port | Dart |
 | `bridge/` | Device-side package. Apps call `RhrBridge.start()` in `main()` under `kDebugMode`. Also exports `tunnel.dart` (shared mux protocol) | Dart |
 | `cli/` | `rhr attach` — connects to relay, exposes tunneled VM service on localhost, wraps `flutter attach --debug-url` | Dart |
+| `player/android/agent/` | RHR Agent — accessibility add-on APK for device control (`rhr mcp`); installed by the player, signed with the player's key | Kotlin |
 
 ## Commands
 
@@ -36,6 +37,11 @@ dart run bin/relay.dart 8123   # NOT 8787/8788
 dart run <this-repo>/cli/bin/rhr.dart attach \
   --relay wss://rhr-relay.<account>.workers.dev --code <session> \
   [--pid-file /tmp/rhr.pid] [--no-flutter]
+
+# Agent control of the phone in a running session (from the Flutter project dir)
+claude mcp add rhr -- rhr mcp     # tools: status, screenshot, describe, tap, …, install_agent
+# RHR Agent APK for a self-built player (in player/android):
+./gradlew :agent:assembleDebug
 
 # Desktop smoke test of the whole tunnel (no phone needed; in bridge/)
 dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8123 <code>
@@ -63,6 +69,10 @@ App integration: add `rhr_bridge` as a path dep, call `RhrBridge.start(relayUrl:
 - **Durable Object in-memory state dies on hibernation.** Anything that must survive (the cached device info) lives in `ctx.storage`.
 - **Android freezes backgrounded apps** — the bridge socket and its retry loop stop until the app is foregrounded again (reconnects within ~30 s of unfreeze). A tester actively using the app is unaffected.
 - **Hot restart into a guest app kills the player's Dart bridge.** The bridge is code in the lobby kernel; the restart swaps in the guest's kernel and re-runs `main()`, so the tunnel's device end dies the moment a guest boots (and can't come back — guests are zero-integration by design). The player's bridge must move to the native layer (Kotlin service in the player APK), which DevFS kernel swaps can't touch. The pure-Dart bridge remains correct for bridge-in-your-own-app use.
+- **Samsung freezes background processes between binder calls**, accessibility service or not. Cross-app requests must each be their own binder call (`AgentProvider.call("request")`); a socket served by the other app stalls within seconds.
+- **RHR Agent must subscribe to window content/windows-changed events** even though it ignores them: they invalidate its node cache, or a tree read after a tap shows the screen before it.
+- **Argent's Android helper suppresses every accessibility service** (it holds a UiAutomation instrumentation). RHR Agent shows "Enabled" but not bound while it runs; `adb shell am force-stop com.argent.androiddevtools` before testing device control.
+- Tunnel `OP_OPEN` payload: empty = VM service, `1` = device control (length-prefixed JSON), `2` = the app's native log. The CLI's target listeners require the `control.json` token as the first line.
 - `flutter run` reinstalls the whole APK every session start (Gradle output is never byte-identical); the attach flow is the product for a reason. `adb tcpip 5555` does not survive phone reboots.
 
 ## Conventions

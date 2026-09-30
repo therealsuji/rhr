@@ -21,7 +21,7 @@ object RunPreparation {
 		context: Context,
 		request: JSONObject,
 		reply: (JSONObject) -> Unit,
-		selectVm: (String) -> Unit,
+		selectVm: (vm: String, pkg: String) -> Unit,
 		isCurrent: () -> Boolean,
 	) {
 		Thread {
@@ -72,11 +72,11 @@ object RunPreparation {
 						check(info.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) { "The installed app is not a debug build." }
 						val vm = launchWithBeacon(context, pkg)
 						if (!isCurrent()) return@Thread
-						selectVm(vm)
+						selectVm(vm, pkg)
 						// The tester may close and reopen the app; its VM then
 						// listens on a new port, and the beacon reports it.
 						Beacons.onAnnounce = { reported, address ->
-							if (reported == pkg && isCurrent()) selectVm(address)
+							if (reported == pkg && isCurrent()) selectVm(address, pkg)
 						}
 						OverlayService.start(context)
 						response.put("vm", vm)

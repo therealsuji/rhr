@@ -9,12 +9,41 @@
 // The dev CLI opens channels (one per local TCP connection from the Flutter
 // tool); the device bridge answers each open with a TCP connection to the
 // local VM service.
+//
+// An open frame's payload names what the channel connects to: empty for the
+// VM service, or one target byte for the other device endpoints below.
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 const opOpen = 0;
 const opData = 1;
 const opClose = 2;
+
+/// Device control: the RHR Agent's accessibility service on the phone. The
+/// channel carries length-prefixed JSON messages (see device_control.dart).
+const targetDevice = 1;
+
+/// The connected app's native log stream, as plain logcat text lines.
+const targetLogs = 2;
+
+/// Opens [channel] to the VM service, or to [target] when given.
+Uint8List encodeOpen(int channel, [int? target]) =>
+    encodeFrame(opOpen, channel, [?target]);
+
+/// What a host without [target] answers on its channel before closing it:
+/// for device control, a length-prefixed JSON refusal (id 0 refuses the
+/// whole channel); for logs, one line saying why there is no log.
+Uint8List targetRefusal(int target, String message) {
+  if (target != targetDevice) return utf8.encode('$message\n');
+  final body = utf8.encode(
+    jsonEncode({'id': 0, 'error': 'no_device_control', 'message': message}),
+  );
+  return (BytesBuilder()
+        ..add((ByteData(4)..setUint32(0, body.length)).buffer.asUint8List())
+        ..add(body))
+      .takeBytes();
+}
 
 /// Player update transfer: [op][4B transfer id][APK chunk]. The dev streams a
 /// replacement player APK to the device (announced by a {"t":"update_begin"}

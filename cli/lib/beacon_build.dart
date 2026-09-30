@@ -7,7 +7,7 @@ typedef BeaconPlayer = ({String package, String certificate});
 
 /// Bumped whenever the beacon's source changes, so a cached APK built with an
 /// older beacon is rebuilt.
-const beaconVersion = 1;
+const beaconVersion = 2;
 
 /// Builds the project's debug APK with the RHR beacon added (see
 /// cli/android/rhr_beacon). The beacon is how the player learns the app's VM

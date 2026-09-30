@@ -596,3 +596,57 @@ a speedup. The regular source CLI was restored afterward.
 Analysis of the two changed vendored WebRTC files passed after resolving that
 package's dependencies. The initial standalone analysis lacked package resolution
 and was not a valid code check.
+
+## Agent control through `rhr mcp`, October 1
+
+A coding agent can see and drive the phone, and debug the connected app,
+through the developer's running `rhr run`. The tester needs nothing beyond the
+player and the code. No adb, root or cable is involved.
+
+### Setup
+
+- Phone: SM-A566B, Android 16.
+- Player: QA package `dev.rhr.rhr_player.qa`, built from this branch.
+- App: fixture `dev.rhr.rhr_a11y_flutter`, a separate debug app with a custom
+  Kotlin `MainActivity`, so it runs through the beacon (connector mode).
+- Transport: public relay signaling plus direct WebRTC over Wi-Fi.
+- Both the scripted client and Claude Code drove it through `rhr mcp`.
+
+### Device evidence
+
+| Case | Observed result |
+| --- | --- |
+| Install RHR Agent | `install_agent` streamed 0.8 MB. Android asked "Install this app?", and Play Protect showed "App scan recommended" (soft; "Install without scanning" works). The agent's setup screen opened by itself. |
+| Enable | Settings > Accessibility > Installed apps > RHR Agent, then the switch, then "Allow". The service bound. No restricted-settings block. |
+| Look and act | `describe` listed Flutter widgets, native views and system windows with tap points. `tap` incremented the count; `type` filled a Flutter text field; long press, swipe (Settings scrolled), back, home, notifications, `launch_app`, `open_url` and `wait_for` (appear and gone) all worked. |
+| System dialog | The camera prompt showed in `describe`, and a tap on "While using the app" granted it (`granted=true`, `USER_SET`). |
+| Claude Code | `claude -p` with only the rhr tools called status, tapped Increment twice (Count 2) and handled the camera prompt without help. |
+| Logs and errors | A Kotlin `Log.i` line arrived. `errors` returned a MethodChannel exception's stack. After `am crash`, the next stream began with `rhr-exit … description=crash` and held the dead process's FATAL EXCEPTION trace. |
+| Dart | `evaluate` returned values. `hot_reload` changed a label with the count kept, and returned Flutter's output. `hot_restart` worked. |
+| Consent | "Your developer's agent is using this phone" showed on the phone while the agent acted. The agent itself opened the shade and tapped "Stop agent control" in the session notification. After that, every request got `agent_stopped`, and the notification said so. |
+| Backgrounded app | With Settings in front for more than 10 minutes, the session stayed up. Samsung froze the app, so `evaluate` failed after 10 s with a message to bring it back. After `launch_app`, evaluate and hot reload worked at once. |
+| Hosted project | A plugin-free app ran inside the player. describe found its widgets and a tap counted; `logs` returned its `debugPrint` line from the player's logcat; evaluate and hot reload worked with state kept. |
+| Pure-Dart host | With `fake_device` on the local relay, device control and logs refused with a clear reason, and `evaluate` worked. |
+
+### Findings that changed the design
+
+- **One binder call per request.** Samsung freezes the agent's process
+  between binder calls, accessibility service or not. A request loop on a
+  socket stalled about 6 s after it opened, so each device request is now
+  its own `ContentProvider.call`.
+- **Cache-invalidating events.** The agent has to subscribe to window content
+  and window change events even though it ignores them. Without them, its
+  node cache stays stale.
+- **Argent blocks the agent.** Argent's Android helper holds a UiAutomation
+  instrumentation, which unbinds every accessibility service. Don't test
+  device control and Argent together.
+
+### Not verified
+
+- Cellular: the phone has no SIM.
+- The release workflow's agent build and signing: not run in CI.
+- Flaky, not caused by this work: several hosted connects failed with
+  "device did not finish gathering direct ICE candidates". A player built
+  from `f4e8bb8` without these changes then connected, and so did this
+  branch's player on the next try. Another session saw the same error in
+  app-mode reconnects.

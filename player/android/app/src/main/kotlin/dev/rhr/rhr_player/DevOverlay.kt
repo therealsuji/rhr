@@ -1074,6 +1074,8 @@ class DevOverlay(
 			message = RhrSessionService.progressMessage,
 			stalled = RhrSessionService.phaseStalled,
 			foreignApp = RhrSessionService.updatingForeignApp,
+			foreignAppName = RhrSessionService.foreignAppName,
+			agentActive = RhrSessionService.agentActive,
 		)
 		menuRestart?.visibility = if (RhrSessionService.status == "connected" &&
 			RhrSessionService.progressPhase !in setOf("restarting", "reloading")) View.VISIBLE else View.GONE

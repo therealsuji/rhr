@@ -16,6 +16,8 @@ dependencies:
   logging: ^1.2.0
   webrtc_dart:
     path: ../third_party/webrtc_dart
+  dart_mcp: ^0.5.2
+  vm_service: ^15.3.0
 
 dev_dependencies:
   test: ^1.25.0

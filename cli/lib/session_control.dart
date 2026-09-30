@@ -3,22 +3,26 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-/// How `rhr persist` and `rhr release` reach an `rhr run` already holding
-/// the phone. The relay admits one developer per phone, so a second CLI
-/// cannot connect; it asks the running one instead.
+/// How `rhr persist`, `rhr release` and `rhr mcp` reach an rhr session already
+/// holding the phone. The relay admits one developer per phone, so a second
+/// CLI cannot connect; it asks the running one instead.
 ///
 /// The running session listens on loopback and writes the port and a random
-/// token to `.dart_tool/rhr/control.json` (mode 600). A command is one JSON
+/// token to `.dart_tool/rhr/control.json` (mode 600), along with the session's
+/// other loopback endpoints (see [SessionEndpoints]). A command is one JSON
 /// line `{"token", "command"}`; the answer is one line `{"ok", "message"}`,
 /// sent once the work is done. [SessionAnswer.then] runs after the answer is
 /// sent, for work that ends the session.
 typedef SessionAnswer = ({bool ok, String message, void Function()? then});
 
 final class SessionControl {
-  SessionControl._(this._server, this._file);
+  SessionControl._(this._server, this._file, this.token);
 
   final ServerSocket _server;
   final File _file;
+
+  /// The secret a local client must present, here and on the endpoints.
+  final String token;
 
   static File fileFor(String project) =>
       File('$project/.dart_tool/rhr/control.json');
@@ -26,15 +30,18 @@ final class SessionControl {
   /// Serves commands with [handle] until [close].
   static Future<SessionControl> serve(
     String project,
-    Future<SessionAnswer> Function(String command) handle,
-  ) async {
+    Future<SessionAnswer> Function(String command) handle, {
+    Map<String, Object> endpoints = const {},
+  }) async {
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     final token = base64UrlEncode(
       List<int>.generate(16, (_) => Random.secure().nextInt(256)),
     );
     final file = fileFor(project);
     file.parent.createSync(recursive: true);
-    file.writeAsStringSync(jsonEncode({'port': server.port, 'token': token}));
+    file.writeAsStringSync(
+      jsonEncode({...endpoints, 'port': server.port, 'token': token}),
+    );
     if (!Platform.isWindows) Process.runSync('chmod', ['600', file.path]);
     server.listen((client) async {
       client.done.catchError((_) {});
@@ -63,13 +70,53 @@ final class SessionControl {
         client.destroy();
       }
     });
-    return SessionControl._(server, file);
+    return SessionControl._(server, file, token);
   }
 
   Future<void> close() async {
     await _server.close();
     if (_file.existsSync()) _file.deleteSync();
   }
+}
+
+/// What a running session publishes for local clients: the control [token],
+/// the tunneled VM service, the loopback ports that open device-control and
+/// native-log channels to the phone, and the package the app runs in (absent
+/// for `rhr attach`, which does not know it).
+typedef SessionEndpoints = ({
+  String token,
+  Uri vm,
+  int device,
+  int logs,
+  String? app,
+});
+
+/// The endpoints of the session running for [project], or null when none has
+/// published any. A file left by a session that died still reads; connecting
+/// is what tells.
+SessionEndpoints? readSessionEndpoints(String project) {
+  try {
+    final saved = jsonDecode(
+      SessionControl.fileFor(project).readAsStringSync(),
+    );
+    if (saved case {
+      'token': final String token,
+      'vm': final String vm,
+      'device': final int device,
+      'logs': final int logs,
+    }) {
+      return (
+        token: token,
+        vm: Uri.parse(vm),
+        device: device,
+        logs: logs,
+        app: saved['app'] as String?,
+      );
+    }
+  } on Object {
+    // No session, or one mid-write.
+  }
+  return null;
 }
 
 /// Sends [command] to the session running for [project], and waits for its

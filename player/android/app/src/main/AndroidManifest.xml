@@ -34,6 +34,8 @@
             <action android:name="android.intent.action.MAIN"/>
             <category android:name="android.intent.category.LAUNCHER"/>
         </intent>
+        <!-- RHR Agent, which serves device control (DeviceEndpoints.kt). -->
+        <package android:name="dev.rhr.agent"/>
     </queries>
 
     <application

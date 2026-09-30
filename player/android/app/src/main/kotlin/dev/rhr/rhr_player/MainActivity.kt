@@ -244,6 +244,8 @@ class MainActivity : FlutterActivity() {
 							message = RhrSessionService.progressMessage,
 							stalled = RhrSessionService.phaseStalled,
 							foreignApp = RhrSessionService.updatingForeignApp,
+							foreignAppName = RhrSessionService.foreignAppName,
+							agentActive = RhrSessionService.agentActive,
 						)
 						result.success(
 							mapOf(

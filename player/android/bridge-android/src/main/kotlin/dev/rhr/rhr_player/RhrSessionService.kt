@@ -3,6 +3,7 @@ package dev.rhr.rhr_player
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -38,6 +39,8 @@ import org.json.JSONObject
  *   TEXT frames   = JSON control ({"t":"info","vm":<uri>} announced device->dev)
  *   BINARY frames = [1B op][4B channel BE][payload], carried by WebRTC unless
  *                   relay-only mode was explicit; op 0=open 1=data 2=close
+ *                   (an open's payload is empty for the VM service, or one
+ *                   target byte: 1 device control, 2 native logs)
  *                   3=ack (payload = 4B consumed-byte count, flow control,
  *                   512KB window per channel)
  */
@@ -213,7 +216,7 @@ class RhrSessionService : Service() {
 				-> RhrUpdateHandler)? = null
 
 		@Volatile var runRequestHandler:
-			((Context, JSONObject, (JSONObject) -> Unit, (String) -> Unit, () -> Boolean) -> Unit)? = null
+			((Context, JSONObject, (JSONObject) -> Unit, (vm: String, pkg: String) -> Unit, () -> Boolean) -> Unit)? = null
 
 		// Latest transfer/lifecycle progress, pushed by the dev over the tunnel
 		// ({"t":"progress",...}) or set locally (e.g. "restarting"). The native
@@ -246,6 +249,31 @@ class RhrSessionService : Service() {
 		// (kind=app) rather than a player self-update, so the overlay can
 		// name what is actually being installed.
 		@Volatile var updatingForeignApp: Boolean = false
+
+		// What the tester is told the foreign install is: their app, or the
+		// RHR Agent add-on the developer's agent asked for.
+		@Volatile var foreignAppName: String = "your app"
+
+		/**
+		 * Device control, as the tester sees it. [agentActive] holds for a few
+		 * seconds after each request, so both surfaces can say the agent is
+		 * at work; [agentStopped] is the tester's "Stop agent control", which
+		 * refuses every request until they connect again.
+		 */
+		private const val AGENT_ACTIVE_MS = 5_000L
+		@Volatile private var agentActedAt = 0L
+		@Volatile var agentStopped = false
+		val agentActive: Boolean get() = System.currentTimeMillis() - agentActedAt < AGENT_ACTIVE_MS
+		private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+		fun agentActed() {
+			val announce = !agentActive
+			agentActedAt = System.currentTimeMillis()
+			if (!announce) return
+			updateListeners.forEach { it() }
+			// And once more when it lapses, or the card would stay up.
+			mainHandler.postDelayed({ updateListeners.forEach { it() } }, AGENT_ACTIVE_MS + 100)
+		}
 
 		// When the current progress phase began, used for stall detection.
 		@Volatile private var phaseSetAt = 0L
@@ -306,8 +334,14 @@ class RhrSessionService : Service() {
 			updateListeners.forEach { it() }
 		}
 	@Volatile private var ownVmUri = ""
+	// The connected app whose VM the tunnel reaches, or null for the player's
+	// own engine. Native logs come from this app's beacon.
+	@Volatile private var connectedPackage: String? = null
+	// Whether the developer has opened device control in this session, which
+	// is when the notification offers to stop it.
+	@Volatile private var agentConnected = false
 	private var projectHint: String? = null
-	private val sockets = ConcurrentHashMap<Int, Socket>()
+	private val sockets = ConcurrentHashMap<Int, ChannelEnd>()
 	private val readers = ConcurrentHashMap<Int, Thread>()
 	// Invariant: data frames can race the channel's TCP connect —
 	// buffer them until the socket is ready, never drop them.
@@ -464,6 +498,9 @@ class RhrSessionService : Service() {
 					// A new session starts with no developer having left it; a
 					// stale flag here would suppress a real reconnect notice.
 					devLeft = false
+					// "Stop agent control" lasts until the tester connects again.
+					agentStopped = false
+					agentConnected = false
 					sweepOrphanedDevfsDirs()
 					if (watchOwnVm) watchForDevfsDirs()
 					// The VM watcher tracks OUR own service URI across guest hot
@@ -508,6 +545,10 @@ class RhrSessionService : Service() {
 						setProgress("reload_failed", 0, 0)
 					}
 				}
+			}
+			"stop_agent" -> {
+				agentStopped = true
+				refreshNotification()
 			}
 			"stop" -> {
 				stopped.set(true)
@@ -683,6 +724,7 @@ class RhrSessionService : Service() {
 		synchronized(vmUriLock) {
 			if (watchOwnVm) return
 			watchOwnVm = true
+			connectedPackage = null
 			vmUri = ownVmUri
 			currentVm = vmUri
 		}
@@ -882,6 +924,7 @@ class RhrSessionService : Service() {
 								val available = ownVmUri.isNotEmpty() && !ownVmUri.contains(":0/")
 								if (available) synchronized(vmUriLock) {
 									watchOwnVm = true
+									connectedPackage = null
 									vmUri = ownVmUri
 									currentVm = vmUri
 								}
@@ -893,10 +936,11 @@ class RhrSessionService : Service() {
 
 							runRequestHandler?.invoke(this@RhrSessionService, runRequest,
 								{ response -> if (generation == sessionGeneration) webSocket.send(response.toString()) },
-								{ targetVm ->
+								{ targetVm, targetPackage ->
 									if (generation == sessionGeneration) {
 										synchronized(vmUriLock) {
 											watchOwnVm = false
+											connectedPackage = targetPackage
 											vmUri = targetVm
 											currentVm = targetVm
 										}
@@ -1218,8 +1262,10 @@ class RhrSessionService : Service() {
 			OP_OPEN -> {
 				synchronized(flowLock) { pending[channel] = java.io.ByteArrayOutputStream() }
 				val epoch = channelEpoch
-				sniffers[channel] = DevFsDelta.Sniffer(epoch)
-				openChannel(channel, epoch)
+				val target = if (frame.size > 5) frame[5].toInt() else null
+				// Only VM service traffic can be a DevFS upload.
+				if (target == null) sniffers[channel] = DevFsDelta.Sniffer(epoch)
+				openChannel(channel, epoch, target)
 			}
 			OP_DATA -> {
 				val sniffer = sniffers[channel]
@@ -1252,9 +1298,9 @@ class RhrSessionService : Service() {
 		synchronized(flowLock) {
 			if (epoch != channelEpoch) return false
 			try {
-				val sock = sockets[channel]
-				if (sock != null) {
-					sock.getOutputStream().write(bytes, offset, length)
+				val end = sockets[channel]
+				if (end != null) {
+					end.write(bytes, offset, length)
 				} else {
 					val buffer = pending[channel] ?: return false
 					buffer.write(bytes, offset, length)
@@ -1334,17 +1380,27 @@ class RhrSessionService : Service() {
 		}
 	}
 
-	/** Connects [channel] to the VM service. Like a DevFS rebuild, the connect
-	 *  and its reader outlive the connection that opened them, so they only
-	 *  touch [channel] while [epoch] is current and the socket is still theirs. */
-	private fun openChannel(channel: Int, epoch: Long) {
+	/** Connects [channel] to the VM service, or to a [target] from
+	 *  [DeviceEndpoints]. Like a DevFS rebuild, the connect and its reader
+	 *  outlive the connection that opened them, so they only touch [channel]
+	 *  while [epoch] is current and the end is still theirs. */
+	private fun openChannel(channel: Int, epoch: Long, target: Int?) {
 		Thread {
 			try {
-				val vm = android.net.Uri.parse(vmUri)
-				val sock = Socket()
-				sock.connect(InetSocketAddress(vm.host ?: "127.0.0.1", vm.port), 5000)
+				val sock = if (target == null) {
+					val vm = android.net.Uri.parse(vmUri)
+					val socket = Socket()
+					socket.connect(InetSocketAddress(vm.host ?: "127.0.0.1", vm.port), 5000)
+					ChannelEnd.of(socket)
+				} else {
+					if (target == DeviceEndpoints.TARGET_DEVICE && !agentConnected) {
+						agentConnected = true
+						refreshNotification()
+					}
+					DeviceEndpoints.open(this, target, connectedPackage)
+				}
 				// Flush anything that arrived while we were connecting, then
-				// atomically switch the channel over to the live socket.
+				// atomically switch the channel over to the live end.
 				synchronized(flowLock) {
 					val buffered = if (epoch == channelEpoch) pending.remove(channel) else null
 					if (buffered == null) {
@@ -1353,14 +1409,15 @@ class RhrSessionService : Service() {
 						return@Thread
 					}
 					if (buffered.size() > 0) {
-						sock.getOutputStream().write(buffered.toByteArray())
+						val bytes = buffered.toByteArray()
+						sock.write(bytes, 0, bytes.size)
 					}
 					sockets[channel] = sock
 				}
 				val reader = Thread {
 					val buf = ByteArray(TUNNEL_READ_BYTES)
 					try {
-						val input = sock.getInputStream()
+						val input = sock.input
 						while (true) {
 							val n = input.read(buf)
 							if (n < 0) break
@@ -1391,7 +1448,7 @@ class RhrSessionService : Service() {
 				reader.isDaemon = true
 				reader.start()
 			} catch (e: Exception) {
-				Log.w(TAG, "channel $channel: VM connect failed: $e")
+				Log.w(TAG, "channel $channel: connect to ${target ?: "VM"} failed: $e")
 				synchronized(flowLock) {
 					if (epoch == channelEpoch) closeChannel(channel, notifyPeer = true)
 				}
@@ -1544,16 +1601,34 @@ class RhrSessionService : Service() {
 
 	// ---- notification -----------------------------------------------------
 
+	/** Posts the session notification again, after device control changed. */
+	private fun refreshNotification() {
+		(getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+			.notify(NOTIF_ID, buildNotification())
+	}
+
 	private fun buildNotification(): Notification {
 		val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 		nm.createNotificationChannel(
 			NotificationChannel(
 				CHANNEL_ID, "rhr session", NotificationManager.IMPORTANCE_LOW))
-		return Notification.Builder(this, CHANNEL_ID)
+		val builder = Notification.Builder(this, CHANNEL_ID)
 			.setContentTitle("rhr session active")
-			.setContentText("Remote hot reload tunnel is running")
 			.setSmallIcon(android.R.drawable.stat_sys_download)
 			.setOngoing(true)
-			.build()
+		when {
+			agentStopped -> builder.setContentText("Agent control is stopped until you connect again")
+			agentConnected -> {
+				val stop = PendingIntent.getService(
+					this, 1,
+					Intent(this, RhrSessionService::class.java).putExtra("cmd", "stop_agent"),
+					PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+				)
+				builder.setContentText("Your developer's agent can see and tap this phone")
+					.addAction(Notification.Action.Builder(null, "Stop agent control", stop).build())
+			}
+			else -> builder.setContentText("Remote hot reload tunnel is running")
+		}
+		return builder.build()
 	}
 }

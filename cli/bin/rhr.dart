@@ -21,6 +21,7 @@ import 'dart:typed_data';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:dart_mcp/stdio.dart';
 import 'package:logging/logging.dart';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/session_link.dart';
@@ -36,6 +37,7 @@ import 'package:rhr_cli/player_builder.dart';
 import 'package:rhr_cli/player_update.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/account_auth.dart';
+import 'package:rhr_cli/agent_apk.dart';
 import 'package:rhr_cli/agent_launcher.dart';
 import 'package:rhr_cli/device_run.dart';
 import 'package:rhr_cli/relay_config.dart';
@@ -47,6 +49,7 @@ import 'package:rhr_cli/usb_asset_transport.dart';
 import 'package:rhr_cli/version.dart';
 import 'package:rhr_cli/run_preparation.dart';
 import 'package:rhr_cli/running_project.dart';
+import 'package:rhr_cli/rhr_mcp.dart';
 import 'package:rhr_cli/session_control.dart';
 import 'package:rhr_cli/cli_update.dart';
 import 'package:webrtc_dart/webrtc_dart.dart' show WebRtcLogging;
@@ -62,6 +65,10 @@ Usage:
   rhr persist [options]       install a debug build of the current code, so
                               the app keeps it after it is killed and reopened
   rhr release [options]       build a release APK (no RHR inside) and install it
+  rhr mcp [--project <dir>]   MCP server (stdio) that lets a coding agent see,
+                              tap, read logs and hot reload on the phone of the
+                              rhr session running for the project:
+                              claude mcp add rhr -- rhr mcp
   rhr doctor                  check the local Flutter/RHR setup
   rhr login                   sign in so this machine can use account devices
   rhr logout                  forget the signed-in account
@@ -175,6 +182,24 @@ Future<void> main(List<String> args) async {
 
   if (args.first == 'doctor') {
     exit(await _doctor());
+  }
+
+  if (args.first == 'mcp') {
+    var project = Directory.current.path;
+    for (var i = 1; i < args.length; i++) {
+      if (args[i] == '--project' && i + 1 < args.length) {
+        project = args[++i];
+      } else {
+        stderr.writeln('unknown arg: ${args[i]}');
+        exit(64);
+      }
+    }
+    final server = RhrMcpServer(
+      stdioChannel(input: stdin, output: stdout),
+      project: Directory(project).absolute.path,
+    );
+    await server.done;
+    exit(0);
   }
 
   if (args.first == 'update') {
@@ -911,7 +936,12 @@ Future<int?> _runSession({
   // The route this session runs, the player's runtime, and the native
   // fingerprint the session started from (see _nativeChanged below).
   RunRoute? sessionRoute;
+  // The Android package the project runs in, for `rhr mcp` to bring it back
+  // to the front.
+  String? sessionPackage;
   Map<String, dynamic>? playerCompatibility;
+  // The player's signing certificate, which RHR Agent must share.
+  String? playerCertificate;
   String? nativeBaseline;
   DirectTransportFailure? directFailure;
   PlayerUpdateFailure? preparationRetry;
@@ -920,6 +950,10 @@ Future<int?> _runSession({
   String? attachPidFile;
   var reloadInProgress = false;
   Timer? reloadFeedbackTimer;
+  // A hot reload or restart asked for over session control, waiting for
+  // Flutter to say how it went.
+  Completer<bool>? reloadAsked;
+  final reloadOutput = StringBuffer();
   final bridgeDeadline = _DeadlineHolder(
     DateTime.now().add(const Duration(minutes: 5)),
   );
@@ -952,6 +986,7 @@ Future<int?> _runSession({
           effectiveSyncAssets = ready.route == RunRoute.player;
           staleDart = ready.staleDart;
           sessionRoute = ready.route;
+          sessionPackage = ready.package;
           nativeBaseline = await nativeFingerprint(project);
           assetStoreId = ready.assetStoreId;
           if (!vmReady.isCompleted) vmReady.complete(ready.vm);
@@ -1012,6 +1047,9 @@ Future<int?> _runSession({
         final m = jsonDecode(msg) as Map<String, dynamic>;
         if (m['t'] == 'info') {
           devFsDelta = m['devfsDelta'] == 1;
+          if (m['playerCertificate'] case final String certificate) {
+            playerCertificate = certificate;
+          }
           if (m['compatibility'] case final Map<String, dynamic> runtime) {
             playerCompatibility = runtime;
           }
@@ -1479,16 +1517,22 @@ Future<int?> _runSession({
     }();
   }
 
-  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-  server.listen((sock) {
+  // Tunnels one local connection to the phone: to the VM service, or to
+  // [target] (see bridge/lib/tunnel.dart). A target connection first sends
+  // the session control token and a newline: unlike the VM service, device
+  // control and logs have no secret of their own.
+  void accept(Socket sock, [int? target]) {
     accepted.add(sock);
     // Socket write failures (peer reset mid-transfer) surface on `done`;
     // unhandled they crash the process.
     sock.done.catchError((_) {}).whenComplete(() => accepted.remove(sock));
+    var unauthenticated = target == null ? null : BytesBuilder();
     // Until the first request head shows whether this is a DevFS upload the
     // phone can rebuild from a delta, hold the bytes. Everything else is
     // tunnelled byte for byte, exactly as before.
-    var sniffing = devFsDelta || prepareRun ? HttpRequestReader() : null;
+    var sniffing = target == null && (devFsDelta || prepareRun)
+        ? HttpRequestReader()
+        : null;
     int? rawChannel;
     late final StreamSubscription<Uint8List> sub;
 
@@ -1519,7 +1563,7 @@ Future<int?> _runSession({
       sniffing = null;
       final channel = rawChannel = nextChannel++;
       sockets[channel] = sock;
-      sendPayload(encodeFrame(opOpen, channel));
+      sendPayload(encodeOpen(channel, target));
       if (first.isNotEmpty) forward(first);
     }
 
@@ -1534,6 +1578,25 @@ Future<int?> _runSession({
 
     sub = sock.listen(
       (data) {
+        if (unauthenticated case final prefix?) {
+          prefix.add(data);
+          final bytes = prefix.toBytes();
+          final newline = bytes.indexOf(10);
+          if (newline < 0) {
+            if (bytes.length > 256) sock.destroy();
+            return;
+          }
+          final token = sessionControl?.token;
+          if (token == null ||
+              utf8.decode(bytes.sublist(0, newline), allowMalformed: true) !=
+                  token) {
+            sock.destroy();
+            return;
+          }
+          unauthenticated = null;
+          openRaw(Uint8List.sublistView(bytes, newline + 1));
+          return;
+        }
         final reader = sniffing;
         if (reader == null) {
           if (rawChannel == null) {
@@ -1581,20 +1644,135 @@ Future<int?> _runSession({
     );
     // A host that cannot rebuild deltas (the pure-Dart desktop bridge) gets
     // the channel opened at accept.
-    if (sniffing == null) openRaw(Uint8List(0));
-  });
+    if (sniffing == null && unauthenticated == null) openRaw(Uint8List(0));
+  }
+
+  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen(accept);
+  final deviceServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  deviceServer.listen((sock) => accept(sock, targetDevice));
+  final logsServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  logsServer.listen((sock) => accept(sock, targetLogs));
 
   final local = vm.replace(host: '127.0.0.1', port: server.port);
   stderr.writeln('[rhr] tunneled VM service: $local');
 
-  // `rhr persist` and `rhr release` from another terminal, for the phone this
-  // session holds (see session_control.dart). A release installed over this
+  /// Hot reloads or restarts through `flutter attach`, as if the developer
+  /// pressed r or R, and answers with what Flutter printed meanwhile, so a
+  /// compile error reaches whoever asked.
+  Future<SessionAnswer> hotReload({required bool restart}) async {
+    final proc = attachProcess;
+    final what = restart ? 'hot restart' : 'hot reload';
+    if (proc == null) {
+      return (
+        ok: false,
+        message: 'Flutter is not attached yet, so there is nothing to $what.',
+        then: null,
+      );
+    }
+    if (reloadInProgress || reloadAsked != null) {
+      return (ok: false, message: 'A reload is already running.', then: null);
+    }
+    final asked = reloadAsked = Completer<bool>();
+    reloadOutput.clear();
+    try {
+      proc.stdin.write(restart ? 'R' : 'r');
+    } on StateError {
+      reloadAsked = null;
+      return (ok: false, message: 'Flutter has exited.', then: null);
+    }
+    var timedOut = false;
+    final ok = await asked.future.timeout(
+      const Duration(minutes: 3),
+      onTimeout: () {
+        reloadAsked = null;
+        timedOut = true;
+        return false;
+      },
+    );
+    final printed = reloadOutput.toString().trim();
+    reloadOutput.clear();
+    return (
+      ok: ok,
+      message: [
+        if (printed.isNotEmpty)
+          printed
+        else if (ok)
+          'Done.'
+        else
+          '$what failed.',
+        // Android freezes an app that is not in front, and a frozen app
+        // cannot take a reload until it is back.
+        if (timedOut)
+          'Flutter did not finish the $what within 3 minutes. If the app is '
+              'not in front on the phone, bring it back, then try again.',
+      ].join('\n'),
+      then: null,
+    );
+  }
+
+  /// Streams RHR Agent to the phone, the way a debug app goes, and waits for
+  /// the tester to confirm Android's install sheet.
+  Future<SessionAnswer> installAgent() async {
+    final certificate = playerCertificate;
+    if (certificate == null) {
+      return (
+        ok: false,
+        message: 'The player has not said how it is signed yet. Try again.',
+        then: null,
+      );
+    }
+    if (updateSender != null) {
+      return (
+        ok: false,
+        message: 'Something is already being installed on the phone.',
+        then: null,
+      );
+    }
+    try {
+      final apk = await agentApkFor(certificate);
+      stderr.writeln('[rhr] Installing RHR Agent on the phone.');
+      final sender = updateSender = PlayerUpdateSender(
+        transport,
+        kind: UpdateKind.app,
+        target: agentPackage,
+      );
+      await sender.send(apk);
+      return (
+        ok: true,
+        message:
+            'RHR Agent is installed. The phone now shows its setup screen: the '
+            'tester turns it on in Accessibility settings (on Android 13+, '
+            'App info > ⋮ > Allow restricted settings first).',
+        then: null,
+      );
+    } on Object catch (error) {
+      return (ok: false, message: '$error', then: null);
+    } finally {
+      updateSender = null;
+    }
+  }
+
+  // Commands from another process for the phone this session holds (see
+  // session_control.dart): `rhr persist` and `rhr release`, and `rhr mcp`
+  // asking for a hot reload or restart. A release installed over this
   // session's own app kills it, so the session waits for [releaseEnding]
   // before it tears down, and then ends.
   Completer<void>? releaseEnding;
   var controlBusy = false;
   Future<SessionAnswer> control(String command) async {
-    final prepared = preparation!;
+    if (command == 'reload' || command == 'restart') {
+      return hotReload(restart: command == 'restart');
+    }
+    if (command == 'install_agent') return installAgent();
+    final prepared = preparation;
+    if (prepared == null) {
+      return (
+        ok: false,
+        message: '$command needs a session started by rhr run.',
+        then: null,
+      );
+    }
     if (controlBusy) {
       return (
         ok: false,
@@ -1673,9 +1851,16 @@ Future<int?> _runSession({
     }
   }
 
-  sessionControl = preparation == null
-      ? null
-      : await SessionControl.serve(project, control);
+  sessionControl = await SessionControl.serve(
+    project,
+    control,
+    endpoints: {
+      'vm': '$local',
+      'device': deviceServer.port,
+      'logs': logsServer.port,
+      'app': ?sessionPackage,
+    },
+  );
 
   Future<void> cleanup() async {
     reloadFeedbackTimer?.cancel();
@@ -1684,6 +1869,8 @@ Future<int?> _runSession({
     if (!sessionOver.isCompleted) sessionOver.complete();
     await sessionControl?.close();
     await server.close();
+    await deviceServer.close();
+    await logsServer.close();
     for (final s in accepted.toList()) {
       s.destroy();
     }
@@ -1761,6 +1948,11 @@ Future<int?> _runSession({
     );
   }
 
+  void captureReloadOutput(String chunk) {
+    if (reloadAsked == null || reloadOutput.length > 16 * 1024) return;
+    reloadOutput.write(chunk);
+  }
+
   void onReloadEvent(FlutterReloadEvent event) {
     if (!sessionActive) return;
     reloadFeedbackTimer?.cancel();
@@ -1777,6 +1969,14 @@ Future<int?> _runSession({
       0,
       0,
     );
+    if (event == FlutterReloadEvent.completed ||
+        event == FlutterReloadEvent.failed) {
+      final asked = reloadAsked;
+      reloadAsked = null;
+      if (asked != null && !asked.isCompleted) {
+        asked.complete(event == FlutterReloadEvent.completed);
+      }
+    }
     if (event == FlutterReloadEvent.completed) {
       reloadFeedbackTimer = Timer(
         const Duration(seconds: 2),
@@ -1791,12 +1991,14 @@ Future<int?> _runSession({
       stdout,
       lostConnection,
       onReloadEvent: onReloadEvent,
+      onOutput: captureReloadOutput,
     ),
     forwardFlutterOutput(
       proc.stderr,
       stderr,
       lostConnection,
       onReloadEvent: onReloadEvent,
+      onOutput: captureReloadOutput,
     ),
   ]);
   bool? wasLineMode;

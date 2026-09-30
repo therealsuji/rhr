@@ -133,6 +133,20 @@ Velia benchmark (519 files, 421.3 MB raw), same phone:
 
 Fault-injected USB run recovered without falling back to wireless; independent inventory matched all 519 phone files to host SHA-256. Warm runs skip unchanged files — touch one generated asset and only that file uploads.
 
+## Let a coding agent drive the phone
+
+`rhr mcp` is an MCP server that lets an agent see and debug the app on the tester's phone through your running `rhr run`:
+
+```bash
+claude mcp add rhr -- rhr mcp      # run from the Flutter project
+```
+
+The agent gets screenshots, the screen's element tree (Flutter, native views and system dialogs), taps, swipes, typing, system buttons, the app's native log, `evaluate`, and hot reload or restart with Flutter's output. Coordinates are fractions of the screen.
+
+Seeing and tapping need RHR Agent, a small accessibility add-on. Play Protect blocks browser installs of any APK with an accessibility service, so it's separate from the player, and the player installs it. The agent calls `install_agent`; the tester confirms the install and turns RHR Agent on in Accessibility settings. It only answers the player signed with its own key, and only during a session. While it acts, the phone says so, and the session notification offers "Stop agent control".
+
+Logs, evaluate and hot reload work without it.
+
 ## Installing the CLI
 
 Same as above, locked to the beta tag:
@@ -169,6 +183,8 @@ After that, `rhr run` from any Flutter project, by you or an agent. `rhr update`
 Session code = **bearer token**. Anyone with it can attach to the relayed VM service — that's arbitrary code execution inside your running app. Treat codes like passwords. Use your own relay for real work; on a shared relay the code is your only isolation.
 
 The automatic LAN path is unencrypted `ws://` on the local network. Compiled debug artifacts only, not source — still needs the random session code. Don't use it on untrusted networks; stick to `wss://` if local observers matter.
+
+With RHR Agent turned on, the session code also lets the developer's agent see the whole screen and tap anywhere on the phone, system dialogs included. That reaches past the app, so the tester can stop it from the session notification or turn RHR Agent off in Accessibility settings.
 
 The relay sees compiled kernel bytes, not source. Logs don't record session codes, VM Service URIs, or frame contents. See [SECURITY.md](SECURITY.md) before reporting issues.
 

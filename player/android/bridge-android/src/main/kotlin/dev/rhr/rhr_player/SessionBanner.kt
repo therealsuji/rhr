@@ -65,6 +65,28 @@ data class SessionBanner(
 			message: String = "",
 			stalled: Boolean = false,
 			foreignApp: Boolean = false,
+			foreignAppName: String = "your app",
+			agentActive: Boolean = false,
+		): SessionBanner {
+			val banner = ofPhase(phase, status, done, total, message, stalled, foreignApp, foreignAppName)
+			// The developer's agent seeing and tapping the phone is never
+			// silent, but anything the session has to say comes first.
+			return if (agentActive && !banner.isVisible) {
+				SessionBanner("Your developer's agent is using this phone", null, Style.BUSY)
+			} else {
+				banner
+			}
+		}
+
+		private fun ofPhase(
+			phase: String,
+			status: String,
+			done: Long,
+			total: Long,
+			message: String,
+			stalled: Boolean,
+			foreignApp: Boolean,
+			foreignAppName: String,
 		): SessionBanner = when (phase) {
 			"reload_complete" -> SessionBanner("App updated", 1000, Style.DETERMINATE)
 			"reload_failed" -> SessionBanner("Could not update the app. Check the developer’s terminal.", null, Style.FAILED, failure = "Reload failed")
@@ -81,7 +103,7 @@ data class SessionBanner(
 			// whole minute of transfer, and then reading it still, unchanged,
 			// long after the install had actually finished.
 			"updating" -> SessionBanner(
-				if (foreignApp) "Sending your app" else "Sending player update",
+				if (foreignApp) "Sending $foreignAppName" else "Sending player update",
 				perMille(done, total),
 				Style.DETERMINATE)
 
@@ -89,7 +111,7 @@ data class SessionBanner(
 			// it is the step the tester may have to tap through, so it gets
 			// its own state instead of hiding inside the transfer's.
 			"installing" -> SessionBanner(
-				if (foreignApp) "Installing your app" else "Installing the update",
+				if (foreignApp) "Installing $foreignAppName" else "Installing the update",
 				null,
 				Style.BUSY)
 
@@ -103,7 +125,7 @@ data class SessionBanner(
 				Style.WAITING)
 
 			"installed" -> SessionBanner(
-				if (foreignApp) "Your app is installed" else "Update installed",
+				if (foreignApp) "${foreignAppName.replaceFirstChar(Char::uppercase)} is installed" else "Update installed",
 				1000,
 				Style.DETERMINATE)
 

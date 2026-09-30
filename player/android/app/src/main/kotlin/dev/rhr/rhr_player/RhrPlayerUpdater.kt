@@ -45,6 +45,7 @@ class RhrPlayerUpdater(
 ) : RhrUpdateHandler {
 	companion object {
 		private const val TAG = "rhr_updater"
+		private const val AGENT_PACKAGE = "dev.rhr.agent"
 		private const val OP_ACK = 3
 		// After commit, an incomplete transfer that stops making progress for
 		// this long is dead (the CLI's own ack-stall timeout is 60s too).
@@ -99,6 +100,7 @@ class RhrPlayerUpdater(
 			expectedSha256 = sha
 			installKind = message.getString("kind")
 			installTarget = message.optString("target", "")
+			RhrSessionService.foreignAppName = if (installTarget == AGENT_PACKAGE) "RHR Agent" else "your app"
 			received = 0
 			commitRequested = false
 			finished = false
@@ -292,6 +294,13 @@ class RhrPlayerUpdater(
 		RhrSessionService.setInstallPhase("installed")
 		status(transferId, "installed")
 		Log.i(TAG, "foreign package install confirmed")
+		// Android binds the accessibility service of an app only once it has
+		// been opened, and its screen is where the tester turns it on.
+		if (installTarget == AGENT_PACKAGE) {
+			context.packageManager.getLaunchIntentForPackage(AGENT_PACKAGE)
+				?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+				?.let(context::startActivity)
+		}
 	}
 
 	fun onInstallFailed(message: String) {

@@ -7,11 +7,13 @@ final terminalInput = stdin.asBroadcastStream();
 enum FlutterReloadEvent { reloading, restarting, completed, failed }
 
 /// Preserve Flutter's output while observing its connection-loss verdict.
+/// [onOutput] sees the text too, before any reload event it carries.
 Future<void> forwardFlutterOutput(
   Stream<List<int>> source,
   IOSink destination,
   void Function() onConnectionLost, {
   void Function(FlutterReloadEvent)? onReloadEvent,
+  void Function(String)? onOutput,
 }) async {
   const marker = 'Lost connection to device.';
   final events = RegExp(
@@ -22,6 +24,7 @@ Future<void> forwardFlutterOutput(
   var reported = false;
   await for (final chunk in source.transform(utf8.decoder)) {
     destination.write(chunk);
+    onOutput?.call(chunk);
     eventBuffer += chunk;
     while (true) {
       final match = events.firstMatch(eventBuffer);

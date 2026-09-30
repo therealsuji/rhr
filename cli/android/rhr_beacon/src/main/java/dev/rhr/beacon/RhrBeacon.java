@@ -1,5 +1,7 @@
 package dev.rhr.beacon;
 
+import android.app.ActivityManager;
+import android.app.ApplicationExitInfo;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
@@ -11,11 +13,18 @@ import android.content.pm.Signature;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Binder;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 
 import java.io.BufferedReader;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -31,6 +40,9 @@ import java.util.regex.Pattern;
  *
  * The address is a credential, so it goes only to a player whose signing
  * certificate matches the one the CLI baked into this build.
+ *
+ * The same player may also ask for this app's native log, for the developer's
+ * agent: only this app can read it without adb.
  */
 public final class RhrBeacon extends ContentProvider {
     private static final Pattern VM_LINE =
@@ -47,15 +59,123 @@ public final class RhrBeacon extends ContentProvider {
         return true;
     }
 
-    /** The player asks again after it restarts and has lost the address. */
+    /**
+     * "announce": the player asks again after it restarts and has lost the
+     * address. "logs": the player asks for this app's log stream.
+     */
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
         final String vm = latest;
         final Context context = getContext();
-        if ("announce".equals(method) && vm != null && context != null) {
+        if (context == null) return null;
+        if ("announce".equals(method) && vm != null) {
             new Thread(() -> announce(context.getApplicationContext(), vm), "rhr-beacon").start();
         }
+        if ("logs".equals(method)) return logs(context);
         return null;
+    }
+
+    /**
+     * One end of a socket pair that carries this app's log as logcat text
+     * lines. The player writes one byte once it holds its own copy of the end
+     * it was handed; only then is the copy here closed, so the player hanging
+     * up is what ends the stream.
+     */
+    private static Bundle logs(Context context) {
+        if (!callerIsPlayer(context)) {
+            throw new SecurityException("Only the RHR player this app was built for reads its log.");
+        }
+        final ParcelFileDescriptor ours;
+        final ParcelFileDescriptor theirs;
+        try {
+            ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
+            ours = pair[0];
+            theirs = pair[1];
+        } catch (Exception e) {
+            return null;
+        }
+        new Thread(() -> streamLogs(context.getApplicationContext(), ours, theirs), "rhr-beacon-logs").start();
+        Bundle answer = new Bundle();
+        answer.putParcelable("socket", theirs);
+        return answer;
+    }
+
+    private static void streamLogs(Context context, ParcelFileDescriptor ours, ParcelFileDescriptor theirs) {
+        java.lang.Process logcat = null;
+        try (ParcelFileDescriptor socket = ours) {
+            new FileInputStream(socket.getFileDescriptor()).read();
+            theirs.close();
+            OutputStream out = new FileOutputStream(socket.getFileDescriptor());
+            out.write(lastExit(context).getBytes(StandardCharsets.UTF_8));
+            // Without adb, logcat shows only this app's own lines, from every
+            // process it has run, so the recent tail still holds the stack
+            // trace of a crash that killed the previous process.
+            logcat = new ProcessBuilder("logcat", "-v", "threadtime", "-T", "500")
+                    .redirectErrorStream(true)
+                    .start();
+            InputStream lines = logcat.getInputStream();
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = lines.read(buffer)) != -1) out.write(buffer, 0, read);
+        } catch (Exception ignored) {
+            // The player hung up.
+        } finally {
+            if (logcat != null) logcat.destroy();
+            try {
+                theirs.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** Why this app's previous process ended, as one log-like line. */
+    private static String lastExit(Context context) {
+        if (Build.VERSION.SDK_INT < 30) return "";
+        ActivityManager activities = context.getSystemService(ActivityManager.class);
+        java.util.List<ApplicationExitInfo> exits =
+                activities.getHistoricalProcessExitReasons(context.getPackageName(), 0, 1);
+        if (exits.isEmpty()) return "";
+        ApplicationExitInfo exit = exits.get(0);
+        return "rhr-exit time=" + exit.getTimestamp()
+                + " pid=" + exit.getPid()
+                + " reason=" + reasonName(exit.getReason())
+                + " status=" + exit.getStatus()
+                + " description=" + exit.getDescription() + "\n";
+    }
+
+    private static String reasonName(int reason) {
+        switch (reason) {
+            case ApplicationExitInfo.REASON_CRASH: return "crash";
+            case ApplicationExitInfo.REASON_CRASH_NATIVE: return "native_crash";
+            case ApplicationExitInfo.REASON_ANR: return "anr";
+            case ApplicationExitInfo.REASON_LOW_MEMORY: return "low_memory";
+            case ApplicationExitInfo.REASON_EXIT_SELF: return "exit_self";
+            case ApplicationExitInfo.REASON_SIGNALED: return "signaled";
+            case ApplicationExitInfo.REASON_USER_REQUESTED: return "user_requested";
+            case ApplicationExitInfo.REASON_PERMISSION_CHANGE: return "permission_change";
+            case ApplicationExitInfo.REASON_DEPENDENCY_DIED: return "dependency_died";
+            case ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: return "excessive_resource_usage";
+            default: return String.valueOf(reason);
+        }
+    }
+
+    private static boolean callerIsPlayer(Context context) {
+        try {
+            Bundle meta = context.getPackageManager()
+                    .getApplicationInfo(context.getPackageName(), PackageManager.GET_META_DATA)
+                    .metaData;
+            String player = meta.getString("dev.rhr.beacon.player");
+            String certificate = meta.getString("dev.rhr.beacon.playerCertificate");
+            if (player == null || certificate == null) return false;
+            PackageManager packages = context.getPackageManager();
+            String[] callers = packages.getPackagesForUid(Binder.getCallingUid());
+            if (callers == null) return false;
+            for (String caller : callers) {
+                if (caller.equals(player)) return signedBy(packages, player, certificate);
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
     }
 
     private static void watch(Context context) {

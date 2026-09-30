@@ -215,6 +215,18 @@ class RhrBridge {
         void handleFrame(Object raw) {
           final f = decodeFrame(raw as List<int>);
           switch (f.op) {
+            case opOpen when f.payload.isNotEmpty:
+              // Device control and native logs live in the Android player;
+              // a pure-Dart host has neither, and says so.
+              final why = targetRefusal(
+                f.payload.first,
+                'This host is the pure-Dart RHR bridge, which has no device '
+                'control or native log. Use the RHR player on an Android phone.',
+              );
+              unawaited(() async {
+                await sendFrame(encodeFrame(opData, f.channel, why));
+                await sendFrame(encodeFrame(opClose, f.channel));
+              }());
             case opOpen:
               _pending[f.channel] = [];
               unawaited(_openChannel(ws, f.channel, vmUri, sendFrame));

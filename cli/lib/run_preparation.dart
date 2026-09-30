@@ -38,12 +38,17 @@ final class PreparedRun {
   const PreparedRun(
     this.vm,
     this.assetStoreId,
-    this.route, {
+    this.route,
+    this.package, {
     this.staleDart = false,
   });
   final Uri vm;
   final String assetStoreId;
   final RunRoute route;
+
+  /// The Android package the project runs in: its own debug app, or the
+  /// player that hosts it.
+  final String package;
 
   /// The installed app was built from older Dart source than the project
   /// holds now. A hot restart after attaching brings it up to date.
@@ -422,6 +427,7 @@ final class RunPreparation {
         vm,
         '',
         route,
+        package,
         staleDart: apkDart != projectInputs.dart,
       );
     }
@@ -473,7 +479,10 @@ final class RunPreparation {
       throw StateError(
         'Android bundle build failed:\n${build.stdout}\n${build.stderr}',
       );
-    return PreparedRun(vm, store, route);
+    final player = info['playerPackage'];
+    if (player is! String)
+      throw const FormatException('The player did not report its package.');
+    return PreparedRun(vm, store, route, player);
   }
 
   /// Builds the project's release APK, signed the way the project signs
