@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -149,6 +150,8 @@ class MainActivity : FlutterActivity() {
 	override fun onPostResume() {
 		super.onPostResume()
 		OverlayService.setPlayerVisible(true)
+		RhrSessionService.updateListeners.add(keepScreenOn)
+		keepScreenOn()
 		// Attach the native dev overlay above the Flutter surface once the
 		// content view exists. Idempotent-guarded so config changes don't stack.
 		if (overlay == null) {
@@ -157,10 +160,22 @@ class MainActivity : FlutterActivity() {
 	}
 
 	override fun onPause() {
+		RhrSessionService.updateListeners.remove(keepScreenOn)
 		overlay?.detach()
 		overlay = null
 		OverlayService.setPlayerVisible(false)
 		super.onPause()
+	}
+
+	// The session service's overlay holds the screen when the player may draw
+	// over other apps. Without that permission, this keeps the player's own
+	// screen on while a developer is connected.
+	private val keepScreenOn: () -> Unit = {
+		runOnUiThread {
+			if (RhrSessionService.status == "connected")
+				window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+			else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+		}
 	}
 
 	override fun onDestroy() {

@@ -366,6 +366,7 @@ class RhrSessionService : Service() {
 	override fun onCreate() {
 		super.onCreate()
 		RhrSessionService.current = this
+		updateListeners.add(refreshScreenHold)
 		if (android.os.Build.VERSION.SDK_INT >= 24) {
 			getSystemService(android.net.ConnectivityManager::class.java)
 				?.registerDefaultNetworkCallback(networkCallback)
@@ -547,8 +548,61 @@ class RhrSessionService : Service() {
 		directTransport?.close()
 		directTransport = null
 		devfsObserver?.stopWatching()
+		updateListeners.remove(refreshScreenHold)
+		main.removeCallbacksAndMessages(null)
+		holdScreen(false)
 		if (RhrSessionService.current === this) RhrSessionService.current = null
 		super.onDestroy()
+	}
+
+	private val main = android.os.Handler(android.os.Looper.getMainLooper())
+	private val refreshScreenHold: () -> Unit = {
+		main.post { if (RhrSessionService.current === this) holdScreen(status == "connected") }
+	}
+	private var screenHold: android.view.View? = null
+
+	/**
+	 * Keeps the display from timing out while a developer is connected,
+	 * whatever the session is doing: building, installing, or running.
+	 *
+	 * The tester may be looking at the player or at a separate debug app, and
+	 * the player cannot set FLAG_KEEP_SCREEN_ON on another app's window. It
+	 * can set it on a window of its own above everything: the flag holds the
+	 * screen for as long as any visible window carries it. So this is a 1×1,
+	 * fully transparent, untouchable overlay whose only job is the flag.
+	 * Fully transparent also exempts it from Android 12's untrusted-touch
+	 * blocking.
+	 *
+	 * It needs the "display over other apps" permission. Without it the
+	 * player's own Activity still sets the flag while it is on screen. The
+	 * power button still turns the screen off; only the idle timeout is
+	 * suppressed.
+	 */
+	private fun holdScreen(hold: Boolean) {
+		val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+		val current = screenHold
+		// TYPE_APPLICATION_OVERLAY is API 26; older phones rely on the Activity.
+		if (!hold || android.os.Build.VERSION.SDK_INT < 26 ||
+			!android.provider.Settings.canDrawOverlays(this)
+		) {
+			if (current != null) runCatching { wm.removeView(current) }
+			screenHold = null
+			return
+		}
+		if (current != null) return
+		val view = android.view.View(this)
+		val params = android.view.WindowManager.LayoutParams(
+			1,
+			1,
+			android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+			android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+				android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+				android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+			android.graphics.PixelFormat.TRANSLUCENT,
+		).apply { alpha = 0f }
+		runCatching { wm.addView(view, params) }
+			.onSuccess { screenHold = view }
+			.onFailure { Log.w(TAG, "screen hold rejected", it) }
 	}
 
 	// ---- live VM service URI discovery ------------------------------------

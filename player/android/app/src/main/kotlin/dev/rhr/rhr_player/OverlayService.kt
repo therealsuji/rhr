@@ -6,12 +6,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.graphics.PixelFormat
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
-import android.view.View
-import android.view.WindowManager
 
 /**
  * Owns the dev overlay in CONNECTOR mode, where the tester is looking at their
@@ -29,7 +26,6 @@ import android.view.WindowManager
  */
 class OverlayService : Service() {
 	private var overlay: DevOverlay? = null
-	private var screenHold: View? = null
 	private val main = Handler(Looper.getMainLooper())
 	private val refreshOverlay: () -> Unit = { main.post { refresh() } }
 
@@ -57,7 +53,6 @@ class OverlayService : Service() {
 		if (!RhrSessionService.usesExternalVm) {
 			stopSelf()
 		}
-		holdScreen(RhrSessionService.usesExternalVm && RhrSessionService.status == "connected")
 		if (playerVisible || !RhrSessionService.usesExternalVm) {
 			overlay?.detach()
 			overlay = null
@@ -68,46 +63,7 @@ class OverlayService : Service() {
 		}
 	}
 
-	/**
-	 * Keeps the display from timing out while a developer is attached.
-	 *
-	 * The streamed app is another package, so the player cannot set
-	 * FLAG_KEEP_SCREEN_ON on the window the tester is looking at. It can set
-	 * it on a window of its own above that app: the flag holds the screen for
-	 * as long as any visible window carries it. So this is a 1×1, fully
-	 * transparent, untouchable overlay whose only job is the flag. Fully
-	 * transparent also exempts it from Android 12's untrusted-touch blocking.
-	 *
-	 * The bubble window cannot carry the flag instead: it is only on screen
-	 * after a shake. The power button still turns the screen off; only the
-	 * idle timeout is suppressed.
-	 */
-	private fun holdScreen(hold: Boolean) {
-		val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-		val current = screenHold
-		if (!hold || !SystemOverlayHost.granted(this)) {
-			if (current != null) runCatching { wm.removeView(current) }
-			screenHold = null
-			return
-		}
-		if (current != null) return
-		val view = View(this)
-		val params = WindowManager.LayoutParams(
-			1,
-			1,
-			WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-			WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-				WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-				WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
-			PixelFormat.TRANSLUCENT,
-		).apply { alpha = 0f }
-		runCatching { wm.addView(view, params) }
-			.onSuccess { screenHold = view }
-			.onFailure { android.util.Log.w("rhr_overlay", "screen hold rejected", it) }
-	}
-
 	override fun onDestroy() {
-		holdScreen(false)
 		overlay?.detach()
 		overlay = null
 		RhrSessionService.updateListeners.remove(refreshOverlay)
