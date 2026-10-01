@@ -149,3 +149,60 @@ Future<({bool ok, String message})> installLauncher() async {
     return (ok: false, message: 'could not write $launcherPath: $error');
   }
 }
+
+/// Whether `claude mcp get rhr` describes `rhr mcp` started through
+/// [launcherPath] for every project.
+bool mcpRegistrationCurrent(String claudeMcpGet) =>
+    claudeMcpGet.contains('Scope: User config') &&
+    claudeMcpGet.contains('Command: $launcherPath') &&
+    RegExp(r'^\s*Args: mcp\s*$', multiLine: true).hasMatch(claudeMcpGet);
+
+/// Registers `rhr mcp` with Claude Code for every project (user scope), the
+/// way `argent init` registers argent. It runs through [launcherPath], so it
+/// works however Claude Code was started, and finds the session from the
+/// project directory it is launched in.
+Future<({bool ok, String message})> registerMcp() async {
+  const add = 'claude mcp add --scope user rhr -- $launcherPath mcp';
+  try {
+    final current = await Process.run('claude', ['mcp', 'get', 'rhr']);
+    if (current.exitCode == 0 && mcpRegistrationCurrent('${current.stdout}')) {
+      return (ok: true, message: 'rhr mcp is registered with Claude Code');
+    }
+    // Registered differently (another scope or command): replace it.
+    if (current.exitCode == 0) {
+      for (final scope in const ['user', 'local', 'project']) {
+        await Process.run('claude', ['mcp', 'remove', 'rhr', '-s', scope]);
+      }
+    }
+    final added = await Process.run('claude', [
+      'mcp',
+      'add',
+      '--scope',
+      'user',
+      'rhr',
+      '--',
+      launcherPath,
+      'mcp',
+    ]);
+    return added.exitCode == 0
+        ? (
+            ok: true,
+            message:
+                'registered rhr mcp with Claude Code: agents can see and drive '
+                'the phone of the rhr session in their project',
+          )
+        : (
+            ok: false,
+            message:
+                'could not register rhr mcp with Claude Code '
+                '(${'${added.stderr}'.trim()}). To add it: $add',
+          );
+  } on ProcessException {
+    return (
+      ok: true,
+      message:
+          'Claude Code is not installed, so rhr mcp was not registered. '
+          'Another MCP client can run: $launcherPath mcp',
+    );
+  }
+}

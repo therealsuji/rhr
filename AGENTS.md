@@ -39,7 +39,7 @@ dart run <this-repo>/cli/bin/rhr.dart attach \
   [--pid-file /tmp/rhr.pid] [--no-flutter]
 
 # Agent control of the phone in a running session (from the Flutter project dir)
-claude mcp add rhr -- rhr mcp     # tools: status, screenshot, describe, tap, …, install_agent
+rhr mcp                           # stdio MCP server; `rhr setup` registers it with Claude Code (user scope)
 # RHR Agent APK for a self-built player (in player/android):
 ./gradlew :agent:assembleDebug
 

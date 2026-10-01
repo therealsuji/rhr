@@ -51,4 +51,29 @@ void main() {
     },
     testOn: '!windows',
   );
+
+  test('the rhr mcp registration is current only through the launcher', () {
+    const current =
+        'rhr:\n'
+        '  Scope: User config (available in all your projects)\n'
+        '  Status: ✔ Connected\n'
+        '  Type: stdio\n'
+        '  Command: $launcherPath\n'
+        '  Args: mcp\n';
+    expect(mcpRegistrationCurrent(current), isTrue);
+    expect(
+      mcpRegistrationCurrent(current.replaceFirst(launcherPath, 'rhr')),
+      isFalse,
+    );
+    expect(
+      mcpRegistrationCurrent(
+        current.replaceFirst('User config', 'Local config'),
+      ),
+      isFalse,
+    );
+    expect(
+      mcpRegistrationCurrent(current.replaceFirst('Args: mcp', 'Args: run')),
+      isFalse,
+    );
+  });
 }
