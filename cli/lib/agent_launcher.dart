@@ -18,19 +18,32 @@ String? installedRhr() {
   return rhr.existsSync() ? rhr.path : null;
 }
 
-/// The folders `dart`, `flutter` and `adb` resolve to on this PATH. Left as
-/// found, not resolved through links: `~/fvm/default/bin` should follow fvm
-/// when its default changes. adb is optional; it enables the USB asset path.
-List<String> toolFolders() {
-  final path = (Platform.environment['PATH'] ?? '').split(':');
+/// The folders `dart`, `flutter`, `adb` and `java` resolve to on this
+/// [environment]'s PATH. Left as found, not resolved through links:
+/// `~/fvm/default/bin` should follow fvm when its default changes. adb is
+/// optional; it enables the USB asset path. java is for the SDK's
+/// `apksigner`, which runs `java` from PATH and ignores JAVA_HOME, so a JDK
+/// set only through JAVA_HOME contributes its `bin`.
+List<String> toolFolders([Map<String, String>? environment]) {
+  final env = environment ?? Platform.environment;
+  final path = (env['PATH'] ?? '').split(':');
   final folders = <String>[];
-  for (final tool in const ['dart', 'flutter', 'adb']) {
+  for (final tool in const ['dart', 'flutter', 'adb', 'java']) {
+    var found = false;
     for (final folder in path) {
       if (folder.isEmpty) continue;
       if (File('$folder/$tool').existsSync()) {
         if (!folders.contains(folder)) folders.add(folder);
+        found = true;
         break;
       }
+    }
+    final javaHome = env['JAVA_HOME'];
+    if (!found &&
+        tool == 'java' &&
+        javaHome != null &&
+        File('$javaHome/bin/java').existsSync()) {
+      folders.add('$javaHome/bin');
     }
   }
   return folders;

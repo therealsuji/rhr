@@ -114,4 +114,27 @@ void main() {
     expect(jsonDecode(withOpenCodeRhr('')!)['mcp']['rhr'], isNotNull);
     expect(() => withOpenCodeRhr('[]'), throwsFormatException);
   });
+
+  test('the launcher puts java on PATH, from PATH or JAVA_HOME', () {
+    final dir = Directory.systemTemp.createTempSync('rhr tools');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    File tool(String folder, String name) =>
+        File('${dir.path}/$folder/$name')..createSync(recursive: true);
+    tool('fvm', 'dart');
+    tool('fvm', 'flutter');
+    tool('sdk', 'adb');
+    tool('jdk/bin', 'java');
+    final fvm = '${dir.path}/fvm';
+    final sdk = '${dir.path}/sdk';
+    final jdk = '${dir.path}/jdk/bin';
+
+    expect(toolFolders({'PATH': '$fvm:$sdk:$jdk'}), [fvm, sdk, jdk]);
+    // apksigner runs java from PATH, so a JAVA_HOME-only JDK still lands there.
+    expect(toolFolders({'PATH': '$fvm:$sdk', 'JAVA_HOME': '${dir.path}/jdk'}), [
+      fvm,
+      sdk,
+      jdk,
+    ]);
+    expect(toolFolders({'PATH': '$fvm:$sdk'}), [fvm, sdk]);
+  });
 }
