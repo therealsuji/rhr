@@ -60,7 +60,7 @@ rhr — Expo Go for Flutter, over the internet.
 Usage:
   rhr setup [--relay <url>]   once per machine: let any shell and agent run rhr,
                               register the "rhr" Flutter device, and register
-                              rhr mcp with Claude Code
+                              rhr mcp with Claude Code, Codex and OpenCode
   rhr run [options]           pair, check, prepare, and run this project
   rhr attach [options]        connect to a session and hot reload into it
   rhr persist [options]       install a debug build of the current code, so
@@ -69,7 +69,8 @@ Usage:
   rhr mcp [--project <dir>]   MCP server (stdio) that lets a coding agent see,
                               tap, read logs and hot reload on the phone of the
                               rhr session running for the project
-                              (rhr setup registers it with Claude Code)
+                              (rhr setup registers it with Claude Code, Codex
+                              and OpenCode)
   rhr doctor                  check the local Flutter/RHR setup
   rhr login                   sign in so this machine can use account devices
   rhr logout                  forget the signed-in account
@@ -264,9 +265,11 @@ Future<void> main(List<String> args) async {
       exit(1);
     }
     // Needs the launcher above: that is the command it registers.
-    final mcp = await registerMcp();
-    stderr.writeln('[rhr] ${mcp.message}');
-    if (!mcp.ok) exit(1);
+    final clients = await registerMcp();
+    for (final client in clients) {
+      stderr.writeln('[rhr] ${client.message}');
+    }
+    if (clients.any((client) => !client.ok)) exit(1);
     stderr.writeln('[rhr] ✅ setup complete. Any shell and agent can run rhr.');
     exit(0);
   }

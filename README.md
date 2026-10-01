@@ -137,7 +137,7 @@ Fault-injected USB run recovered without falling back to wireless; independent i
 
 `rhr mcp` is an MCP server that lets an agent see and debug the app on the tester's phone through your running `rhr run`:
 
-`rhr setup` registers it with Claude Code for every project (another MCP client runs `/usr/local/bin/rhr mcp` from the project directory).
+`rhr setup` registers it for every project with Claude Code, Codex and OpenCode, whichever are installed. Another MCP client can run `/usr/local/bin/rhr mcp` from the project directory.
 
 The agent gets screenshots, the screen's element tree (Flutter, native views and system dialogs), taps, swipes, typing, system buttons, the app's native log, `evaluate`, and hot reload or restart with Flutter's output. Coordinates are fractions of the screen.
 

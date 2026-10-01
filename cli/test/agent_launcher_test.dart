@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:rhr_cli/agent_launcher.dart';
@@ -75,5 +76,42 @@ void main() {
       mcpRegistrationCurrent(current.replaceFirst('Args: mcp', 'Args: run')),
       isFalse,
     );
+  });
+
+  test('the Codex registration is current only through the launcher', () {
+    String get(String command, List<String> args) => jsonEncode({
+      'name': 'rhr',
+      'transport': {'type': 'stdio', 'command': command, 'args': args},
+    });
+    expect(codexRegistrationCurrent(get(launcherPath, ['mcp'])), isTrue);
+    expect(codexRegistrationCurrent(get('rhr', ['mcp'])), isFalse);
+    expect(codexRegistrationCurrent(get(launcherPath, ['run'])), isFalse);
+    expect(codexRegistrationCurrent('Error: no server'), isFalse);
+  });
+
+  test('OpenCode keeps its config and gains rhr mcp once', () {
+    const config =
+        '{\n'
+        '\t"\$schema": "https://opencode.ai/config.json",\n'
+        '\t"mcp": {\n'
+        '\t\t"pencil": {"type": "local", "command": ["pen"], "enabled": true}\n'
+        '\t},\n'
+        '\t"plugin": ["a"]\n'
+        '}\n';
+    final updated = withOpenCodeRhr(config)!;
+    final decoded = jsonDecode(updated) as Map<String, dynamic>;
+    expect(decoded.keys, [r'$schema', 'mcp', 'plugin']);
+    expect((decoded['mcp'] as Map).keys, ['pencil', 'rhr']);
+    expect(decoded['mcp']['rhr'], {
+      'type': 'local',
+      'command': [launcherPath, 'mcp'],
+      'enabled': true,
+    });
+    expect(updated, startsWith('{\n\t"'));
+    // A second setup leaves the file alone.
+    expect(withOpenCodeRhr(updated), isNull);
+    // No config yet.
+    expect(jsonDecode(withOpenCodeRhr('')!)['mcp']['rhr'], isNotNull);
+    expect(() => withOpenCodeRhr('[]'), throwsFormatException);
   });
 }

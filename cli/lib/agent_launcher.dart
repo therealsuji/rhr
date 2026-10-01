@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 /// Where the launcher goes: the one folder every shell searches, including
@@ -150,6 +151,20 @@ Future<({bool ok, String message})> installLauncher() async {
   }
 }
 
+/// What setup did about one MCP client.
+typedef McpRegistration = ({bool ok, String message});
+
+/// Registers `rhr mcp` with every installed MCP client the way `argent init`
+/// registers argent: Claude Code, Codex and OpenCode, each for all projects.
+/// It runs through [launcherPath], so it works however the client was
+/// started. Each client starts it in the project directory, which is how it
+/// finds that project's rhr session.
+Future<List<McpRegistration>> registerMcp() async => [
+  await _registerClaude(),
+  await _registerCodex(),
+  await _registerOpenCode(),
+];
+
 /// Whether `claude mcp get rhr` describes `rhr mcp` started through
 /// [launcherPath] for every project.
 bool mcpRegistrationCurrent(String claudeMcpGet) =>
@@ -157,16 +172,12 @@ bool mcpRegistrationCurrent(String claudeMcpGet) =>
     claudeMcpGet.contains('Command: $launcherPath') &&
     RegExp(r'^\s*Args: mcp\s*$', multiLine: true).hasMatch(claudeMcpGet);
 
-/// Registers `rhr mcp` with Claude Code for every project (user scope), the
-/// way `argent init` registers argent. It runs through [launcherPath], so it
-/// works however Claude Code was started, and finds the session from the
-/// project directory it is launched in.
-Future<({bool ok, String message})> registerMcp() async {
+Future<McpRegistration> _registerClaude() async {
   const add = 'claude mcp add --scope user rhr -- $launcherPath mcp';
   try {
     final current = await Process.run('claude', ['mcp', 'get', 'rhr']);
     if (current.exitCode == 0 && mcpRegistrationCurrent('${current.stdout}')) {
-      return (ok: true, message: 'rhr mcp is registered with Claude Code');
+      return (ok: true, message: 'Claude Code: rhr mcp is registered');
     }
     // Registered differently (another scope or command): replace it.
     if (current.exitCode == 0) {
@@ -185,24 +196,136 @@ Future<({bool ok, String message})> registerMcp() async {
       'mcp',
     ]);
     return added.exitCode == 0
-        ? (
-            ok: true,
-            message:
-                'registered rhr mcp with Claude Code: agents can see and drive '
-                'the phone of the rhr session in their project',
-          )
+        ? (ok: true, message: 'Claude Code: registered rhr mcp')
         : (
             ok: false,
             message:
-                'could not register rhr mcp with Claude Code '
+                'Claude Code: could not register rhr mcp '
                 '(${'${added.stderr}'.trim()}). To add it: $add',
           );
   } on ProcessException {
+    return (ok: true, message: 'Claude Code is not installed; skipped');
+  }
+}
+
+/// Whether `codex mcp get rhr --json` describes `rhr mcp` started through
+/// [launcherPath].
+bool codexRegistrationCurrent(String codexMcpGetJson) {
+  try {
+    final transport = (jsonDecode(codexMcpGetJson) as Map)['transport'];
+    return transport is Map &&
+        transport['command'] == launcherPath &&
+        '${transport['args']}' == '[mcp]';
+  } on FormatException {
+    return false;
+  }
+}
+
+Future<McpRegistration> _registerCodex() async {
+  const add = 'codex mcp add rhr -- $launcherPath mcp';
+  try {
+    final current = await Process.run('codex', ['mcp', 'get', 'rhr', '--json']);
+    if (current.exitCode == 0) {
+      if (codexRegistrationCurrent('${current.stdout}')) {
+        return (ok: true, message: 'Codex: rhr mcp is registered');
+      }
+      await Process.run('codex', ['mcp', 'remove', 'rhr']);
+    }
+    final added = await Process.run('codex', [
+      'mcp',
+      'add',
+      'rhr',
+      '--',
+      launcherPath,
+      'mcp',
+    ]);
+    return added.exitCode == 0
+        ? (ok: true, message: 'Codex: registered rhr mcp')
+        : (
+            ok: false,
+            message:
+                'Codex: could not register rhr mcp '
+                '(${'${added.stderr}'.trim()}). To add it: $add',
+          );
+  } on ProcessException {
+    return (ok: true, message: 'Codex is not installed; skipped');
+  }
+}
+
+/// OpenCode's entry for `rhr mcp`.
+const _openCodeEntry = {
+  'type': 'local',
+  'command': [launcherPath, 'mcp'],
+  'enabled': true,
+};
+
+/// [config] (OpenCode's opencode.json) with `rhr mcp` registered, or null
+/// when it already is. Everything else in the file is kept, in order, and
+/// written back with the indent the file already uses.
+String? withOpenCodeRhr(String config) {
+  final decoded = config.trim().isEmpty
+      ? <String, dynamic>{}
+      : jsonDecode(config);
+  if (decoded is! Map<String, dynamic>) {
+    throw const FormatException('opencode.json is not a JSON object');
+  }
+  final mcp = decoded['mcp'];
+  if (mcp != null && mcp is! Map<String, dynamic>) {
+    throw const FormatException(
+      'opencode.json has an "mcp" that is not an object',
+    );
+  }
+  if (jsonEncode(mcp?['rhr']) == jsonEncode(_openCodeEntry)) return null;
+  decoded['mcp'] = {...?mcp, 'rhr': _openCodeEntry};
+  final indent =
+      RegExp(r'^([ \t]+)"', multiLine: true).firstMatch(config)?.group(1) ??
+      '  ';
+  return '${JsonEncoder.withIndent(indent).convert(decoded)}\n';
+}
+
+Future<McpRegistration> _registerOpenCode() async {
+  final env = Platform.environment;
+  final configHome = env['XDG_CONFIG_HOME'] ?? '${env['HOME']}/.config';
+  final directory = Directory('$configHome/opencode');
+  final file = File('${directory.path}/opencode.json');
+  const entry =
+      '"mcp": {"rhr": {"type": "local", "command": ["$launcherPath", "mcp"], '
+      '"enabled": true}}';
+  final installed = await () async {
+    try {
+      return (await Process.run('opencode', ['--version'])).exitCode == 0;
+    } on ProcessException {
+      return false;
+    }
+  }();
+  if (!installed && !directory.existsSync()) {
+    return (ok: true, message: 'OpenCode is not installed; skipped');
+  }
+  // A .jsonc file has comments that a JSON rewrite would drop.
+  if (!file.existsSync() &&
+      File('${directory.path}/opencode.jsonc').existsSync()) {
     return (
-      ok: true,
+      ok: false,
       message:
-          'Claude Code is not installed, so rhr mcp was not registered. '
-          'Another MCP client can run: $launcherPath mcp',
+          'OpenCode: add rhr mcp to ${directory.path}/opencode.jsonc '
+          'yourself: $entry',
+    );
+  }
+  try {
+    final updated = withOpenCodeRhr(
+      file.existsSync() ? file.readAsStringSync() : '',
+    );
+    if (updated == null) {
+      return (ok: true, message: 'OpenCode: rhr mcp is registered');
+    }
+    directory.createSync(recursive: true);
+    final staged = File('${file.path}.rhr')..writeAsStringSync(updated);
+    staged.renameSync(file.path);
+    return (ok: true, message: 'OpenCode: registered rhr mcp');
+  } on FormatException catch (error) {
+    return (
+      ok: false,
+      message: 'OpenCode: ${file.path} could not be read ($error). Add: $entry',
     );
   }
 }
