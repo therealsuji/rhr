@@ -72,7 +72,7 @@ data class SessionBanner(
 			// The developer's agent seeing and tapping the phone is never
 			// silent, but anything the session has to say comes first.
 			return if (agentActive && !banner.isVisible) {
-				SessionBanner("Your developer's agent is using this phone", null, Style.BUSY)
+				SessionBanner("Your developer's coding agent is using this phone", null, Style.BUSY)
 			} else {
 				banner
 			}

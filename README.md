@@ -137,11 +137,13 @@ Fault-injected USB run recovered without falling back to wireless; independent i
 
 `rhr mcp` is an MCP server that lets an agent see and debug the app on the tester's phone through your running `rhr run`:
 
-`rhr setup` registers it for every project with Claude Code, Codex and OpenCode, whichever are installed. Another MCP client can run `/usr/local/bin/rhr mcp` from the project directory.
+`rhr setup` registers it in the user config of Claude Code, Codex and OpenCode, whichever are installed, so it is there in every project. `rhr setup --no-mcp` leaves those configs alone, and `rhr doctor` shows which clients have it. Another MCP client can run `/usr/local/bin/rhr mcp` from the project directory.
+
+`rhr mcp` serves the session of the directory it starts in, or the nearest one above it. Started at a monorepo root, it finds the one app below that runs a session. With several, pass `--project <dir>`.
 
 The agent gets screenshots, the screen's element tree (Flutter, native views and system dialogs), taps, swipes, typing, system buttons, the app's native log, `evaluate`, and hot reload or restart with Flutter's output. Coordinates are fractions of the screen.
 
-Seeing and tapping need RHR Agent, a small accessibility add-on. Play Protect blocks browser installs of any APK with an accessibility service, so it's separate from the player, and the player installs it. The agent calls `install_agent`; the tester confirms the install and turns RHR Agent on in Accessibility settings. It only answers the player signed with its own key, and only during a session. While it acts, the phone says so, and the session notification offers "Stop agent control".
+Seeing and tapping need RHR Agent, a small accessibility add-on. Play Protect blocks browser installs of any APK with an accessibility service, so it's separate from the player, and the player installs it. The agent calls `install_agent`; the tester confirms the install and turns RHR Agent on in Accessibility settings. It only answers the player signed with its own key, and only during a session. While it acts, the phone says so, and the session notification offers "Stop agent control". After a stop, every device request fails until the tester taps "Allow agent control" or connects again.
 
 Logs, evaluate and hot reload work without it.
 
@@ -183,6 +185,8 @@ Session code = **bearer token**. Anyone with it can attach to the relayed VM ser
 The automatic LAN path is unencrypted `ws://` on the local network. Compiled debug artifacts only, not source — still needs the random session code. Don't use it on untrusted networks; stick to `wss://` if local observers matter.
 
 With RHR Agent turned on, the session code also lets the developer's agent see the whole screen and tap anywhere on the phone, system dialogs included. That reaches past the app, so the tester can stop it from the session notification or turn RHR Agent off in Accessibility settings.
+
+The agent reads the phone's screen and logs, and they can show any app or web page. `rhr mcp` tells the agent to treat that text as data, but a prompt injection on screen is still text your agent reads. Keep the agent's other permissions narrow while it drives a tester's phone.
 
 The relay sees compiled kernel bytes, not source. Logs don't record session codes, VM Service URIs, or frame contents. See [SECURITY.md](SECURITY.md) before reporting issues.
 

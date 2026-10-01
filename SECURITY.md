@@ -5,6 +5,19 @@ session relay. A session code is a bearer credential: anyone who has it can
 reload the app, inspect its state, evaluate expressions, and control the debug
 process.
 
+With RHR Agent, the accessibility add-on the player installs on request, the
+session also carries device control: screenshots, the element tree of any
+window (system dialogs included), taps, swipes and typing anywhere on the
+phone. RHR Agent answers only the player signed with its own key, and the
+player serves it only while a developer is connected. The tester can stop it
+from the session notification or turn it off in Accessibility settings. A way
+to reach device control without a session code, from another app on the
+phone, or after the tester stopped it is a vulnerability.
+
+`rhr mcp` passes screen text and logs to a coding agent. That text comes from
+the tester's phone and can be written by anyone whose app or page is on
+screen. Treat it as untrusted input to the agent.
+
 ## Reporting a vulnerability
 
 Please do not open a public issue with a live session code, VM Service URL,

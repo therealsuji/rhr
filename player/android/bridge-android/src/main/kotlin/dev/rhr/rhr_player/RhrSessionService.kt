@@ -257,18 +257,26 @@ class RhrSessionService : Service() {
 		/**
 		 * Device control, as the tester sees it. [agentActive] holds for a few
 		 * seconds after each request, so both surfaces can say the agent is
-		 * at work; [agentStopped] is the tester's "Stop agent control", which
-		 * refuses every request until they connect again.
+		 * at work. [agentControlling] holds from the agent's first answer
+		 * until the developer leaves, and is when the notification offers
+		 * "Stop agent control". [agentStopped] is the tester's choice: it
+		 * refuses every request until they allow it again or connect again.
 		 */
 		private const val AGENT_ACTIVE_MS = 5_000L
 		@Volatile private var agentActedAt = 0L
 		@Volatile var agentStopped = false
+		@Volatile var agentControlling = false
 		val agentActive: Boolean get() = System.currentTimeMillis() - agentActedAt < AGENT_ACTIVE_MS
 		private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
 
+		/** RHR Agent answered a request: it can see and tap this phone. */
 		fun agentActed() {
 			val announce = !agentActive
 			agentActedAt = System.currentTimeMillis()
+			if (!agentControlling) {
+				agentControlling = true
+				current?.refreshNotification()
+			}
 			if (!announce) return
 			updateListeners.forEach { it() }
 			// And once more when it lapses, or the card would stay up.
@@ -337,9 +345,6 @@ class RhrSessionService : Service() {
 	// The connected app whose VM the tunnel reaches, or null for the player's
 	// own engine. Native logs come from this app's beacon.
 	@Volatile private var connectedPackage: String? = null
-	// Whether the developer has opened device control in this session, which
-	// is when the notification offers to stop it.
-	@Volatile private var agentConnected = false
 	private var projectHint: String? = null
 	private val sockets = ConcurrentHashMap<Int, ChannelEnd>()
 	private val readers = ConcurrentHashMap<Int, Thread>()
@@ -500,7 +505,7 @@ class RhrSessionService : Service() {
 					devLeft = false
 					// "Stop agent control" lasts until the tester connects again.
 					agentStopped = false
-					agentConnected = false
+					agentControlling = false
 					sweepOrphanedDevfsDirs()
 					if (watchOwnVm) watchForDevfsDirs()
 					// The VM watcher tracks OUR own service URI across guest hot
@@ -548,6 +553,10 @@ class RhrSessionService : Service() {
 			}
 			"stop_agent" -> {
 				agentStopped = true
+				refreshNotification()
+			}
+			"allow_agent" -> {
+				agentStopped = false
 				refreshNotification()
 			}
 			"stop" -> {
@@ -997,6 +1006,11 @@ class RhrSessionService : Service() {
 							directTransport = null
 							directFailureReported = false
 							resumeOwnVm()
+							// Their agent left with them.
+							if (agentControlling) {
+								agentControlling = false
+								refreshNotification()
+							}
 							return
 						}
 						// Anything else is developer traffic (hello, ping, progress,
@@ -1393,10 +1407,6 @@ class RhrSessionService : Service() {
 					socket.connect(InetSocketAddress(vm.host ?: "127.0.0.1", vm.port), 5000)
 					ChannelEnd.of(socket)
 				} else {
-					if (target == DeviceEndpoints.TARGET_DEVICE && !agentConnected) {
-						agentConnected = true
-						refreshNotification()
-					}
 					DeviceEndpoints.open(this, target, connectedPackage)
 				}
 				// Flush anything that arrived while we were connecting, then
@@ -1616,17 +1626,19 @@ class RhrSessionService : Service() {
 			.setContentTitle("rhr session active")
 			.setSmallIcon(android.R.drawable.stat_sys_download)
 			.setOngoing(true)
+		fun action(cmd: String, title: String) = Notification.Action.Builder(
+			null, title,
+			PendingIntent.getService(
+				this, 1,
+				Intent(this, RhrSessionService::class.java).putExtra("cmd", cmd),
+				PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+			),
+		).build()
 		when {
-			agentStopped -> builder.setContentText("Agent control is stopped until you connect again")
-			agentConnected -> {
-				val stop = PendingIntent.getService(
-					this, 1,
-					Intent(this, RhrSessionService::class.java).putExtra("cmd", "stop_agent"),
-					PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-				)
-				builder.setContentText("Your developer's agent can see and tap this phone")
-					.addAction(Notification.Action.Builder(null, "Stop agent control", stop).build())
-			}
+			agentStopped -> builder.setContentText("You turned off agent control for this session")
+				.addAction(action("allow_agent", "Allow agent control"))
+			agentControlling -> builder.setContentText("Your developer's coding agent can see and tap this phone")
+				.addAction(action("stop_agent", "Stop agent control"))
 			else -> builder.setContentText("Remote hot reload tunnel is running")
 		}
 		return builder.build()

@@ -113,11 +113,11 @@ internal object DeviceEndpoints {
 		if (RhrSessionService.agentStopped) {
 			return refusal(
 				"agent_stopped",
-				"The tester stopped agent control on the phone. It stays off until they connect again.",
+				"The tester turned off agent control on the phone. It stays off until they allow it again " +
+					"from the session notification, or connect again.",
 			)
 		}
-		RhrSessionService.agentActed()
-		return try {
+		val response = try {
 			context.contentResolver
 				.call(Uri.parse("content://$AGENT_AUTHORITY"), "request", request.toString(), null)
 				?.getString("response")
@@ -139,6 +139,12 @@ internal object DeviceEndpoints {
 				"RHR Agent is not installed on the phone. Install it with install_agent (rhr mcp).",
 			)
 		}
+		// Only an answer from the agent itself means it can see and tap; one
+		// of these says it cannot, so the tester is not told otherwise.
+		if (response.optString("error") !in setOf("agent_missing", "agent_untrusted", "accessibility_off")) {
+			RhrSessionService.agentActed()
+		}
+		return response
 	}
 
 	private fun openBeaconLogs(context: Context, pkg: String): ChannelEnd {
