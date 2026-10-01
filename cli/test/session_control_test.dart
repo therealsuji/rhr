@@ -55,4 +55,22 @@ void main() {
     expect(served, isFalse);
     expect(answer?.ok, isFalse);
   });
+
+  test('findSessionProject finds the session above, or the one below', () {
+    final root = Directory.systemTemp.createTempSync('rhr-mono-');
+    addTearDown(() => root.deleteSync(recursive: true));
+    void session(String dir) =>
+        SessionControl.fileFor('${root.path}/$dir').createSync(recursive: true);
+    Directory('${root.path}/apps/mobile/lib').createSync(recursive: true);
+
+    expect(findSessionProject(root.path), isNull);
+    session('apps/mobile');
+    final mobile = Directory('${root.path}/apps/mobile').absolute.path;
+    // An agent opened at the monorepo root, and one opened inside the app.
+    expect(findSessionProject(root.path), mobile);
+    expect(findSessionProject('${root.path}/apps/mobile/lib'), mobile);
+    // Two running apps below: ambiguous, so say which.
+    session('apps/tablet');
+    expect(() => findSessionProject(root.path), throwsA(isA<StateError>()));
+  });
 }

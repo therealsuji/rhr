@@ -58,9 +58,11 @@ const _usage = '''
 rhr — Expo Go for Flutter, over the internet.
 
 Usage:
-  rhr setup [--relay <url>]   once per machine: let any shell and agent run rhr,
+  rhr setup [--relay <url>] [--no-mcp]
+                              once per machine: let any shell and agent run rhr,
                               register the "rhr" Flutter device, and register
-                              rhr mcp with Claude Code, Codex and OpenCode
+                              rhr mcp with Claude Code, Codex and OpenCode in
+                              your user config (--no-mcp skips that)
   rhr run [options]           pair, check, prepare, and run this project
   rhr attach [options]        connect to a session and hot reload into it
   rhr persist [options]       install a debug build of the current code, so
@@ -166,6 +168,9 @@ const _reprepare = -2;
 /// approval can print the exact command that continues it.
 var _invocation = const <String>[];
 
+/// Whether this process already mentioned `rhr mcp`; once is enough.
+var _agentHintShown = false;
+
 Future<void> main(List<String> args) async {
   if (Platform.environment['RHR_WEBRTC_LOG'] == '1') _logWebRtc();
   if (args.length == 1 &&
@@ -187,10 +192,10 @@ Future<void> main(List<String> args) async {
   }
 
   if (args.first == 'mcp') {
-    var project = Directory.current.path;
+    String? project;
     for (var i = 1; i < args.length; i++) {
       if (args[i] == '--project' && i + 1 < args.length) {
-        project = args[++i];
+        project = Directory(args[++i]).absolute.path;
       } else {
         stderr.writeln('unknown arg: ${args[i]}');
         exit(64);
@@ -198,7 +203,8 @@ Future<void> main(List<String> args) async {
     }
     final server = RhrMcpServer(
       stdioChannel(input: stdin, output: stdout),
-      project: Directory(project).absolute.path,
+      start: Directory.current.path,
+      project: project,
     );
     await server.done;
     exit(0);
@@ -242,8 +248,10 @@ Future<void> main(List<String> args) async {
   // you just pick "rhr" and hit Run — save reloads the remote phone.
   if (args[0] == 'setup') {
     String? relay;
+    var mcp = true;
     for (var i = 1; i < args.length; i++) {
       if (args[i] == '--relay') relay = args[++i];
+      if (args[i] == '--no-mcp') mcp = false;
     }
     // SSH commands and agent tools read no shell config, so without this
     // they find neither rhr nor the dart it runs on. First, so the device
@@ -264,13 +272,26 @@ Future<void> main(List<String> args) async {
       );
       exit(1);
     }
-    // Needs the launcher above: that is the command it registers.
+    if (!mcp) {
+      stderr.writeln(
+        '[rhr] ✅ setup complete. Any shell and agent can run rhr.',
+      );
+      exit(0);
+    }
+    // Needs the launcher above: that is the command it registers. A client
+    // that could not be registered is a warning with the command to run; the
+    // rest of setup stands.
     final clients = await registerMcp();
     for (final client in clients) {
-      stderr.writeln('[rhr] ${client.message}');
+      stderr.writeln('[rhr] ${client.ok ? '' : 'warning: '}${client.message}');
     }
-    if (clients.any((client) => !client.ok)) exit(1);
-    stderr.writeln('[rhr] ✅ setup complete. Any shell and agent can run rhr.');
+    stderr.writeln('[rhr] ${await prefetchPublishedAgent()}');
+    stderr.writeln(
+      '[rhr] ✅ setup complete. Any shell and agent can run rhr, and a coding '
+      'agent in a Flutter project can drive the phone through rhr mcp: during '
+      '`rhr run`, ask it for a screenshot of the phone. (rhr setup --no-mcp '
+      'leaves your coding agents\' configs alone.)',
+    );
     exit(0);
   }
 
@@ -686,6 +707,9 @@ Future<int> _doctor() async {
       'cannot use it',
     );
     stdout.writeln('       run `rhr setup` once on this machine');
+  }
+  for (final line in await mcpDoctorLines()) {
+    stdout.writeln(line);
   }
   try {
     final flutter = await Process.run('flutter', ['--version', '--machine']);
@@ -1749,9 +1773,11 @@ Future<int?> _runSession({
       return (
         ok: true,
         message:
-            'RHR Agent is installed. The phone now shows its setup screen: the '
-            'tester turns it on in Accessibility settings (on Android 13+, '
-            'App info > ⋮ > Allow restricted settings first).',
+            'RHR Agent is installed, and the phone now shows its setup screen. '
+            'Ask the tester to tap Turn on, find RHR Agent in Settings > '
+            'Accessibility and switch it on. If the switch is greyed out: '
+            'App info, the three-dot menu, Allow restricted settings, then '
+            'try the switch again.',
         then: null,
       );
     } on Object catch (error) {
@@ -2098,6 +2124,13 @@ Future<int?> _runSession({
                 ? '[rhr] Ready. Your project is running on the phone.'
                 : '[rhr] Ready. Flutter is attached.',
           );
+          if (!_agentHintShown) {
+            _agentHintShown = true;
+            stderr.writeln(
+              '[rhr] A coding agent in this project can see and drive the '
+              'phone through rhr mcp: ask it for a screenshot of the phone.',
+            );
+          }
           reportProgress('ready', 0, 0);
         }
       } catch (error) {

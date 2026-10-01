@@ -62,7 +62,7 @@ The Dart relay in [`relay/`](relay/) is for dev and single-server self-hosting. 
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.16
+  --git-ref v0.1.0-beta.20
 
 ~/.pub-cache/bin/rhr setup
 ```
@@ -153,7 +153,7 @@ Same as above, locked to the beta tag:
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.16
+  --git-ref v0.1.0-beta.20
 ~/.pub-cache/bin/rhr setup
 ```
 

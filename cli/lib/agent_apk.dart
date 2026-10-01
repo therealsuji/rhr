@@ -48,6 +48,19 @@ Future<File> agentApkFor(String playerCertificate) async {
   return apk;
 }
 
+/// Downloads this version's published agent ahead of time, so the first
+/// `install_agent` does not wait on GitHub while a tester holds the phone.
+/// A message for the developer; a failure only means it is fetched later.
+Future<String> prefetchPublishedAgent() async {
+  try {
+    final apk = await _publishedAgent();
+    return 'RHR Agent $rhrVersion is ready to install (${apk.path})';
+  } on Object catch (error) {
+    return 'could not download RHR Agent yet ($error); install_agent will '
+        'try again when it is needed';
+  }
+}
+
 /// The agent attached to this CLI version's GitHub release, downloaded once
 /// and checked against the release's SHA256SUMS.
 Future<File> _publishedAgent() async {

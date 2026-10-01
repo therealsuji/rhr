@@ -119,6 +119,55 @@ SessionEndpoints? readSessionEndpoints(String project) {
   return null;
 }
 
+/// The project whose rhr session an MCP client in [start] means: [start]
+/// or the nearest folder above it with a running session, else the one
+/// project below it (a few levels down, as in a monorepo) that has one.
+/// Null when there is none; a [StateError] naming them when several
+/// projects below run sessions.
+String? findSessionProject(String start) {
+  bool running(String dir) => SessionControl.fileFor(dir).existsSync();
+  var dir = Directory(start).absolute;
+  while (true) {
+    if (running(dir.path)) return dir.path;
+    final parent = dir.parent;
+    if (parent.path == dir.path) break;
+    dir = parent;
+  }
+  const skipped = {'build', 'node_modules', 'ios', 'android', 'Pods'};
+  final found = <String>[];
+  void search(Directory directory, int depth) {
+    if (depth == 0) return;
+    final List<FileSystemEntity> children;
+    try {
+      children = directory.listSync(followLinks: false);
+    } on FileSystemException {
+      return;
+    }
+    for (final child in children.whereType<Directory>()) {
+      final name = child.uri.pathSegments.where((s) => s.isNotEmpty).last;
+      if (name.startsWith('.') || skipped.contains(name)) continue;
+      if (running(child.path)) {
+        found.add(child.path);
+      } else {
+        search(child, depth - 1);
+      }
+    }
+  }
+
+  // Not from the home folder or the root: that would crawl the disk.
+  final root = Directory(start).absolute;
+  final home = Platform.environment['HOME'];
+  if (root.parent.path != root.path && root.path != home) search(root, 4);
+  if (found.length > 1) {
+    throw StateError(
+      'Several rhr sessions run below $start: ${found.join(', ')}. Start '
+      'your coding agent in the project you mean, or register rhr mcp with '
+      '--project <dir>.',
+    );
+  }
+  return found.singleOrNull;
+}
+
 /// Sends [command] to the session running for [project], and waits for its
 /// answer. Null when no session is running to ask.
 Future<({bool ok, String message})?> sendSessionCommand(

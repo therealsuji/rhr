@@ -53,29 +53,32 @@ void main() {
     testOn: '!windows',
   );
 
-  test('the rhr mcp registration is current only through the launcher', () {
-    const current =
-        'rhr:\n'
-        '  Scope: User config (available in all your projects)\n'
-        '  Status: ✔ Connected\n'
-        '  Type: stdio\n'
-        '  Command: $launcherPath\n'
-        '  Args: mcp\n';
-    expect(mcpRegistrationCurrent(current), isTrue);
+  test('the Claude Code registration is current only through the launcher', () {
+    String config(Object? rhr) => jsonEncode({
+      'mcpServers': {'rhr': rhr, 'other': {}},
+      'projects': {},
+    });
     expect(
-      mcpRegistrationCurrent(current.replaceFirst(launcherPath, 'rhr')),
-      isFalse,
+      claudeRegistrationCurrent(
+        config({
+          'type': 'stdio',
+          'command': launcherPath,
+          'args': ['mcp'],
+        }),
+      ),
+      isTrue,
     );
     expect(
-      mcpRegistrationCurrent(
-        current.replaceFirst('User config', 'Local config'),
+      claudeRegistrationCurrent(
+        config({
+          'command': 'rhr',
+          'args': ['mcp'],
+        }),
       ),
       isFalse,
     );
-    expect(
-      mcpRegistrationCurrent(current.replaceFirst('Args: mcp', 'Args: run')),
-      isFalse,
-    );
+    expect(claudeRegistrationCurrent(config(null)), isFalse);
+    expect(claudeRegistrationCurrent(''), isFalse);
   });
 
   test('the Codex registration is current only through the launcher', () {
