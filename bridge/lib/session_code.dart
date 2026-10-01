@@ -1,5 +1,13 @@
 import 'dart:math';
 
+/// Alphabet for session codes: no `0 1 i l o`, the characters people misread
+/// off a screen or hear wrong over a call.
+///
+/// Twelve characters from these 31 symbols is about 59 bits, which is what
+/// keeps a code unguessable while a session is live. Word lists were
+/// considered and rejected: six words from a 2048-word list buys 66 bits at
+/// two to three times the typing, and only pays off when a code is read
+/// aloud — which the QR already covers.
 const rhrSessionCodeAlphabet = '23456789abcdefghjkmnpqrstuvwxyz';
 
 final rhrSessionCodePattern = RegExp(

@@ -1,0 +1,29 @@
+# The same phases, worded for a player self-update rather than the
+# developer's own app.
+#
+# The two payload kinds share a state machine and differ only in what they
+# call the thing being moved, which is exactly the kind of difference that
+# rots: qa-update-banners would stay green if the player wording regressed to
+# the app's. Same faults, same order, the other branch of every label.
+steps:
+  - launch: dev.rhr.rhr_player
+  - await: { visible: { text: Waiting for developer }, timeout: 20000 }
+  - echo: "Baseline: lobby at rest, waiting for a developer."
+
+  - script: { path: ../scripts/fault-update-player.mjs }
+
+  - echo: "A player update is still a transfer, not an install."
+  - script: { path: ../scripts/fault-phase-updating.mjs }
+  - assert: { visible: { text: Sending player update } }
+  - assert: { hidden: { text: Sending your app } }
+
+  - script: { path: ../scripts/fault-phase-installing.mjs }
+  - assert: { visible: { text: Installing the update } }
+  - assert: { hidden: { text: Sending player update } }
+
+  - script: { path: ../scripts/fault-phase-installed.mjs }
+  - assert: { visible: { text: Update installed } }
+
+  - echo: "Clearing restores the baseline."
+  - script: { path: ../scripts/fault-clear.mjs }
+  - await: { visible: { text: Waiting for developer }, timeout: 15000 }

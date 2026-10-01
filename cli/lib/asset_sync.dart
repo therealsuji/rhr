@@ -30,7 +30,11 @@ Future<void> syncAssets({
   int maxConcurrentUploads = 4,
   AssetTransport? transport,
   AssetProgress? onProgress,
-  FutureOr<void> Function()? afterSync,
+
+  /// Called when the push is done. The flag says whether anything actually
+  /// changed, so a caller that only needs to act on new assets — a hot
+  /// restart, say — can skip the work when there are none.
+  FutureOr<void> Function({required bool changed})? afterSync,
 }) async {
   void report(String phase, int done, int total) =>
       onProgress?.call(phase, done, total);
@@ -93,13 +97,7 @@ Future<void> syncAssets({
     final stat = file.statSync();
     if (entry['size'] != stat.size) return false;
     final hash = entry['sha256'];
-    if (hash is! String) {
-      // Manifest written by an older rhr (size+mtime only). Fall back to the
-      // old check so upgrading doesn't force a full re-upload; the entry gains
-      // a hash the next time this file is pushed.
-      return entry['mtime'] == stat.modified.millisecondsSinceEpoch;
-    }
-    return hash == hashOf(file.readAsBytesSync());
+    return hash is String && hash == hashOf(file.readAsBytesSync());
   }
 
   final allFiles = assetDir
@@ -141,7 +139,7 @@ Future<void> syncAssets({
   if (files.isEmpty) {
     saveManifest();
     stderr.writeln('[rhr] assets already in sync.');
-    await afterSync?.call();
+    await afterSync?.call(changed: false);
     return;
   }
 
@@ -224,7 +222,7 @@ Future<void> syncAssets({
     '${throughput.toStringAsFixed(1)} MB/s, '
     '${result.compressionMilliseconds}ms aggregate compression.',
   );
-  await afterSync?.call();
+  await afterSync?.call(changed: true);
 }
 
 void _applyFingerprints(
@@ -293,9 +291,11 @@ final class _DevFsAssetTransport implements AssetTransport {
             base64.encode(utf8.encode(devFsAssetUri(file.relativePath))),
           );
           httpRequest.add(prepared.encoded);
-          final response = await httpRequest.close().timeout(
-            const Duration(seconds: 60),
-          );
+          // No deadline: the local proxy may hold the whole body before the
+          // tunnel carries it, so the wait for an answer includes the entire
+          // transfer, and a slow cellular link takes as long as it takes. A
+          // stalled tunnel ends the session, which closes this connection.
+          final response = await httpRequest.close();
           final body = await response.transform(utf8.decoder).join();
           if (body.contains('"error"')) {
             throw Exception('DevFS write rejected: $body');

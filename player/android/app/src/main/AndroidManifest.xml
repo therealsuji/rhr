@@ -16,6 +16,27 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
     <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
+    <!-- Over-the-wire player self-update: the CLI streams a replacement APK
+         and the player installs it via PackageInstaller. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- Connector mode draws the shake-to-open session bubble above the
+         tester's OWN app, which is a different process — an in-Activity
+         overlay would be behind it. Granted on a settings screen, not by a
+         runtime prompt, and only ever asked for in connector mode. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+
+    <!-- Connector-mode target picker: every app with a launcher entry.
+         Without this, package visibility (Android 11+) hides the apps we
+         could tunnel and the picker comes back empty. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LAUNCHER"/>
+        </intent>
+        <!-- RHR Agent, which serves device control (DeviceEndpoints.kt). -->
+        <package android:name="dev.rhr.agent"/>
+    </queries>
 
     <application
         android:label="RHR Player"
@@ -43,13 +64,53 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- An invitation as a link, so it can arrive however a team
+                 already talks: a message, a chat, a terminal. The QR is the
+                 same payload photographed, and needs both people in one room.
+                 Also what makes this testable without pointing a camera at a
+                 screen. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="rhr"/>
+            </intent-filter>
         </activity>
         <!-- Native session service: the tunnel bridge must live outside the
              Dart world so guest-kernel hot restarts can't kill it. -->
         <service
             android:name=".RhrSessionService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <!-- Not dataSync: Android 15 stops dataSync services after 6 hours,
+                 and a tester's session can run all day. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Developer tooling: carries a debug session between
+                    the developer's computer and an app on this phone" />
+        </service>
+        <!-- Holds the shake-to-open bubble while the tester is inside their
+             own app; foreground so backgrounding the player can't kill it
+             mid-session. -->
+        <service
+            android:name=".OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Developer tooling: keeps the debug session
+                    overlay available while testing another app" />
+        </service>
+        <!-- Where the RHR beacon in a CLI-built debug app reports its VM
+             service address (see Beacons.kt). -->
+        <provider
+            android:name=".BeaconProvider"
+            android:authorities="${applicationId}.beacon"
+            android:exported="true" />
+        <!-- PackageInstaller commit callback for the player self-update. -->
+        <receiver
+            android:name=".UpdateResultReceiver"
+            android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

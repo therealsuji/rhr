@@ -1,0 +1,58 @@
+# What the tester reads while an update happens.
+#
+# Every phase here was wrong on a phone once. The bar stopped at 54% and
+# stayed there through the install and into the next screen; the transfer
+# called itself an install for the whole minute it was streaming; a build ran
+# for minutes behind a line reading "Connecting…"; and a stopped session went
+# on claiming to connect. The words are decided by SessionBanner now, and
+# this is what holds them to it.
+#
+# The phases are injected over adb rather than driven through the UI. The
+# lobby's fault sheet opens on a seventh footer tap, which is fine for a
+# person and wrong for a test: all seven have to land, nothing on screen says
+# how many did, and a run that drops one ends up somewhere it cannot
+# describe. The first version of this flow failed exactly that way the moment
+# its services were cold.
+steps:
+  - launch: dev.rhr.rhr_player
+  # Readiness is the banner itself, not stillness: the lobby polls its status
+  # every two seconds and the code field blinks a caret, so `idle` reports the
+  # screen as never quite settled and says nothing about whether it is ready.
+  - await: { visible: { text: Waiting for developer }, timeout: 20000 }
+  - echo: "Baseline: lobby at rest, waiting for a developer."
+
+  # The payload kind picks the wording between a player self-update and the
+  # developer's own app. This flow checks the app wording throughout.
+  - script: { path: ../scripts/fault-update-foreign.mjs }
+
+  - echo: "Bytes are moving. This is NOT the install."
+  - script: { path: ../scripts/fault-phase-updating.mjs }
+  - assert: { visible: { text: Sending your app } }
+  # The old bug's exact words. They belong to the NEXT phase, and the
+  # assertion below establishes them as a selector that really does appear,
+  # so this absence check is about placement rather than a typo.
+  - assert: { hidden: { text: Installing your app } }
+
+  - echo: "The install is its own state — the step the tester may have to tap."
+  - script: { path: ../scripts/fault-phase-installing.mjs }
+  - assert: { visible: { text: Installing your app } }
+  - assert: { hidden: { text: Sending your app } }
+
+  - echo: "Finished reads finished. The bar used to stop near half and stay."
+  - script: { path: ../scripts/fault-phase-installed.mjs }
+  - assert: { visible: { text: Your app is installed } }
+
+  - echo: "A failure carries the developer's reason, not just the word failed."
+  - script: { path: ../scripts/fault-phase-update-failed.mjs }
+  - assert: { visible: { text: no space left on device } }
+
+  - echo: "A build is minutes of silence; the lobby used to show none of it."
+  - script: { path: ../scripts/fault-phase-building.mjs }
+  - assert: { visible: { text: Developer is building an update } }
+
+  # Every phase has an end. This is also what makes the flow re-runnable:
+  # it leaves the phone on the baseline it started from.
+  - echo: "Clearing restores the baseline."
+  - script: { path: ../scripts/fault-clear.mjs }
+  - await: { hidden: { text: Developer is building an update }, timeout: 15000 }
+  - await: { visible: { text: Waiting for developer }, timeout: 15000 }

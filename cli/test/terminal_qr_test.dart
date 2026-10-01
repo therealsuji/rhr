@@ -38,7 +38,7 @@ void main() {
       '{"code":"rhr-mpkp-kms4-du35",'
       '"relay":"ws://192.168.1.8:56117",'
       '"relays":["ws://192.168.1.8:56117",'
-      '"wss://rhr-relay.codeforge007.workers.dev"]}',
+      '"wss://getrhr.dev"]}',
     );
     final rows = qr.text.trimRight().split('\n');
     final ansi = RegExp(r'\x1b\[[0-9;]*m');

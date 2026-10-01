@@ -1,11 +1,30 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "rhr-relay",
+	// The account getrhr.dev is registered on, so the Worker and its custom
+	// domain can live together — Cloudflare cannot attach a domain to a Worker
+	// on a different account.
+	"account_id": "82441ac2587dfd4316b81098d926e968",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-07-01",
 	"durable_objects": {
 		"bindings": [{ "name": "SESSIONS", "class_name": "RelaySession" }]
 	},
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelaySession"] }],
+	// Accounts, installations and memberships. Relational because the questions
+	// are relational — "which devices does this account have", "which accounts
+	// is this installation in" — and a Durable Object cannot answer those
+	// without knowing every key in advance.
+	"d1_databases": [
+		{
+			"binding": "ACCOUNTS",
+			"database_name": "rhr-accounts",
+			"database_id": "9d42606f-05f6-45a4-9920-e73d3efbcadd"
+		}
+	],
+	// Both the relay sockets (wss://getrhr.dev/s/<code>/device) and the login
+	// redirect live here, so the address handed to a developer is ours rather
+	// than a workers.dev subdomain or a WorkOS environment name.
+	"routes": [{ "pattern": "getrhr.dev", "custom_domain": true }],
 	"observability": { "enabled": false }
 }
