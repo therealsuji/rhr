@@ -650,3 +650,27 @@ player and the code. No adb, root or cable is involved.
   from `f4e8bb8` without these changes then connected, and so did this
   branch's player on the next try. Another session saw the same error in
   app-mode reconnects.
+
+### Review fixes before beta.21
+
+Same phone, QA player and RHR Agent built from `2b1487d`, fixture
+`dev.rhr.rhr_a11y_flutter` in connector mode, `rhr mcp` started from the
+fixture's `lib/` folder.
+
+| Case | Observed result |
+| --- | --- |
+| Session lookup | `rhr mcp` started in `lib/` found the session one folder up. |
+| `rhr run` hint | "A coding agent in this project can see and drive the phone through rhr mcp" printed once, after Ready. |
+| Notification before the agent acts | "Remote hot reload tunnel is running", no action. |
+| After the first answered request | "Your developer's coding agent can see and tap this phone" with "Stop agent control". |
+| Stop | The agent tapped "Stop agent control". Requests got `agent_stopped` with the new message; the notification read "You turned off agent control for this session" with "Allow agent control". |
+| Allow again | A tap on "Allow agent control" brought back the stop action. `launch_app` and `wait_for` worked at once, and the count kept its value. |
+| Reload into a backgrounded app | With the launcher in front, `hot_reload` failed at once, naming the launcher and pointing at `launch_app`. |
+| Bad `grep` | `logs` with `(unclosed` returned "grep is not a valid regular expression: Unterminated group". |
+| Developer leaves | After Ctrl-C on `rhr run`, the notification went back to "Remote hot reload tunnel is running". |
+| `rhr doctor` | Listed Claude Code, Codex and OpenCode as installed without rhr mcp, which matched their configs on this Mac. |
+
+Not covered: `rhr setup` itself (it would replace this Mac's launcher), and
+the first install through `rhr run` after reinstalling the QA player was
+cancelled on the phone for a reason not found; installing the fixture over adb
+let the next run go through.
