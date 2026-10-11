@@ -294,12 +294,15 @@ class RhrPlayerUpdater(
 		RhrSessionService.setInstallPhase("installed")
 		status(transferId, "installed")
 		Log.i(TAG, "foreign package install confirmed")
-		// Android binds the accessibility service of an app only once it has
-		// been opened, and its screen is where the user turns it on.
+		// Opening the agent takes it out of the stopped state, and its screen
+		// is where the user turns it on. It has no launcher entry, so it is
+		// started by name.
 		if (installTarget == AGENT_PACKAGE) {
-			context.packageManager.getLaunchIntentForPackage(AGENT_PACKAGE)
-				?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-				?.let(context::startActivity)
+			context.startActivity(
+				Intent()
+					.setClassName(AGENT_PACKAGE, "$AGENT_PACKAGE.MainActivity")
+					.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+			)
 		}
 	}
 

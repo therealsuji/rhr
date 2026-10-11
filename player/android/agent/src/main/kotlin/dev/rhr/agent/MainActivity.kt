@@ -12,9 +12,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * Walks the user to the setting that turns RHR Agent on. Android binds the
- * service of an app only after it has been opened once, so the player sends
- * the user here right after installing it.
+ * Walks the user to the setting that turns RHR Agent on. The player opens
+ * it by name right after install; the agent has no launcher icon.
  */
 class MainActivity : Activity() {
 	private lateinit var status: TextView
