@@ -201,6 +201,10 @@ Future<({bool ok, String message})?> sendSessionCommand(
     return (ok: answer['ok'] == true, message: '${answer['message']}');
   } on StateError {
     return (ok: false, message: 'The running rhr session closed the request.');
+  } on SocketException {
+    // The session died between its file and this write: the connect can
+    // still land in a closing listener's backlog.
+    return null;
   } finally {
     socket.destroy();
   }
