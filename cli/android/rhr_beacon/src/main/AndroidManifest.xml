@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merged into the CLI-generated debug build only. ${rhrPlayer} and
+     ${rhrPlayerCertificate} are manifest placeholders the RHR init script
+     sets on the app. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="${rhrPlayer}" />
+    </queries>
+    <application>
+        <!-- Exported only so the player can ask for the address again after
+             it restarts; the answer still goes only to a verified player. -->
+        <provider
+            android:name="dev.rhr.beacon.RhrBeacon"
+            android:authorities="${applicationId}.rhrbeacon"
+            android:exported="true"
+            android:initOrder="100" />
+        <meta-data
+            android:name="dev.rhr.beacon.player"
+            android:value="${rhrPlayer}" />
+        <meta-data
+            android:name="dev.rhr.beacon.playerCertificate"
+            android:value="${rhrPlayerCertificate}" />
+    </application>
+</manifest>

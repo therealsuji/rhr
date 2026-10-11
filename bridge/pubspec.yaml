@@ -5,3 +5,11 @@ environment:
   sdk: ^3.10.0
 dependencies:
   web_socket_channel: ^3.0.0
+  webrtc_dart:
+    path: ../third_party/webrtc_dart
+  # fake_updater.dart verifies a transfer the way the phone does. The bridge
+  # proper still hashes nothing.
+  crypto: ^3.0.0
+
+dev_dependencies:
+  test: ^1.25.0

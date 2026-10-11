@@ -155,14 +155,7 @@ final class UsbAssetTransport implements AssetTransport {
           final adb = await Process.start(adbExecutable, [
             '-s',
             serial,
-            'exec-in',
-            'run-as',
-            _playerPackage,
-            'tar',
-            '-xf',
-            '-',
-            '-C',
-            destination,
+            ...usbArchiveWriteAdbArguments(destination),
           ]);
           final tarError = tar.stderr.transform(systemEncoding.decoder).join();
           final adbError = adb.stderr.transform(systemEncoding.decoder).join();
@@ -639,8 +632,12 @@ bool usbRangeDigestMatches(String expected, String output) {
   return RegExp(r'^[a-f0-9]{64}$').hasMatch(digest) && digest == expected;
 }
 
+// `adb exec-in` can return after stdin closes but before Android's `dd` has
+// finished the write, so an immediate hash can observe an incomplete range.
+// `shell -T` keeps stdin raw (no PTY) and waits for the remote command to exit.
 List<String> usbRangeWriteAdbArguments(String remotePath, int rangeIndex) => [
-  'exec-in',
+  'shell',
+  '-T',
   'run-as',
   _playerPackage,
   'dd',
@@ -648,6 +645,18 @@ List<String> usbRangeWriteAdbArguments(String remotePath, int rangeIndex) => [
   'bs=$_usbRangeBytes',
   'seek=$rangeIndex',
   'conv=notrunc',
+];
+
+List<String> usbArchiveWriteAdbArguments(String destination) => [
+  'shell',
+  '-T',
+  'run-as',
+  _playerPackage,
+  'tar',
+  '-xf',
+  '-',
+  '-C',
+  destination,
 ];
 
 List<String> parseUsbAdbDevices(String output) {

@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible RHR failure
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include a live session code, VM Service URL, token, private relay URL, or sensitive application log.
+  - type: input
+    id: version
+    attributes:
+      label: RHR version
+      placeholder: "0.1.0-beta.3"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include host OS, `flutter doctor -v`, phone model, Android version, and relay choice.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Keep the steps minimal and redact session credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted output
+      description: Paste only output with codes, URLs, tokens, and app data removed.

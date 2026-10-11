@@ -9,12 +9,51 @@
 // The dev CLI opens channels (one per local TCP connection from the Flutter
 // tool); the device bridge answers each open with a TCP connection to the
 // local VM service.
+//
+// An open frame's payload names what the channel connects to: empty for the
+// VM service, or one target byte for the other device endpoints below.
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 const opOpen = 0;
 const opData = 1;
 const opClose = 2;
+
+/// Device control: the RHR Agent's accessibility service on the phone. The
+/// channel carries length-prefixed JSON messages (see device_control.dart).
+const targetDevice = 1;
+
+/// The connected app's native log stream, as plain logcat text lines.
+const targetLogs = 2;
+
+/// Opens [channel] to the VM service, or to [target] when given.
+Uint8List encodeOpen(int channel, [int? target]) =>
+    encodeFrame(opOpen, channel, [?target]);
+
+/// What a host without [target] answers on its channel before closing it:
+/// for device control, a length-prefixed JSON refusal (id 0 refuses the
+/// whole channel); for logs, one line saying why there is no log.
+Uint8List targetRefusal(int target, String message) {
+  if (target != targetDevice) return utf8.encode('$message\n');
+  final body = utf8.encode(
+    jsonEncode({'id': 0, 'error': 'no_device_control', 'message': message}),
+  );
+  return (BytesBuilder()
+        ..add((ByteData(4)..setUint32(0, body.length)).buffer.asUint8List())
+        ..add(body))
+      .takeBytes();
+}
+
+/// Player update transfer: [op][4B transfer id][APK chunk]. The dev streams a
+/// replacement player APK to the device (announced by a {"t":"update_begin"}
+/// text message, sealed by {"t":"update_commit"}). Transfer ids set bit 30 so
+/// they can never collide with tunnel channel ids (which count up from 1),
+/// letting both ends reuse the opAck flow-control machinery unchanged. Bit 31
+/// deliberately stays clear: the id also travels through JSON and Kotlin's
+/// signed 32-bit ints, where a high-bit id turns negative and breaks matching.
+const opUpdateData = 4;
+const updateTransferIdBase = 0x40000000;
 
 /// Flow control: receiver acks consumed bytes (payload = 4-byte big-endian
 /// count). A sender pauses its TCP source once [windowBytes] are unacked —
@@ -23,6 +62,20 @@ const opClose = 2;
 /// than buffer unboundedly.
 const opAck = 3;
 const windowBytes = 512 * 1024;
+
+/// Largest payload that may ride in one tunnel frame.
+///
+/// libwebrtc falls back to the 64 KiB default from
+/// draft-ietf-mmusic-sdp-sctp-23 when the answer carries no
+/// a=max-message-size, and a message over that limit makes it close the data
+/// channel itself — after reporting the send as successful, so the sender sees
+/// a spontaneous disconnect rather than an error. The 5 bytes are this
+/// protocol's own header (op + channel), which count toward the limit.
+///
+/// The device has capped its reads at this size since the tunnel defects were
+/// found (TUNNEL_READ_BYTES in RhrSessionService); the CLI never did, and
+/// handed whole dart:io reads to the transport instead.
+const maxTunnelPayload = 64 * 1024 - 5;
 
 Uint8List encodeAck(int channel, int bytes) {
   final b = Uint8List(9);
@@ -33,8 +86,12 @@ Uint8List encodeAck(int channel, int bytes) {
   return b;
 }
 
-int decodeAckCount(Uint8List payload) =>
-    ByteData.view(payload.buffer, payload.offsetInBytes).getUint32(0);
+int decodeAckCount(Uint8List payload) {
+  if (payload.length < 4) {
+    throw FormatException('ack payload too short: ${payload.length}');
+  }
+  return ByteData.view(payload.buffer, payload.offsetInBytes).getUint32(0);
+}
 
 /// Per-channel unacked-byte accounting shared by both tunnel ends.
 class FlowControl {
@@ -52,8 +109,9 @@ class FlowControl {
   /// the window has drained below half.
   void acked(int channel, int n) {
     final u = (_unacked[channel] ?? 0) - n;
-    _unacked[channel] = u < 0 ? 0 : u;
-    if ((_unacked[channel] ?? 0) < windowBytes ~/ 2) {
+    final remaining = u < 0 ? 0 : u;
+    _unacked[channel] = remaining;
+    if (remaining < windowBytes ~/ 2) {
       _paused.remove(channel)?.call();
     }
   }
@@ -83,7 +141,8 @@ Uint8List encodeFrame(int op, int channel, [List<int> payload = const []]) {
 
 ({int op, int channel, Uint8List payload}) decodeFrame(List<int> raw) {
   final b = raw is Uint8List ? raw : Uint8List.fromList(raw);
-  if (b.length < 5) throw FormatException('tunnel frame too short: ${b.length}');
+  if (b.length < 5)
+    throw FormatException('tunnel frame too short: ${b.length}');
   return (
     op: b[0],
     channel: ByteData.view(b.buffer, b.offsetInBytes).getUint32(1),

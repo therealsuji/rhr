@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-09-22T10:48:00Z	diagnosis	Replace stale peers on a new developer connection identity; render connector progress without capturing touches	Logs show new hellos reuse a dying peer; screenshot shows progress suppressed	/tmp/rhr-connector-feedback-device.log	implementation started
+2026-09-22T10:54:49Z	feedback	Verified connector restart, compile error, completion and live sheet status on Samsung	Use the real separate app and native screenshots rather than infer visibility from messages	/tmp/rhr-connector-fixed-complete.png	passed; 119 CLI tests and native banner tests pass
+2026-09-22T11:02:32Z	recovery	Five target kills recovered without ICE failures; persist claims for hard CLI exit recovery	The next process must resume its authorized relay claim as well as replace the stale peer	/tmp/rhr-connector-recovery-results.json	five passed; hard CLI exit also recovered with counter preserved
+2026-09-22T11:03:48Z	final	Verified hard CLI restart, relay-loss recovery and final hot reload	Complete the real failure paths before handing back	/tmp/rhr-connector-claim-resume.log	passed; final reload 542 ms; 121 tests and analysis pass

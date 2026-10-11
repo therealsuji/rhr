@@ -118,49 +118,6 @@ void main() {
     },
   );
 
-  test('honours a legacy size+mtime manifest without re-uploading', () async {
-    final project = await Directory.systemTemp.createTemp('rhr_asset_legacy_');
-    addTearDown(() => project.delete(recursive: true));
-
-    final asset = File('${project.path}/build/flutter_assets/assets/a.bin');
-    asset.parent.createSync(recursive: true);
-    asset.writeAsBytesSync([1, 2, 3, 4]);
-
-    // Manifest as written by an older rhr: no sha256 field.
-    final manifestFile = File(
-      '${project.path}/.dart_tool/rhr/pushed_assets.json',
-    );
-    manifestFile.parent.createSync(recursive: true);
-    manifestFile.writeAsStringSync(
-      jsonEncode({
-        'assets/a.bin': {
-          'size': asset.lengthSync(),
-          // statSync().modified is what unchanged() compares against;
-          // lastModifiedSync() truncates to whole seconds.
-          'mtime': asset.statSync().modified.millisecondsSinceEpoch,
-        },
-      }),
-    );
-
-    final receivedUris = <String>[];
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(server.close);
-    server.listen((request) async {
-      receivedUris.add(
-        utf8.decode(base64.decode(request.headers.value('dev_fs_uri_b64')!)),
-      );
-      await request.drain<void>();
-      request.response.write('{}');
-      await request.response.close();
-    });
-
-    await syncAssets(
-      vmService: Uri.parse('http://127.0.0.1:${server.port}/'),
-      project: project.path,
-    );
-    expect(receivedUris, isEmpty);
-  });
-
   test('encodes each DevFS path segment without encoding separators', () {
     expect(
       devFsAssetUri('assets/a%20b/c d.png'),

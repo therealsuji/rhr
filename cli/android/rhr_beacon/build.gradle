@@ -1,0 +1,19 @@
+// The RHR beacon, included into a CLI-generated debug build by the init
+// script in cli/lib/beacon_build.dart. Java only, so the project needs no
+// Kotlin plugin, and applied the way Flutter plugins apply AGP: from the
+// classpath the app's build already has.
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'dev.rhr.beacon'
+    // Flutter's own default compileSdk, so the platform is already installed
+    // wherever the app itself builds. The beacon uses nothing newer than 28.
+    compileSdk 36
+    defaultConfig {
+        minSdk 21
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}

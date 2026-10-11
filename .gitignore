@@ -3,6 +3,7 @@
 .packages
 pubspec.lock
 build/
+player/release/
 .flutter-plugins
 .flutter-plugins-dependencies
 .fvm/

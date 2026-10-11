@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- isAccessibilityTool is what lets the agent read and tap system permission
+     dialogs: Android hides their content from, and drops gestures of, services
+     without it (verified on Android 16, 2026-09-30).
+
+     The service ignores every event, but must subscribe to content and window
+     changes anyway: they are what invalidate its node cache, and without them
+     a tree read after a tap still shows the screen before it. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
+    android:isAccessibilityTool="true"
+    android:description="@string/service_description"/>
