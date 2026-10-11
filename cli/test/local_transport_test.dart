@@ -129,7 +129,7 @@ void main() {
   );
 
   test(
-    'reconnecting developer receives info after other phone messages',
+    'reconnecting host receives info after other phone messages',
     () async {
       final relay = (await LocalRelay.start(
         'rhr-test-reconnect',
@@ -140,22 +140,22 @@ void main() {
         '${relay.loopbackUrl}/s/${relay.sessionCode}/device',
       );
       addTearDown(device.close);
-      final firstDev = await WebSocket.connect(
-        '${relay.loopbackUrl}/s/${relay.sessionCode}/dev',
+      final firstHost = await WebSocket.connect(
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/host',
       );
-      addTearDown(firstDev.close);
+      addTearDown(firstHost.close);
       const info = '{"t":"info","vm":"http://127.0.0.1:1234/"}';
       const pong = '{"t":"pong"}';
-      final receivedPong = firstDev.firstWhere((message) => message == pong);
+      final receivedPong = firstHost.firstWhere((message) => message == pong);
       device.add(info);
       device.add('{"t":"progress","phase":"installed"}');
       device.add('invalid control message');
       device.add(pong);
       await receivedPong.timeout(const Duration(seconds: 3));
-      await firstDev.close();
+      await firstHost.close();
 
       final reconnected = await WebSocket.connect(
-        '${relay.loopbackUrl}/s/${relay.sessionCode}/dev',
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/host',
       );
       addTearDown(reconnected.close);
       expect(await reconnected.first.timeout(const Duration(seconds: 3)), info);
@@ -163,7 +163,7 @@ void main() {
   );
 
   test(
-    'embedded relay pipes device and dev frames in both directions',
+    'embedded relay pipes device and host frames in both directions',
     () async {
       final relay = await LocalRelay.start(
         'rhr-test-2345-6789',
@@ -175,19 +175,19 @@ void main() {
       final device = IOWebSocketChannel.connect(
         '${relay!.loopbackUrl}/s/${relay.sessionCode}/device',
       );
-      final dev = IOWebSocketChannel.connect(
-        '${relay.loopbackUrl}/s/${relay.sessionCode}/dev',
+      final host = IOWebSocketChannel.connect(
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/host',
       );
       addTearDown(device.sink.close);
-      addTearDown(dev.sink.close);
-      await Future.wait([device.ready, dev.ready]);
+      addTearDown(host.sink.close);
+      await Future.wait([device.ready, host.ready]);
 
-      final devMessage = dev.stream.first;
+      final hostMessage = host.stream.first;
       device.sink.add(jsonEncode({'t': 'info', 'vm': 'http://127.0.0.1:1/'}));
-      expect(await devMessage, contains('"t":"info"'));
+      expect(await hostMessage, contains('"t":"info"'));
 
       final deviceMessage = device.stream.first;
-      dev.sink.add([1, 2, 3]);
+      host.sink.add([1, 2, 3]);
       expect(await deviceMessage, [1, 2, 3]);
     },
   );
@@ -243,11 +243,11 @@ void main() {
         final device = IOWebSocketChannel.connect(
           '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/device',
         );
-        final dev = IOWebSocketChannel.connect(
-          '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/dev',
+        final host = IOWebSocketChannel.connect(
+          '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/host',
         );
-        sockets.addAll([device, dev]);
-        await Future.wait([device.ready, dev.ready]);
+        sockets.addAll([device, host]);
+        await Future.wait([device.ready, host.ready]);
         await Future<void>.delayed(const Duration(milliseconds: 10));
         expect(runningRelay.activeSubscriptionCount, 2);
       }

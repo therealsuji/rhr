@@ -25,7 +25,7 @@ class MainActivity : FlutterActivity() {
 
 	companion object {
 		// Keep the guest engine alive when Android destroys only the Activity
-		// (for example, after the tester swipes the task away while the native
+		// (for example, after the user swipes the task away while the native
 		// foreground session service keeps this process alive). The next Activity
 		// instance reattaches to this engine instead of booting a second lobby.
 		private var sessionEngine: FlutterEngine? = null
@@ -169,7 +169,7 @@ class MainActivity : FlutterActivity() {
 
 	// The session service's overlay holds the screen when the player may draw
 	// over other apps. Without that permission, this keeps the player's own
-	// screen on while a developer is connected.
+	// screen on while the host is connected.
 	private val keepScreenOn: () -> Unit = {
 		runOnUiThread {
 			if (RhrSessionService.status == "connected")
@@ -285,14 +285,14 @@ class MainActivity : FlutterActivity() {
 		connector.setMethodCallHandler { call, result ->
 			when (call.method) {
 				// The shake-to-open bubble needs "Display over other apps" to
-				// draw above the tester's own app. There is no runtime prompt
+				// draw above the user's own app. There is no runtime prompt
 				// for it — only a settings screen the user has to visit.
 				// Who this installation is, for joining an account. The secret
 				// deliberately stays native: Dart is replaced wholesale by a guest
 				// hot restart, so anything a guest could read is not a secret.
 				// An invitation that arrived as a link rather than a QR, if this
 				// launch carried one. Consumed once: a relaunch must not
-				// re-offer a join the tester already answered.
+				// re-offer a join the user already answered.
 				"pendingInvite" -> {
 					result.success(pendingInvite)
 					pendingInvite = null
@@ -307,7 +307,7 @@ class MainActivity : FlutterActivity() {
 				// membership has to carry this too.
 				"installationSecret" -> result.success(
 					InstallationIdentity.secret(this))
-				// What the developer will see this phone called in their device
+				// What the user will see this phone called in their device
 				// list. A starting point the account owner can rename, not an
 				// identifier — the installation id is what identifies it.
 				"deviceLabel" -> result.success(

@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 /// How `rhr persist`, `rhr release` and `rhr mcp` reach an rhr session already
-/// holding the phone. The relay admits one developer per phone, so a second
+/// holding the phone. The relay admits one host per phone, so a second
 /// CLI cannot connect; it asks the running one instead.
 ///
 /// The running session listens on loopback and writes the port and a random

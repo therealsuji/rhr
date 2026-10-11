@@ -23,7 +23,7 @@
 		}
 	],
 	// Both the relay sockets (wss://getrhr.dev/s/<code>/device) and the login
-	// redirect live here, so the address handed to a developer is ours rather
+	// redirect live here, so the address handed to the user is ours rather
 	// than a workers.dev subdomain or a WorkOS environment name.
 	"routes": [{ "pattern": "getrhr.dev", "custom_domain": true }],
 	"observability": { "enabled": false }

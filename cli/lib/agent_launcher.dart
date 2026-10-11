@@ -98,7 +98,7 @@ Future<bool> rhrOnBarePath() async {
 }
 
 /// Writes the launcher to [launcherPath], asking for sudo when this terminal
-/// can answer. Returns a message for the developer.
+/// can answer. Returns a message for the user.
 Future<({bool ok, String message})> installLauncher() async {
   if (Platform.isWindows) {
     return (ok: true, message: 'no launcher needed on Windows');

@@ -140,7 +140,7 @@ jobs:
             player/release/FLUTTER_VERSION.json
             player/release/RELEASE_MANIFEST.txt
           body: |
-            **rhr player** — the generic Flutter shell. Sideload on the tester's phone.
+            **rhr player** — the generic Flutter shell. Sideload it on your phone.
 
             This is a **debug** build (required for hot reload — it needs the Dart VM Service).
             See the [README](https://github.com/${{ github.repository }}#quick-start) for the full flow.

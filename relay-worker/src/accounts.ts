@@ -2,8 +2,8 @@
 //
 // A device never signs in. A phone generates an installation identity on first
 // run, scans an invite, and from then on holds a membership — not an identity,
-// and not an account of its own. That is what lets a tester lend their phone
-// to a developer's account without being asked to sign up for anything.
+// and not an account of its own. That is what lets the user add their phone
+// to their own account without signing in on the phone.
 //
 // Deliberately separate from the session WebSocket: that route rejects any
 // request carrying an Origin header because only native clients belong on it,
@@ -30,8 +30,8 @@ const INVITE_BYTES = 16;
  * Cleans a device label supplied by the phone.
  *
  * The label is chosen by whoever holds the phone and then displayed in the
- * developer's device list, so it is attacker-controlled text in someone
- * else's terminal. Control characters could forge extra lines or overwrite
+ * user's device list, so it is attacker-controlled text in a terminal on
+ * another machine. Control characters could forge extra lines or overwrite
  * what is already on screen, which is how a device picker gets made to
  * suggest something it never said. Strip them, collapse whitespace, and keep
  * it short.
@@ -103,7 +103,7 @@ export async function accountForToken(
 	return { id, email };
 }
 
-/** Mints an invite for a developer to show as a QR. */
+/** Mints an invite for the user to show as a QR. */
 export async function createInvite(
 	env: AccountsEnv,
 	accountId: string,
@@ -184,7 +184,7 @@ export async function hasMembership(
 	return row !== null;
 }
 
-/** The devices on an account, for the developer's list. */
+/** The devices on an account, for the user's list. */
 export async function devicesForAccount(
 	env: AccountsEnv,
 	accountId: string,
@@ -230,9 +230,9 @@ export async function accountsForInstallation(
 /**
  * Ends a membership.
  *
- * Either side may call this and neither needs the other: the developer
- * removes a device they no longer use, and the tester stops lending a phone
- * that is theirs. Deleting the same row from both directions is what makes
+ * Either side may call this and neither needs the other: the computer
+ * removes a device the user no longer uses, and the phone leaves an account
+ * it no longer wants to be on. Deleting the same row from both directions is what makes
  * that symmetry real rather than stated.
  */
 export async function endMembership(

@@ -20,7 +20,7 @@ object Beacons {
 	private val lock = Object()
 
 	/** Called for every report; the run preparation uses it to follow an app
-	 *  the tester reopened, whose VM listens on a new port. */
+	 *  the user reopened, whose VM listens on a new port. */
 	@Volatile var onAnnounce: ((pkg: String, vm: String) -> Unit)? = null
 
 	fun announce(pkg: String, vm: String) {

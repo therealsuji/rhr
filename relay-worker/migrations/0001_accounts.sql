@@ -1,8 +1,8 @@
 -- Accounts, the installations that join them, and the memberships between.
 --
 -- A device never signs in: it redeems an invite and holds a membership, not an
--- identity. So there is no user row for a tester — only the installation their
--- phone generated on first run.
+-- identity. So there is no user row for a phone — only the installation it
+-- generated on first run.
 
 CREATE TABLE accounts (
   id            TEXT PRIMARY KEY,
@@ -16,12 +16,12 @@ CREATE TABLE installations (
   created_at  INTEGER NOT NULL
 );
 
--- Many-to-many on purpose: a QA phone serves a whole team, and each developer
--- joined it separately. Either side can delete the row without the other.
+-- Many-to-many on purpose: a phone can join more than one of the user's
+-- accounts, each separately. Either side can delete the row without the other.
 CREATE TABLE memberships (
   account_id       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   installation_id  TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
-  label            TEXT NOT NULL,        -- what the developer calls this phone
+  label            TEXT NOT NULL,        -- what the user calls this phone
   joined_at        INTEGER NOT NULL,
   PRIMARY KEY (account_id, installation_id)
 );

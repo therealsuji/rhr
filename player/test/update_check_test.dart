@@ -2,7 +2,7 @@
 //
 // Worth testing because it is the part that can be wrong quietly: a check
 // that always says "up to date" looks exactly like a working one, and the
-// tester it lies to is the person least able to notice.
+// user it lies to, looking only at the phone, is the least able to notice.
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhr_player/update_check.dart';

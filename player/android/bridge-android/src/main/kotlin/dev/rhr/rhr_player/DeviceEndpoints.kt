@@ -63,7 +63,7 @@ internal class ChannelEnd(
  *
  * Device control lives in the RHR Agent, a separate APK: Play Protect blocks
  * browser installs of any APK that declares an accessibility service, so the
- * player a tester downloads cannot carry one. The agent checks that its caller
+ * player you download in a browser cannot carry one. The agent checks that its caller
  * is signed like itself. Its framing (Frames.kt) ends here: the agent gets
  * one binder call per request.
  *
@@ -113,7 +113,7 @@ internal object DeviceEndpoints {
 		if (RhrSessionService.agentStopped) {
 			return refusal(
 				"agent_stopped",
-				"The tester turned off agent control on the phone. It stays off until they allow it again " +
+				"The user turned off agent control on the phone. It stays off until they allow it again " +
 					"from the session notification, or connect again.",
 			)
 		}
@@ -140,7 +140,7 @@ internal object DeviceEndpoints {
 			)
 		}
 		// Only an answer from the agent itself means it can see and tap; one
-		// of these says it cannot, so the tester is not told otherwise.
+		// of these says it cannot, so the user is not told otherwise.
 		if (response.optString("error") !in setOf("agent_missing", "agent_untrusted", "accessibility_off")) {
 			RhrSessionService.agentActed()
 		}

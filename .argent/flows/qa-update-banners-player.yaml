@@ -1,5 +1,5 @@
 # The same phases, worded for a player self-update rather than the
-# developer's own app.
+# user's own app.
 #
 # The two payload kinds share a state machine and differ only in what they
 # call the thing being moved, which is exactly the kind of difference that
@@ -7,8 +7,8 @@
 # the app's. Same faults, same order, the other branch of every label.
 steps:
   - launch: dev.rhr.rhr_player
-  - await: { visible: { text: Waiting for developer }, timeout: 20000 }
-  - echo: "Baseline: lobby at rest, waiting for a developer."
+  - await: { visible: { text: Waiting for your computer }, timeout: 20000 }
+  - echo: "Baseline: lobby at rest, waiting for the host."
 
   - script: { path: ../scripts/fault-update-player.mjs }
 
@@ -26,4 +26,4 @@ steps:
 
   - echo: "Clearing restores the baseline."
   - script: { path: ../scripts/fault-clear.mjs }
-  - await: { visible: { text: Waiting for developer }, timeout: 15000 }
+  - await: { visible: { text: Waiting for your computer }, timeout: 15000 }

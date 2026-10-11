@@ -12,9 +12,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * Walks the tester to the setting that turns RHR Agent on. Android binds the
+ * Walks the user to the setting that turns RHR Agent on. Android binds the
  * service of an app only after it has been opened once, so the player sends
- * the tester here right after installing it.
+ * the user here right after installing it.
  */
 class MainActivity : Activity() {
 	private lateinit var status: TextView
@@ -26,7 +26,7 @@ class MainActivity : Activity() {
 		val padding = (24 * resources.displayMetrics.density).toInt()
 		status = TextView(this).apply { textSize = 16f }
 		// Android 13+ greys out the switch of a sideloaded accessibility app
-		// until the tester allows restricted settings in its App info menu.
+		// until the user allows restricted settings in its App info menu.
 		restricted = Button(this).apply {
 			text = getString(R.string.allow_restricted)
 			setOnClickListener {

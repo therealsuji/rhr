@@ -123,8 +123,8 @@ final class RunPreparation {
     _closed.future.then<T>((_) => throw const RunDisconnected()),
   ]);
 
-  /// Reports a step to the developer's terminal and the phone's banner.
-  /// [echo] false sends a tester-facing message to the phone only.
+  /// Reports a step to the user's terminal and the phone's banner.
+  /// [echo] false sends a message to the phone only.
   void phase(String name, String message, {bool echo = true}) {
     if (_closed.isCompleted) return;
     if (echo) stderr.writeln('[rhr] $message');
@@ -363,8 +363,8 @@ final class RunPreparation {
       var apkDart = stale ? null : cached?.dart;
 
       // Decide what needs doing before asking anyone for anything: the
-      // developer approves real work, and the tester is never walked through
-      // setup for a build the developer then declines.
+      // user approves real work, and the phone never walks them through
+      // setup for a build they then decline.
       // Asking to persist is the approval.
       var current = false;
       if (apk == null) {
@@ -521,10 +521,10 @@ BeaconPlayer? beaconPlayerFrom(Map<String, dynamic> info) {
   return (package: package, certificate: certificate);
 }
 
-/// Work the run needs that the developer has not approved: no terminal to
+/// Work the run needs that the user has not approved: no terminal to
 /// ask in and no `--yes`, or a "no" at the prompt. Its own outcome, so the
-/// terminal gets the command to run and the tester gets a message meant for
-/// them, not the developer's error.
+/// terminal gets the command to run and the phone gets a message meant for
+/// it, not the terminal's error.
 final class ApprovalRequired implements Exception {
   const ApprovalRequired(this.plan, {this.declined = false});
 

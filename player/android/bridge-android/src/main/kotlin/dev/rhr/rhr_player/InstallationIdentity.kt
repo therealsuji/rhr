@@ -55,9 +55,9 @@ object InstallationIdentity {
 	/**
 	 * Discards this identity, so the next use mints a fresh one.
 	 *
-	 * Leaving every account is the tester's way of saying they are done with
-	 * this machine; keeping the identity afterwards would let a stale
-	 * membership on some server still name them.
+	 * Leaving every account is the user's way of saying they are done with
+	 * this phone; keeping the identity afterwards would let a stale
+	 * membership on some server still name it.
 	 */
 	fun reset(context: Context) {
 		prefs(context).edit().remove(KEY_ID).remove(KEY_SECRET).apply()

@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   test('shared public relay and lease defaults are safe', () {
     expect(defaultPublicRelay, startsWith('wss://'));
-    expect(developerLeasePingInterval, lessThan(const Duration(seconds: 45)));
+    expect(hostLeasePingInterval, lessThan(const Duration(seconds: 45)));
   });
 
   test('private relay replaces the shared fallback', () {

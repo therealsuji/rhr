@@ -3,7 +3,7 @@ package dev.rhr.rhr_player
 import kotlin.math.sqrt
 
 /**
- * Turns raw accelerometer samples into "the tester shook the phone".
+ * Turns raw accelerometer samples into "the user shook the phone".
  *
  * Pure Kotlin with no Android dependencies, so the gesture can be unit-tested
  * with synthetic samples; a physical device cannot have sensor data injected.

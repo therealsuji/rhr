@@ -1,7 +1,7 @@
 // rhr attach --relay ws://host:8123 --code mysession [--project <dir>]
 //            [--no-flutter] [--pid-file <path>] [--sync-assets]
 //
-// Connects to the relay as the dev end, waits for the device bridge's info
+// Connects to the relay as the host end, waits for the device bridge's info
 // message (the remote VM service URI), exposes a local TCP listener that
 // tunnels to it, and spawns `flutter attach --debug-url` pointing at the
 // local listener. With --no-flutter it just prints the URL (for DevTools or
@@ -89,7 +89,7 @@ then scan its QR or enter its code. RHR selects the route and guides phone setup
 On the phone, tap the printed connection link, then Open RHR. Connection details are
 also saved as JSON in .dart_tool/rhr/connection.json for agents to read.
 An agent can use `rhr run --yes` to approve required debug builds/installations.
-Android may still ask the tester to confirm permissions or installation.
+Android may still ask you to confirm permissions or installation on the phone.
 
 run options:
   --yes                approve required player/app builds and installations
@@ -148,7 +148,7 @@ flags override the file.
 // correct the code and start a fresh attach instead.
 const _noDeviceExitCode = 75;
 const _directFailureExitCode = 69;
-// The device is reachable but another developer is holding it. Distinct from
+// The device is reachable but another host is holding it. Distinct from
 // "no device joined" so a caller can tell "wait, or pick another phone" apart
 // from "check the code".
 const _deviceBusyExitCode = 76;
@@ -157,7 +157,7 @@ const _deviceBusyExitCode = 76;
 /// relay that carries signalling only, so its payloads can never get through.
 const _relayBinaryExitCode = 77;
 
-/// The run needs a build or install the developer has not approved.
+/// The run needs a build or install the user has not approved.
 const _approvalExitCode = 79;
 
 /// Not a process exit: the session ended because native code changed, and
@@ -244,7 +244,7 @@ Future<void> main(List<String> args) async {
 
   // rhr setup [--relay <wss://...>]
   // One-time: enable Flutter custom devices and register the `rhr` device so the
-  // QA phone shows up in `flutter devices` / VS Code's device picker. After this
+  // remote phone shows up in `flutter devices` / VS Code's device picker. After this
   // you just pick "rhr" and hit Run — save reloads the remote phone.
   if (args[0] == 'setup') {
     String? relay;
@@ -358,7 +358,7 @@ Future<void> main(List<String> args) async {
   // Terminal-first product flow: build for Android, attach to the relayed VM,
   // Both `run` and `attach` end at `flutter attach -d rhr`, which needs the
   // custom device to exist. Registering here means a fresh machine works
-  // without a separate step; making the developer discover it by way of "No
+  // without a separate step; making the user discover it by way of "No
   // supported devices found with name or id matching 'rhr'" — printed under
   // a list of whatever else is installed, which on a Linux box is the
   // desktop — is a bad trade for a call that is free when it is already
@@ -880,22 +880,22 @@ Future<int?> _runSession({
       : relayTransport;
   // Ctrl-C is how most sessions actually end, and an interrupted process that
   // says nothing holds the device for the rest of its grace period — so the
-  // developer who quits and immediately re-runs is locked out of their own
+  // user who quits and immediately re-runs is locked out of their own
   // phone. Hand the claim back on the way out.
   //
   // SIGTERM (`kill`) and SIGHUP (the terminal window closed) end a session just
-  // as deliberately and were not watched at all, so they left the tester
+  // as deliberately and were not watched at all, so they left the phone
   // waiting out the 45s lease with a connection error on screen. SIGKILL cannot
   // be caught by anyone; that is what the device's lease is for.
   void Function()? restoreTerminal;
   Process? attachProcess;
 
-  // Tells the phone this developer is leaving, so the tester is taken off
-  // "Connected" without waiting out the lease. Before a relay is selected the
-  // phone has not seen this developer, so there is no one to tell.
+  // Tells the phone this host is leaving, so the phone drops "Connected"
+  // without waiting out the lease. Before a relay is selected the phone has
+  // not seen this host, so there is no one to tell.
   void sayGoodbye() {
     try {
-      transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+      transport.sendControl(jsonEncode({'t': 'host_gone'}));
     } on StateError {
       // No relay selected yet.
     } catch (error) {
@@ -904,7 +904,7 @@ Future<int?> _runSession({
   }
 
   // Ends the process on purpose. Releasing the claim frees the device for the
-  // next developer at once; dev_gone frees the tester's screen. Both are
+  // next host at once; host_gone frees the phone's screen. Both are
   // WebSocket frames, and exiting immediately can kill the process before
   // they leave the socket. A short flush beats a 45-second lockout, and the
   // relay's own grace still covers a CLI that dies harder than this.
@@ -977,7 +977,7 @@ Future<int?> _runSession({
   String? nativeBaseline;
   DirectTransportFailure? directFailure;
   PlayerUpdateFailure? preparationRetry;
-  // Set once `flutter attach` is running, so a restart the tester asks for
+  // Set once `flutter attach` is running, so a restart asked for on the phone
   // has something to signal. Null until then, and on the --no-flutter path.
   String? attachPidFile;
   var reloadInProgress = false;
@@ -1043,7 +1043,7 @@ Future<int?> _runSession({
             );
             preparation.phase(
               'approval_needed',
-              'Waiting for your developer to approve the install.',
+              'Waiting for you to approve the install in your terminal.',
               echo: false,
             );
             fatalExit = _approvalExitCode;
@@ -1099,10 +1099,10 @@ Future<int?> _runSession({
         preparation?.handleMessage(m);
         if (preparation != null && m['t'] == 'info') return;
         if (updateSender?.handleMessage(m) ?? false) return;
-        // The tester asking, from the phone's dev menu, for the guest app back
+        // The user asking, from the phone's dev menu, for the guest app back
         // in its opening state. A hot restart is Flutter's and belongs to this
         // machine, so the phone asks and we perform it — the same SIGUSR2 an
-        // asset sync sends. The player only offers the row while a developer
+        // asset sync sends. The player only offers the row while a host
         // is attached; this still answers honestly if it arrives anyway.
         if (m['t'] == 'restart_guest') {
           if (reloadInProgress) return;
@@ -1140,7 +1140,7 @@ Future<int?> _runSession({
         }
         // Only the device's answer to this connection's hello counts. The
         // relay first replays the last info it cached, which can describe a
-        // previous developer's session: a debug app since closed, whose VM
+        // previous host's session: a debug app since closed, whose VM
         // address and token no longer lead anywhere.
         if (m['t'] == 'info' &&
             m['answers'] == relayTransport.connectionId &&
@@ -1217,8 +1217,8 @@ Future<int?> _runSession({
               return;
             }
             updateAttempted = true;
-            // Tell the phone too: the tester is holding it and otherwise sees
-            // a session that simply stops.
+            // Tell the phone too: the user may be holding it and otherwise
+            // sees a session that simply stops.
             transport.sendControl(
               jsonEncode({
                 't': 'progress',
@@ -1239,7 +1239,7 @@ Future<int?> _runSession({
                 updateSender = null;
                 if (updated) return;
                 // The failure reason was just handed to the transport, whose
-                // send is async. Exiting here truncates it, and the tester is
+                // send is async. Exiting here truncates it, and the phone is
                 // left on a card that never explains itself — give the socket
                 // a beat to flush before the process goes.
                 await Future<void>.delayed(const Duration(milliseconds: 500));
@@ -1319,9 +1319,9 @@ Future<int?> _runSession({
 
   // App-level keepalive that traverses the whole path (client ws pings only
   // reach the CF edge; idle Durable Object connections were observed being
-  // killed at ~10 minutes). The device end treats it as a developer-presence
+  // killed at ~10 minutes). The device end treats it as a host-presence
   // heartbeat: its watchdog expires if these stop for >45s.
-  final keepalive = Timer.periodic(developerLeasePingInterval, (_) {
+  final keepalive = Timer.periodic(hostLeasePingInterval, (_) {
     try {
       transport.sendControl(jsonEncode({'t': 'ping'}));
     } catch (error) {
@@ -1343,7 +1343,7 @@ Future<int?> _runSession({
       code,
       bridgeDeadline,
       // An update in flight IS the player, busy. Without this the wait
-      // loop told the developer to check whether the phone was connected,
+      // loop told the user to check whether the phone was connected,
       // every 30 seconds, while it was streaming an APK to that phone.
       updating: () => updateSender != null || preparation != null,
     );
@@ -1539,7 +1539,7 @@ Future<int?> _runSession({
       );
       preparation?.phase(
         'native_changed',
-        'Your developer changed native code. RHR is rebuilding your app; '
+        'Native code changed. RHR is rebuilding your app; '
             'its state will reset.',
         echo: false,
       );
@@ -1689,7 +1689,7 @@ Future<int?> _runSession({
   final local = vm.replace(host: '127.0.0.1', port: server.port);
   stderr.writeln('[rhr] tunneled VM service: $local');
 
-  /// Hot reloads or restarts through `flutter attach`, as if the developer
+  /// Hot reloads or restarts through `flutter attach`, as if the user
   /// pressed r or R, and answers with what Flutter printed meanwhile, so a
   /// compile error reaches whoever asked.
   Future<SessionAnswer> hotReload({required bool restart}) async {
@@ -1744,7 +1744,7 @@ Future<int?> _runSession({
   }
 
   /// Streams RHR Agent to the phone, the way a debug app goes, and waits for
-  /// the tester to confirm Android's install sheet.
+  /// the user to confirm Android's install sheet.
   Future<SessionAnswer> installAgent() async {
     final certificate = playerCertificate;
     if (certificate == null) {
@@ -1774,7 +1774,7 @@ Future<int?> _runSession({
         ok: true,
         message:
             'RHR Agent is installed, and the phone now shows its setup screen. '
-            'Ask the tester to tap Turn on, find RHR Agent in Settings > '
+            'Ask the user to tap Turn on, find RHR Agent in Settings > '
             'Accessibility and switch it on. If the switch is greyed out: '
             'App info, the three-dot menu, Allow restricted settings, then '
             'try the switch again.',
@@ -1918,7 +1918,7 @@ Future<int?> _runSession({
     if (fatalExit != null && fatalExit != _reprepare) relayTransport.release();
     // Farewell so the phone leaves "Connected" immediately instead of waiting
     // out its 45s presence lease. Harmless if the socket already died (relay
-    // drop) — but a swallowed failure here is why a tester was left reading
+    // drop) — but a swallowed failure here is why the phone was left reading
     // "Can't reach relay — retrying…" after a clean quit, so it gets logged.
     sayGoodbye();
     await transport.close();
@@ -1933,7 +1933,7 @@ Future<int?> _runSession({
     return fatalExit;
   }
 
-  // Asset sync signals the attach process, and so does a restart the tester
+  // Asset sync signals the attach process, and so does a restart the user
   // asks for from the phone — which can happen in any session, including a
   // connector one that never syncs assets. Gating the pid file on syncAssets
   // meant `rhr attach` refused those with "no flutter attach is running to do
@@ -2191,7 +2191,7 @@ Future<int?> _runSession({
   }
   // Flutter ended on its own and the relay is still up, so this is a person
   // quitting rather than a connection failing: hand the device back now
-  // instead of making the next developer wait out a grace period meant for a
+  // instead of making the next host wait out a grace period meant for a
   // CLI that crashed.
   relayTransport.release();
   await cleanup();
@@ -2220,7 +2220,7 @@ final class _DeadlineHolder {
 }
 
 /// Waits for the device's info announcement. Unlike an indefinite hang, a slow
-/// tester is gently reminded instead of looping "session dropped", and a dead
+/// phone gets a gentle reminder instead of looping "session dropped", and a dead
 /// relay connection (wsDied) still ends the wait so the caller can reconnect.
 /// Returns the tunneled VM URI, or null when the relay died while waiting.
 Future<Uri?> _waitForDeviceBridge(
@@ -2230,7 +2230,7 @@ Future<Uri?> _waitForDeviceBridge(
   _DeadlineHolder deadline, {
 
   /// Whether an update is streaming to the device right now. The reminder
-  /// below asks the developer to check that the player is connected, which
+  /// below asks the user to check that the player is connected, which
   /// is unhelpful advice while we are mid-transfer to it.
   bool Function()? updating,
 }) async {
@@ -2262,8 +2262,8 @@ Future<Uri?> _waitForDeviceBridge(
 /// installer. Returns false when the user declined or the update failed
 /// (the caller keeps the hard block).
 /// Clears the phone's update phase. Every exit from the update path goes
-/// through this: a tester holding the device otherwise sits on "building…"
-/// long after the developer's terminal gave up.
+/// through this: the phone otherwise sits on "building…" long after your
+/// terminal gave up.
 void _clearUpdatePhase(SessionTransport transport, {String? failure}) {
   transport.sendControl(
     jsonEncode({
@@ -2319,7 +2319,7 @@ Future<bool> _updatePlayerOverTheWire({
     transport.sendControl(
       jsonEncode({'t': 'progress', 'phase': 'building', 'done': 0, 'total': 0}),
     );
-    // Building can take minutes and the install needs the tester to reopen
+    // Building can take minutes and the install needs the user to reopen
     // the player; keep the bridge wait from expiring under either.
     deadline.value = DateTime.now().add(const Duration(minutes: 20));
     final flutterExecutable = projectFlutterExecutable(project);
@@ -2360,7 +2360,7 @@ Future<bool> _updatePlayerOverTheWire({
       jsonEncode({
         't': 'progress',
         'phase': switch (outcome) {
-          // Android is showing the install sheet: the tester has to tap.
+          // Android is showing the install sheet: the user has to tap.
           PlayerUpdateOutcome.pendingUser => 'install_confirm',
           // Handed to PackageInstaller, or already on disk.
           PlayerUpdateOutcome.committed => 'installing',
@@ -2671,7 +2671,7 @@ Future<String?> _resolveDevice({
     exit(64);
   }
   // A remembered device is a convenience, not an instruction: anything the
-  // developer actually typed wins, and so does a project that pins a code.
+  // user actually typed wins, and so does a project that pins a code.
   final wanted =
       device ?? (code == null ? await preferredDevice(project) : null);
   if (wanted == null) return null;
@@ -2690,7 +2690,7 @@ Future<String?> _resolveDevice({
   if (rendezvous == null) {
     if (device == null) {
       // The remembered phone has left the account. Say so and carry on
-      // rather than failing a command the developer did not aim at it.
+      // rather than failing a command the user did not aim at it.
       stderr.writeln('[rhr] "$wanted" is no longer on this account');
       await forgetPreferredDevice(project);
       return null;
@@ -2705,7 +2705,7 @@ Future<String?> _resolveDevice({
 }
 
 /// The account service, derived from the relay: they are the same deployment,
-/// and a developer who pointed at a private relay means that one.
+/// and a user who pointed at a private relay means that one.
 String _accountService() => const String.fromEnvironment(
   'RHR_RELAY',
   defaultValue: defaultPublicRelay,
@@ -2781,8 +2781,8 @@ Future<int> _devices(List<String> args) async {
 /// `rhr invite`: show a QR a phone can scan to join this account.
 ///
 /// The phone never signs in — it redeems this and holds a membership from
-/// then on, which is what lets a tester lend their phone without being asked
-/// to create an account of their own.
+/// then on, which is what lets the user add a phone to their account without
+/// signing in on it.
 Future<int> _invite() async {
   final session = await currentAccountSession();
   if (session == null) {
@@ -2825,10 +2825,10 @@ Future<int> _invite() async {
 /// `rhr login`: sign in so this machine can reach the devices on an account.
 ///
 /// The device grant prints a code rather than opening a browser here, so the
-/// developer can approve it wherever they already have a session — including
+/// user can approve it wherever they already have a session — including
 /// from a phone when this is running over SSH.
 /// Wraps a WorkOS device-flow URL in the relay's /login redirect, so the
-/// address a developer is asked to open is ours rather than the environment
+/// address the user is asked to open is ours rather than the environment
 /// name WorkOS generated. Falls back to the raw URL when no login base is
 /// configured, since a self-hosted relay may not run the route.
 String _loginLink(String workosUrl) {
@@ -2874,7 +2874,7 @@ Future<int> _login() async {
 }
 
 /// `rhr setup`: enable Flutter custom devices and register the `rhr` device so
-/// the QA phone appears in the device picker. Idempotent — re-running refreshes
+/// the remote phone appears in the device picker. Idempotent — re-running refreshes
 /// the entry.
 /// The command the `rhr` Flutter device runs `device-run` with: a path that
 /// outlives updates. Registering a path into the running script's folder
@@ -2912,7 +2912,7 @@ Future<List<String>?> _registeredRunDebug() async {
 
 /// Registers the `rhr` Flutter device when it is missing or runs a command
 /// that no longer exists, so a session works without a separate `rhr setup`
-/// step. Keeps a relay the developer registered. Quiet when the device is
+/// step. Keeps a relay the user registered. Quiet when the device is
 /// right, and never fatal: if registration fails, the attach below reports
 /// the real problem with Flutter's own message.
 Future<void> ensureRhrDevice() async {
@@ -2965,7 +2965,7 @@ Future<void> _setup(String? relay, {bool quiet = false}) async {
   // target internally but still drives our tunnel fine — verified).
   final device = {
     'id': 'rhr',
-    'label': 'rhr (remote QA phone)',
+    'label': 'rhr (remote phone)',
     'sdkNameAndVersion': 'rhr relay tunnel',
     'platform': null,
     'enabled': true,
@@ -3013,11 +3013,11 @@ Future<void> _setup(String? relay, {bool quiet = false}) async {
 
   Next:
     1. From a Flutter project, run:  rhr run
-    2. A QR appears — the tester scans it in the rhr player.
+    2. A QR appears. Scan it with the rhr player on your phone.
     3. The app launches automatically. Type r to hot reload.
 
   Cursor/VS Code manual flow:
-    Pick "rhr (remote QA phone)" as the device and use the normal Run button.
+    Pick "rhr (remote phone)" as the device and use the normal Run button.
 ''');
 }
 

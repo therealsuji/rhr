@@ -97,7 +97,7 @@ void main() {
   });
 
   test(
-    'dev-first pairing: device arrives, tunnel opens',
+    'host-first pairing: device arrives, tunnel opens',
     () async {
       final code = 'state-${DateTime.now().millisecondsSinceEpoch}';
       final cliLines = <String>[];
@@ -263,7 +263,7 @@ void main() {
   );
 
   test(
-    'device death: relay drops the dev so the CLI recovery loop wakes',
+    'device death: relay drops the host so the CLI recovery loop wakes',
     () async {
       final code = 'devdeath-${DateTime.now().millisecondsSinceEpoch}';
       final cliLines = <String>[];
@@ -332,7 +332,7 @@ void main() {
     () async {
       // The player announces host "connector" when it is tunneling an app it
       // does not host. That app contains no rhr code, so the hello carries no
-      // identity — gating on one would compare the developer against the
+      // identity — gating on one would compare the host's Flutter against the
       // WRONG app's Flutter version and offer a player update that could not
       // possibly fix it. This test pins that the CLI accepts such a hello.
       final code = 'conn-${DateTime.now().millisecondsSinceEpoch}';

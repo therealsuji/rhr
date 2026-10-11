@@ -12,7 +12,7 @@ Future<void> trackHotRestart({
   // main isolate once it has taken it. On a large project over a slow link
   // that runs past a minute — a measured run took 97s and succeeded, after
   // this watchdog had already declared it lost. Failing a restart that is
-  // still working costs the developer the whole session.
+  // still working costs the user the whole session.
   Duration timeout = const Duration(minutes: 3),
   Duration pollInterval = const Duration(milliseconds: 250),
 }) async {

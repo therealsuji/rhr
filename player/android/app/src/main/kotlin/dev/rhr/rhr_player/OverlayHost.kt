@@ -17,13 +17,13 @@ import android.widget.FrameLayout
  * The overlay itself is identical in both modes — same bubble, same shake,
  * same connection panel. Only the window differs, and that difference is
  * forced by what is on screen: in hosted mode the guest app runs inside the
- * player's own Activity, while in connector mode the tester is looking at a
+ * player's own Activity, while in connector mode the user is looking at a
  * completely different process.
  */
 interface OverlayHost {
 	/**
 	 * The container the overlay builds into. The system host returns a
-	 * pass-through root so it cannot steal the tester's touches.
+	 * pass-through root so it cannot steal the user's touches.
 	 */
 	fun createRoot(context: Context): FrameLayout
 
@@ -93,7 +93,7 @@ class ActivityOverlayHost(private val activity: Activity) : OverlayHost {
 
 
 /**
- * Connector mode: floating windows above whatever app the tester is using.
+ * Connector mode: floating windows above whatever app the user is using.
  *
  * Modelled on how chat heads have always done this. The mistake worth naming,
  * because two earlier attempts here made it: do NOT add one full-screen window
@@ -189,7 +189,7 @@ class SystemOverlayHost(private val context: Context) : OverlayHost {
 		if (windows.containsKey(view)) return
 		(view.parent as? ViewGroup)?.removeView(view)
 		// A focusable overlay receives the back key, and a panel that ignores
-		// back is a trap: the tester's usual way out of a sheet does nothing.
+		// back is a trap: the user's usual way out of a sheet does nothing.
 		val holder = object : FrameLayout(context) {
 			override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
 				if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK &&

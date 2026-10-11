@@ -14,7 +14,7 @@ final class LocalRelay {
   final InternetAddress lanAddress;
 
   WebSocket? _device;
-  WebSocket? _dev;
+  WebSocket? _host;
   String? _lastDeviceInfo;
   final _subscriptions = <WebSocket, StreamSubscription<Object?>>{};
 
@@ -48,7 +48,7 @@ final class LocalRelay {
       if (segments.length != 3 ||
           segments[0] != 's' ||
           segments[1] != sessionCode ||
-          (segments[2] != 'device' && segments[2] != 'dev') ||
+          (segments[2] != 'device' && segments[2] != 'host') ||
           !WebSocketTransformer.isUpgradeRequest(request)) {
         request.response.statusCode = HttpStatus.notFound;
         await request.response.close();
@@ -64,7 +64,7 @@ final class LocalRelay {
       if (segments[2] == 'device') {
         _attachDevice(socket);
       } else {
-        _attachDev(socket);
+        _attachHost(socket);
       }
     });
   }
@@ -85,7 +85,7 @@ final class LocalRelay {
             // Forward unrecognized messages without replacing the announcement.
           }
         }
-        _safeAdd(_dev, message);
+        _safeAdd(_host, message);
       },
       onDone: () {
         _subscriptions.remove(socket);
@@ -97,21 +97,21 @@ final class LocalRelay {
       },
     );
     final info = _lastDeviceInfo;
-    if (info != null) _safeAdd(_dev, info);
+    if (info != null) _safeAdd(_host, info);
   }
 
-  void _attachDev(WebSocket socket) {
-    _dev?.close(4001, 'replaced by new connection');
-    _dev = socket;
+  void _attachHost(WebSocket socket) {
+    _host?.close(4001, 'replaced by new connection');
+    _host = socket;
     _subscriptions[socket] = socket.listen(
       (message) => _safeAdd(_device, message),
       onDone: () {
         _subscriptions.remove(socket);
-        if (identical(_dev, socket)) _dev = null;
+        if (identical(_host, socket)) _host = null;
       },
       onError: (_) {
         _subscriptions.remove(socket);
-        if (identical(_dev, socket)) _dev = null;
+        if (identical(_host, socket)) _host = null;
       },
     );
     final info = _lastDeviceInfo;
@@ -122,8 +122,8 @@ final class LocalRelay {
     if (!identical(_device, socket)) return;
     _device = null;
     _lastDeviceInfo = null;
-    _dev?.close(4000, 'device disconnected');
-    _dev = null;
+    _host?.close(4000, 'device disconnected');
+    _host = null;
   }
 
   static void _safeAdd(WebSocket? socket, Object? message) {
@@ -141,7 +141,7 @@ final class LocalRelay {
     }
     _subscriptions.clear();
     await _device?.close(1001, 'local relay stopped');
-    await _dev?.close(1001, 'local relay stopped');
+    await _host?.close(1001, 'local relay stopped');
     await _server.close(force: true);
   }
 

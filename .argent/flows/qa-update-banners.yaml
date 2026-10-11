@@ -1,4 +1,4 @@
-# What the tester reads while an update happens.
+# What the phone shows while an update happens.
 #
 # Every phase here was wrong on a phone once. The bar stopped at 54% and
 # stayed there through the install and into the next screen; the transfer
@@ -18,11 +18,11 @@ steps:
   # Readiness is the banner itself, not stillness: the lobby polls its status
   # every two seconds and the code field blinks a caret, so `idle` reports the
   # screen as never quite settled and says nothing about whether it is ready.
-  - await: { visible: { text: Waiting for developer }, timeout: 20000 }
-  - echo: "Baseline: lobby at rest, waiting for a developer."
+  - await: { visible: { text: Waiting for your computer }, timeout: 20000 }
+  - echo: "Baseline: lobby at rest, waiting for the host."
 
   # The payload kind picks the wording between a player self-update and the
-  # developer's own app. This flow checks the app wording throughout.
+  # user's own app. This flow checks the app wording throughout.
   - script: { path: ../scripts/fault-update-foreign.mjs }
 
   - echo: "Bytes are moving. This is NOT the install."
@@ -33,7 +33,7 @@ steps:
   # so this absence check is about placement rather than a typo.
   - assert: { hidden: { text: Installing your app } }
 
-  - echo: "The install is its own state — the step the tester may have to tap."
+  - echo: "The install is its own state — the step the user may have to tap."
   - script: { path: ../scripts/fault-phase-installing.mjs }
   - assert: { visible: { text: Installing your app } }
   - assert: { hidden: { text: Sending your app } }
@@ -42,17 +42,17 @@ steps:
   - script: { path: ../scripts/fault-phase-installed.mjs }
   - assert: { visible: { text: Your app is installed } }
 
-  - echo: "A failure carries the developer's reason, not just the word failed."
+  - echo: "A failure carries the host's reason, not just the word failed."
   - script: { path: ../scripts/fault-phase-update-failed.mjs }
   - assert: { visible: { text: no space left on device } }
 
   - echo: "A build is minutes of silence; the lobby used to show none of it."
   - script: { path: ../scripts/fault-phase-building.mjs }
-  - assert: { visible: { text: Developer is building an update } }
+  - assert: { visible: { text: Building an update } }
 
   # Every phase has an end. This is also what makes the flow re-runnable:
   # it leaves the phone on the baseline it started from.
   - echo: "Clearing restores the baseline."
   - script: { path: ../scripts/fault-clear.mjs }
-  - await: { hidden: { text: Developer is building an update }, timeout: 15000 }
-  - await: { visible: { text: Waiting for developer }, timeout: 15000 }
+  - await: { hidden: { text: Building an update }, timeout: 15000 }
+  - await: { visible: { text: Waiting for your computer }, timeout: 15000 }

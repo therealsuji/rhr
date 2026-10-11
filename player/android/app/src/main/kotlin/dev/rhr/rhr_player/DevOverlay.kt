@@ -45,7 +45,7 @@ import kotlin.math.sqrt
  *    needed, but only visible while the player is foreground — right for
  *    hosted mode, where the guest runs inside this very Activity.
  *  - [SystemOverlayHost] puts it in a TYPE_APPLICATION_OVERLAY window so it
- *    floats above the tester's own app — required for connector mode, at the
+ *    floats above the user's own app — required for connector mode, at the
  *    cost of the "Display over other apps" permission.
  *
  * Design language: dark translucent surfaces, rounded corners, the rhr violet
@@ -438,10 +438,10 @@ class DevOverlay(
 				MotionEvent.ACTION_DOWN -> {
 					when (bubble) {
 						// A window on its way out does not take touches; the
-						// tester was aiming at whatever is underneath by now.
+						// user was aiming at whatever is underneath by now.
 						Bubble.HIDDEN, Bubble.HIDING -> return@setOnTouchListener false
 						// Tapped mid pop-in: land it and carry on, so a quick
-						// tester never has to wait out the animation.
+						// user never has to wait out the animation.
 						Bubble.SHOWING -> settleVisible()
 						Bubble.VISIBLE -> {}
 					}
@@ -584,7 +584,7 @@ class DevOverlay(
 		}
 	}
 
-	/** Skips the rest of the pop-in; used when the tester touches it early. */
+	/** Skips the rest of the pop-in; used when the user touches it early. */
 	private fun settleVisible() {
 		cancelTween(fab)
 		fab.alpha = 1f
@@ -816,7 +816,7 @@ class DevOverlay(
 		val stColor = when (st) {
 			"connected" -> Color.parseColor("#4ADE80")
 			"rejected" -> Color.parseColor("#F87171")
-			"retrying", "closed", "waiting_dev" -> Color.parseColor("#FBBF24")
+			"retrying", "closed", "waiting_host" -> Color.parseColor("#FBBF24")
 			else -> inkDim
 		}
 		// status row with colored dot
@@ -851,8 +851,8 @@ class DevOverlay(
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
 
-		// The tester's own way back to a clean app. Offered only while a
-		// developer is attached, because a hot restart is theirs to perform:
+		// The user's own way back to a clean app. Offered only while the
+		// host is attached, because a hot restart is the host's to perform:
 		// without one to ask, the row would be a button that does nothing.
 		// Worded "the app" rather than "restart" alone, so it is not read as a
 		// third sibling of Reconnect and Disconnect.
@@ -868,12 +868,12 @@ class DevOverlay(
 
 		// Pause, not Stop: ending a session while the phone stays available just
 		// lets the next recovery loop take it again a second later, which reads
-		// as the button not working. This is what actually gives the phone back.
+		// as the button not working. This is what actually takes the phone offline.
 		val isPaused = RhrSessionService.status == "paused"
 		sheet.addView(
 			iconRow(
 				if (isPaused) "▶" else "⏸",
-				if (isPaused) "Resume — let developers connect" else "Pause — keep this phone to myself",
+				if (isPaused) "Resume — accept connections again" else "Pause — stop accepting connections",
 				primary = false,
 			) {
 				activity.startService(
@@ -1055,7 +1055,7 @@ class DevOverlay(
 		menuProgress = null
 		menuRestart = null
 		// Panel closed: the bubble may idle away again, a little sooner than
-		// after a shake since the tester has just been looking at it.
+		// after a shake since the user has just been looking at it.
 		armIdleHide(IDLE_AFTER_PANEL_MS)
 	}
 
@@ -1142,9 +1142,9 @@ class DevOverlay(
 			val u = t - 1
 			return 1 + (c + 1) * u * u * u + c * u * u
 		}
-		/** How long the bubble lingers over the tester's app after a shake. */
+		/** How long the bubble lingers over the user's app after a shake. */
 		const val IDLE_MS = 5_000L
-		/** Shorter linger after the panel closes: the tester just used it. */
+		/** Shorter linger after the panel closes: the user just used it. */
 		const val IDLE_AFTER_PANEL_MS = 3_000L
 	}
 }

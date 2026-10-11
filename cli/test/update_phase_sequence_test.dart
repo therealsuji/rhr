@@ -1,12 +1,12 @@
 // The phases the CLI actually puts on the wire, from a real process.
 //
 // update_loopback_test.dart checks the transfer protocol; this checks what
-// the tester is TOLD while it happens. They are different failures: the bar
+// the phone is TOLD while it happens. They are different failures: the bar
 // that sat at 54% was correct about the bytes and wrong about the phase, and
 // the phase that never cleared was not a protocol error at all — the CLI
 // simply said nothing on success, so the phone kept the last thing it heard.
 //
-// The rule being pinned is the one a tester's patience depends on: a phase
+// The rule being pinned is the one the user's patience depends on: a phase
 // that goes up comes down. Every exit from the update path reports.
 //
 // These spawn a real relay, a real CLI and a real device bridge. Paths that
@@ -112,7 +112,7 @@ void main() {
       '--outdated',
     ], workDir: '$_repo/bridge', lines: deviceLines);
     // No --update-player and no terminal to prompt on: the CLI declines on
-    // the tester's behalf and must say so. This exits 78, and the phone used
+    // the user's behalf and must say so. This exits 78, and the phone used
     // to keep "Out of date — waiting for the developer" forever.
     final cli = await _spawn([
       'bin/rhr.dart',
@@ -136,7 +136,7 @@ void main() {
       expect(
         phases.first,
         'outdated',
-        reason: 'the tester should learn the session is blocked, not just '
+        reason: 'the phone should learn the session is blocked, not just '
             'watch it go quiet',
       );
       expect(

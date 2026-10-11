@@ -4,7 +4,7 @@ import 'package:rhr_cli/version.dart';
 import 'package:test/test.dart';
 
 void main() {
-  // The README's install command is what a new developer copies. Pinned to
+  // The README's install command is what a new user copies. Pinned to
   // an older release, it installed a CLI without the features the README
   // goes on to describe.
   test('the README installs this version', () {

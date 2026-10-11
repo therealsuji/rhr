@@ -19,7 +19,7 @@ abstract interface class RelayControlTransport {
 /// bulk data (the VM tunnel, player and app updates) rides direct WebRTC.
 const relayBinaryRefusal = 'binary payload disabled';
 
-/// What to tell the developer when [relayBinaryRefusal] ends a session.
+/// What to tell the user when [relayBinaryRefusal] ends a session.
 const relayBinaryUnsupported =
     'this relay does not carry tunnel or update payloads, only signalling. '
     'Remove --no-direct so bulk data rides the direct WebRTC path, or use a '
@@ -35,7 +35,7 @@ abstract interface class SessionTransport {
   Future<void> close();
 }
 
-/// Thrown when the relay refuses because another developer holds the device.
+/// Thrown when the relay refuses because another host holds the device.
 ///
 /// Distinct from an ordinary connect failure: retrying will not help until the
 /// holder disconnects, so the CLI reports it instead of looping.
@@ -48,7 +48,7 @@ final class DeviceBusyException implements Exception {
   String toString() => message;
 }
 
-/// Connects the dev end to several relay candidates and selects the first one
+/// Connects the host end to several relay candidates and selects the first one
 /// that produces a device `info` message.
 ///
 /// It forwards messages only from the candidate that first announces device
@@ -89,7 +89,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   static void releaseClaim(String code) =>
       _claims.removeWhere((key, _) => key.$2 == code);
 
-  /// Tells the relay this session is over on purpose, so the next developer
+  /// Tells the relay this session is over on purpose, so the next host
   /// takes the device immediately instead of waiting out a grace period meant
   /// for a CLI that crashed.
   void release() {
@@ -97,7 +97,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     final file = _claimFile;
     if (file != null && file.existsSync()) file.deleteSync();
     if (_closed) return;
-    // Before a winner, every candidate relay admitted this developer and
+    // Before a winner, every candidate relay admitted this host and
     // holds a claim for it.
     final winner = _winner;
     for (final candidate in winner == null ? _candidates : [winner]) {
@@ -180,7 +180,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     WebSocket? socket;
     try {
       socket = await WebSocket.connect(
-        '$relay/s/$code/dev',
+        '$relay/s/$code/host',
         headers: claim == null ? null : {_claimHeader: claim},
       ).timeout(const Duration(seconds: 8));
     } catch (e) {
@@ -229,7 +229,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   static String _busyReason(String raw) {
     final marker = raw.indexOf('busy:');
     return marker == -1
-        ? 'this device is in use by another developer'
+        ? 'this device is in use by another host'
         : raw.substring(marker);
   }
 
@@ -259,12 +259,12 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       _winner = candidate;
       if (!_selected.isCompleted) _selected.complete(candidate.relay);
       // The initial hello may have crossed the relay before the device
-      // connected. Repeat it after the cached info arrives so a dev-first
+      // connected. Repeat it after the cached info arrives so a host-first
       // pairing can still trigger optional device-side upgrades (such as
       // direct WebRTC signaling).
       candidate.channel.sink.add(_hello);
       // A loser's claim is dead weight: left alone, its relay would hold the
-      // device for a grace period and refuse this developer's next run.
+      // device for a grace period and refuse this host's next run.
       for (final loser in _candidates.where(
         (item) => item != candidate && !item.closed,
       )) {

@@ -1,11 +1,11 @@
 // rhr relay on Cloudflare Workers.
 //
 // ONE Durable Object for every session. It holds two WebSockets per session —
-// the device bridge (dials out from the phone) and the dev CLI — and forwards
+// the device bridge (dials out from the phone) and the host CLI — and forwards
 // text control messages between them, keyed by session code.
 //
 // A Durable Object earns its place here for exactly one reason: a phone
-// waiting for a developer holds an idle socket for hours, and a plain Worker
+// waiting for the user's computer holds an idle socket for hours, and a plain Worker
 // cannot hold a socket at all. Hibernation makes that wait free; polling
 // instead would cost millions of requests a day once there are more than a
 // handful of phones. Everything else the relay does is a few kilobytes of
@@ -19,15 +19,15 @@
 //
 // Routes:
 //   GET /s/<code>/device  — device bridge end
-//   GET /s/<code>/dev     — dev CLI end
+//   GET /s/<code>/host    — host CLI end
 //   GET /healthz
 //
 // The relay never parses tunnel frames. The one exception: the most recent
 // TEXT frame from the device (the bridge's "info" hello carrying the VM
-// service URI) is cached and replayed to a dev that connects later, so
+// service URI) is cached and replayed to a host that connects later, so
 // connection order doesn't matter. The cache lives in DO storage (hibernation
 // wipes in-memory state) and is cleared when the device disconnects — a dead
-// device's info would tunnel the dev into nothing.
+// device's info would tunnel the host into nothing.
 //
 // Every accepted socket carries a generation: the count of sockets accepted
 // for its role so far. A replaced socket keeps running until its close event
@@ -59,7 +59,7 @@ export interface Env {
 // here, because authkit.app is shared across every WorkOS tenant.
 const AUTHKIT_HOST = "bright-dandelion-45.authkit.app";
 
-type Role = "device" | "dev";
+type Role = "device" | "host";
 
 // The tunnel grants VM-service access (arbitrary code execution in the app),
 // so the session code is a bearer token. Codes must be unguessable, and a
@@ -102,7 +102,7 @@ const infoGenKey = (code: string) => `infoGen:${code}`;
 /** Socket tag identifying which session and role a connection belongs to. */
 const socketTag = (code: string, role: Role) => `${code}|${role}`;
 
-// How long a dev's claim on a phone outlives its socket. Long enough that the
+// How long a host's claim on a phone outlives its socket. Long enough that the
 // CLI's own recovery loop (which backs off for seconds) reconnects into the
 // claim it already held, short enough that a laptop that crashed or walked out
 // of the building gives the phone back without anyone intervening.
@@ -115,9 +115,9 @@ const CLAIM_GRACE_MS = 45_000;
 /**
  * Who currently holds the device, across disconnects.
  *
- * Without this a second developer's connect silently evicts the first, which
- * on a phone that several people share means whoever typed most recently wins
- * and the tester watching the screen is not consulted.
+ * Without this a second host's connect silently evicts the first, which on a
+ * phone driven from several terminals or agents means whoever typed most
+ * recently wins and the session already on the screen is cut off.
  */
 interface Claim {
 	/** Opaque per-invocation id: identity for resuming across a reconnect. */
@@ -128,16 +128,16 @@ interface Claim {
 }
 
 /**
- * Set while the tester has paused the phone.
+ * Set while the user has paused the phone.
  *
  * Stopping a session without this just hands the phone to whoever asks next,
- * which reads as the Stop button not working: the tester ends a session, a
- * developer's recovery loop reclaims it a second later, and their screen is
- * taken over again. Pause is what actually gives the phone back.
+ * which reads as the Stop button not working: the user ends a session on the
+ * phone, the host's recovery loop reclaims it a second later, and the screen
+ * is taken over again. Pause is what actually gives the phone back.
  */
 
 /**
- * A dev announces the claim it is resuming with this header. The granted claim
+ * A host announces the claim it is resuming with this header. The granted claim
  * comes back as a control frame instead: neither Dart WebSocket client exposes
  * the upgrade response, and a frame rides the channel that already exists.
  */
@@ -160,24 +160,24 @@ export class RelaySession implements DurableObject {
 		}
 
 		const before = {
-			dev: this.ctx.getWebSockets(socketTag(code, "dev")).length,
+			host: this.ctx.getWebSockets(socketTag(code, "host")).length,
 			device: this.ctx.getWebSockets(socketTag(code, "device")).length,
 		};
 
-		// A dev asks to hold the phone; a device reconnecting is the same phone
+		// A host asks to hold the phone; a device reconnecting is the same phone
 		// coming back, so it keeps the old replace-on-connect behaviour.
 		let claim: Claim | null = null;
-		if (role === "dev") {
-			const decision = await this.admitDev(
+		if (role === "host") {
+			const decision = await this.admitHost(
 				code,
 				request.headers.get(CLAIM_HEADER),
-				before.dev > 0,
+				before.host > 0,
 			);
 			if (decision.refused) {
-				console.log(`[rhr] dev REFUSED ${decision.reason}`);
+				console.log(`[rhr] host REFUSED ${decision.reason}`);
 				// 409 rather than a close code: the CLI learns why before it has a
 				// socket to be closed on, so it can say "busy" instead of retrying
-				// into a fight for a phone someone else is holding.
+				// into a fight for a phone another session is holding.
 				return new Response(decision.reason, {
 					status: 409,
 					headers: { "content-type": "text/plain" },
@@ -215,9 +215,9 @@ export class RelaySession implements DurableObject {
 		]);
 		console.log(
 			`[rhr] ${role} CONNECTED gen=${generation} ` +
-				`(was dev=${before.dev} device=${before.device})`,
+				`(was host=${before.host} device=${before.device})`,
 		);
-		if (role === "dev") {
+		if (role === "host") {
 			const deviceLive =
 				this.ctx.getWebSockets(socketTag(code, "device")).length > 0;
 			const info = await this.ctx.storage.get<string>(infoKey(code));
@@ -230,20 +230,20 @@ export class RelaySession implements DurableObject {
 			const fresh = info !== undefined && Date.now() - at < INFO_TTL_MS;
 			// Info from a device connection that has since been replaced describes
 			// a VM the current device is not serving; replaying it would tunnel
-			// the dev into nothing.
+			// the host into nothing.
 			const current = infoGen === deviceGen;
 			console.log(
-				`[rhr] dev replay check: deviceLive=${deviceLive} ` +
+				`[rhr] host replay check: deviceLive=${deviceLive} ` +
 					`hasInfo=${info !== undefined} fresh=${fresh} ` +
 					`infoGen=${infoGen} deviceGen=${deviceGen}`,
 			);
 			if (deviceLive && fresh && current) {
 				pair[1].send(info);
-				console.log("[rhr] dev replayed cached info");
+				console.log("[rhr] host replayed cached info");
 			}
 		}
 		if (claim) {
-			// The dev needs its claim id to resume this same claim after a drop
+			// The host needs its claim id to resume this same claim after a drop
 			// rather than arrive as a stranger and be told the phone is busy.
 			pair[1].send(JSON.stringify({ t: "claim", id: claim.claimId }));
 		}
@@ -251,7 +251,7 @@ export class RelaySession implements DurableObject {
 	}
 
 	/**
-	 * Decides whether a connecting dev may hold this phone.
+	 * Decides whether a connecting host may hold this phone.
 	 *
 	 * Three cases, in order:
 	 *
@@ -265,7 +265,7 @@ export class RelaySession implements DurableObject {
 	 * holder owns the phone outright, and the clock only matters once it is
 	 * gone.
 	 */
-	private async admitDev(
+	private async admitHost(
 		code: string,
 		offeredClaimId: string | null,
 		holderLive: boolean,
@@ -275,7 +275,7 @@ export class RelaySession implements DurableObject {
 		if (await this.ctx.storage.get<boolean>(pausedKey(code))) {
 			return {
 				refused: true,
-				reason: "paused: the tester has paused this device",
+				reason: "paused: this device was paused on the phone",
 			};
 		}
 		const held = await this.ctx.storage.get<Claim>(claimKey(code));
@@ -292,8 +292,8 @@ export class RelaySession implements DurableObject {
 			return {
 				refused: true,
 				reason: holderLive
-					? "busy: another developer is connected to this device"
-					: `busy: another developer holds this device for ${seconds}s more`,
+					? "busy: another host is connected to this device"
+					: `busy: another host holds this device for ${seconds}s more`,
 			};
 		}
 		return {
@@ -328,34 +328,34 @@ export class RelaySession implements DurableObject {
 			meta.msgs++;
 			meta.bytes += messageBytes;
 		}
-		// The tester's pause and resume, which only the phone may set: it is
-		// the one that knows whether someone is holding it.
+		// Pause and resume, which only the phone may set: it is the one that
+		// knows whether the user is holding it.
 		if (role === "device" && message.includes('"pause"')) {
 			await this.ctx.storage.put(pausedKey(code), true);
 			await this.ctx.storage.delete(claimKey(code));
 			// 1001 (going away) rather than a custom code: the runtime accepts it
 			// on a hibernatable socket, and the CLI already treats it as a clean
 			// end of session rather than an error to retry through.
-			this.closeRole(code, "dev", 1001, "paused by the tester");
-			console.log("[rhr] device paused by the tester");
+			this.closeRole(code, "host", 1001, "paused on the phone");
+			console.log("[rhr] device paused on the phone");
 			return;
 		}
 		if (role === "device" && message.includes('"resume"')) {
 			await this.ctx.storage.delete(pausedKey(code));
-			console.log("[rhr] device resumed by the tester");
+			console.log("[rhr] device resumed on the phone");
 			return;
 		}
-		// A dev leaving on purpose hands the device back now rather than making
-		// the next person wait out a grace period meant for crashes.
-		if (role === "dev" && message.includes('"release"')) {
+		// A host leaving on purpose hands the device back now rather than making
+		// the next session wait out a grace period meant for crashes.
+		if (role === "host" && message.includes('"release"')) {
 			const held = await this.ctx.storage.get<Claim>(claimKey(code));
 			if (held && held.generation === meta?.generation) {
 				await this.ctx.storage.delete(claimKey(code));
-				console.log("[rhr] dev released its claim");
+				console.log("[rhr] host released its claim");
 			}
 			return;
 		}
-		// Cache ONLY the device's info announcement for late-dev replay. Pings
+		// Cache ONLY the device's info announcement for late-host replay. Pings
 		// and other control text must NOT overwrite it (they used to, clobbering
 		// the cached VM URI with "{"t":"ping"}").
 		if (role === "device" && message.includes('"info"')) {
@@ -366,14 +366,14 @@ export class RelaySession implements DurableObject {
 			});
 			console.log(`[rhr] cached device info gen=${meta?.generation ?? 0}`);
 		}
-		const peer: Role = role === "device" ? "dev" : "device";
+		const peer: Role = role === "device" ? "host" : "device";
 		const peers = this.ctx.getWebSockets(socketTag(code, peer));
 		for (const other of peers) {
 			try {
 				other.send(message);
 			} catch {
 				// The peer socket died between getWebSockets and send (e.g. a
-				// dev CLI that crashed without a clean close). An unhandled
+				// host CLI that crashed without a clean close). An unhandled
 				// throw here would reject this handler and drop the SENDER's
 				// connection too — the device then sees a connect→EOF loop.
 				// Tolerate it; the dead peer's own close handler cleans up.
@@ -397,28 +397,28 @@ export class RelaySession implements DurableObject {
 	}
 
 	private async onSocketGone(ws: WebSocket) {
-		if (this.roleOf(ws) === "dev") {
-			await this.onDevGone(ws);
+		if (this.roleOf(ws) === "host") {
+			await this.onHostGone(ws);
 			return;
 		}
 		await this.onDeviceGone(ws);
 	}
 
 	/**
-	 * Starts the grace clock when the holding dev's socket ends.
+	 * Starts the grace clock when the holding host's socket ends.
 	 *
 	 * The claim outlives the socket so the CLI's recovery loop reconnects into
-	 * what it already held. A dev that never comes back simply lets the clock
-	 * run out, which is what stops a crashed laptop from holding a phone that
-	 * someone else is standing in front of.
+	 * what it already held. A host that never comes back simply lets the clock
+	 * run out, which is what stops a crashed laptop from holding the phone
+	 * against every other terminal.
 	 */
-	private async onDevGone(ws: WebSocket) {
+	private async onHostGone(ws: WebSocket) {
 		const { code } = this.sessionOf(ws);
 		const generation = this.metaOf(ws)?.generation ?? 0;
 		const held = await this.ctx.storage.get<Claim>(claimKey(code));
 		if (!held || held.generation !== generation) {
 			console.log(
-				`[rhr] ignoring stale dev close gen=${generation} ` +
+				`[rhr] ignoring stale host close gen=${generation} ` +
 					`claimGen=${held?.generation ?? "none"}`,
 			);
 			return;
@@ -426,7 +426,7 @@ export class RelaySession implements DurableObject {
 		const expiresAt = Date.now() + CLAIM_GRACE_MS;
 		await this.ctx.storage.put(claimKey(code), { ...held, expiresAt });
 		console.log(
-			`[rhr] dev gone; claim held ${CLAIM_GRACE_MS / 1000}s for reconnect`,
+			`[rhr] host gone; claim held ${CLAIM_GRACE_MS / 1000}s for reconnect`,
 		);
 	}
 
@@ -436,7 +436,7 @@ export class RelaySession implements DurableObject {
 	 * An evicted socket's close event can arrive after its replacement is
 	 * already serving — reconnects are routine, so this is the common case, not
 	 * a rare race. Acting on role alone would let the outgoing connection
-	 * delete the live device's cached info and hang up on its dev, leaving a
+	 * delete the live device's cached info and hang up on its host, leaving a
 	 * session that looks connected on both ends and moves no traffic.
 	 */
 	private async onDeviceGone(ws: WebSocket) {
@@ -453,15 +453,15 @@ export class RelaySession implements DurableObject {
 		}
 		await this.ctx.storage.delete(infoKey(code));
 		// Holding a phone that is gone helps nobody: the claim exists to stop
-		// developers stealing a phone from each other, and there is no phone to
-		// steal. Releasing here also means a tester who walks away and comes
-		// back is not locked out by whoever held it last.
+		// hosts stealing a phone from each other, and there is no phone to
+		// steal. Releasing here also means the phone, when it comes back, is
+		// not locked out by whichever host held it last.
 		await this.ctx.storage.delete(claimKey(code));
 		// The session is dead without a device: its tunnel channels are
-		// half-open and the attached dev's flutter attach would hang on
-		// them forever. Drop the dev too so the CLI's recovery loop wakes
+		// half-open and the attached host's flutter attach would hang on
+		// them forever. Drop the host too so the CLI's recovery loop wakes
 		// up, re-dials, and re-pairs with the device when it returns.
-		this.closeRole(code, "dev", 1001, "device disconnected");
+		this.closeRole(code, "host", 1001, "device disconnected");
 	}
 
 	private closeRole(code: string, role: Role, wsCode: number, reason: string) {
@@ -510,7 +510,7 @@ export default {
 		if (seg.length === 1 && seg[0] === "healthz") {
 			return new Response("ok");
 		}
-		// `rhr login` prints a URL for the developer to open, and WorkOS hands
+		// `rhr login` prints a URL for the user to open, and WorkOS hands
 		// back one on its own auto-generated environment domain
 		// (bright-dandelion-45.authkit.app) — a random name on someone else's
 		// domain, in front of anyone signing in. A custom AuthKit domain is a
@@ -548,7 +548,7 @@ export default {
 		if (
 			seg.length === 3 &&
 			seg[0] === "s" &&
-			(seg[2] === "device" || seg[2] === "dev")
+			(seg[2] === "device" || seg[2] === "host")
 		) {
 			// Native clients (CLI, bridge) send no Origin header; a browser
 			// always does. Rejecting it blocks cross-site WebSocket hijacking.
@@ -575,7 +575,7 @@ export default {
 
 		// Account routes. Ordinary HTTP, deliberately apart from the session
 		// socket above: that one is native-clients-only, these are reached by a
-		// phone redeeming an invite and a CLI holding a developer's token.
+		// phone redeeming an invite and a CLI holding the user's token.
 		if (seg.length === 2 && seg[0] === "account" && seg[1] === "invite") {
 			if (request.method !== "POST") {
 				return new Response("method not allowed", { status: 405 });
@@ -681,7 +681,7 @@ export default {
 		// token — it proves nothing beyond naming its own installation, which
 		// is why these answer only about that installation and expose nothing
 		// about an account beyond the address that named it on the consent
-		// screen the tester already saw.
+		// screen the user already saw on the phone.
 		if (seg.length === 2 && seg[0] === "device" && seg[1] === "accounts") {
 			const installationId = url.searchParams.get("installationId");
 			if (!installationId) {

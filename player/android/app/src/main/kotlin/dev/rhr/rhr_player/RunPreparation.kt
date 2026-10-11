@@ -73,7 +73,7 @@ object RunPreparation {
 						val vm = launchWithBeacon(context, pkg)
 						if (!isCurrent()) return@Thread
 						selectVm(vm, pkg)
-						// The tester may close and reopen the app; its VM then
+						// The user may close and reopen the app; its VM then
 						// listens on a new port, and the beacon reports it.
 						Beacons.onAnnounce = { reported, address ->
 							if (reported == pkg && isCurrent()) selectVm(address, pkg)

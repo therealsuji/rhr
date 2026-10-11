@@ -15,7 +15,7 @@ password reset. Losing the key prevents updates to existing installations.
 
 Gradle selects this identity when `RHR_PLAYER_KEYSTORE` names the keystore and
 `RHR_PLAYER_KEY_PASSWORD` supplies its password. Local builds without these
-variables retain the developer's normal debug signing identity. CI refuses to
+variables keep the computer's normal debug signing identity. CI refuses to
 publish without the secrets and verifies the resulting APK against the public
 certificate fingerprint in `tool/release-signing.sha256`.
 
@@ -31,7 +31,7 @@ uninstalling the old player and installing the new APK. Uninstalling clears app
 data, including pairing and setup. This is a one-time migration for installations
 that subsequently use only releases signed with the persistent key.
 
-CLI-built custom players still use the developer's local key. They cannot replace
+CLI-built custom players still use the local key on the user's computer. They cannot replace
 a GitHub-signed player in place unless they use the same signing identity. Do not
 distribute the release private key to solve this. Use a separate debug app through
 connector mode when the project's runtime or native plugins require it.

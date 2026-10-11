@@ -322,7 +322,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scan the dev QR')),
+      appBar: AppBar(title: const Text('Scan the QR')),
       body: Stack(
         alignment: Alignment.center,
         children: [
@@ -352,7 +352,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
           const Positioned(
             bottom: 48,
             child: Text(
-              'Point at the QR in the dev’s terminal',
+              'Point at the QR in your terminal',
               style: TextStyle(color: Colors.white70),
             ),
           ),

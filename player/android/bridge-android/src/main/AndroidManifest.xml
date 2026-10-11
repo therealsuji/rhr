@@ -19,11 +19,11 @@
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <!-- Not dataSync: Android 15 stops dataSync services after 6 hours,
-                 and a tester's session can run all day. -->
+                 and a session can run all day. -->
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Developer tooling: carries a debug session between
-                    the developer's computer and an app on this phone" />
+                android:value="Development tooling: carries a debug session between
+                    the user's computer and an app on this phone" />
         </service>
     </application>
 </manifest>

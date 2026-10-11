@@ -65,8 +65,8 @@ class RhrPlayerUpdater(
 		set(value) {
 			field = value
 			// The overlay labels the transfer from this: replacing the player
-			// and installing the developer's own app read very differently to
-			// whoever is holding the phone.
+			// and installing the user's own app read very differently on the
+			// phone.
 			RhrSessionService.updatingForeignApp = value == "app"
 		}
 	private var installTarget = ""
@@ -201,7 +201,7 @@ class RhrPlayerUpdater(
 		}
 		Log.i(TAG, "update transfer $transferId verified; installing")
 		// The bytes are all here. Stop showing a transfer and start showing
-		// the install — the tester was reading "54%" at this point, because
+		// the install — the user was reading "54%" at this point, because
 		// the transfer's last number was the last thing anyone had said.
 		RhrSessionService.setInstallPhase("installing")
 		install(apk)
@@ -214,7 +214,7 @@ class RhrPlayerUpdater(
 			// not have it. Without this check the commit below is refused by
 			// the system AFTER we have already reported "committed" (that
 			// order is forced — a silent self-update kills this process during
-			// commit), so a blocked install reads to the developer as a
+			// commit), so a blocked install reads in the terminal as a
 			// finished one. Fail honestly instead, and say where to fix it.
 			if (!context.packageManager.canRequestPackageInstalls()) {
 				fail(
@@ -283,7 +283,7 @@ class RhrPlayerUpdater(
 	}
 
 	fun onPendingUser() {
-		// Android is holding a sheet in front of the tester. Say what it
+		// Android is holding a sheet in front of the user. Say what it
 		// wants, or the phone reads as busy while it is actually waiting.
 		RhrSessionService.setInstallPhase("install_confirm")
 		status(transferId, "pending_user")
@@ -295,7 +295,7 @@ class RhrPlayerUpdater(
 		status(transferId, "installed")
 		Log.i(TAG, "foreign package install confirmed")
 		// Android binds the accessibility service of an app only once it has
-		// been opened, and its screen is where the tester turns it on.
+		// been opened, and its screen is where the user turns it on.
 		if (installTarget == AGENT_PACKAGE) {
 			context.packageManager.getLaunchIntentForPackage(AGENT_PACKAGE)
 				?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -311,7 +311,7 @@ class RhrPlayerUpdater(
 	// way (send goes straight to the socket, file deletion is idempotent).
 	private fun fail(message: String) {
 		finished = true
-		// The developer's CLI normally echoes a failure back as the
+		// The CLI normally echoes a failure back as the
 		// "update_failed" phase, but a failure whose cause IS the socket
 		// would never make that round trip — and the phone would sit on a
 		// half-drawn bar with the reason in its own hand. Show it here.

@@ -2,7 +2,7 @@
 /// relay is supplied. Deployments can override it at runtime.
 const defaultPublicRelay = 'wss://getrhr.dev';
 
-/// Where `rhr login` sends the developer to approve a device code.
+/// Where `rhr login` sends the user to approve a device code.
 ///
 /// WorkOS issues its URL on an auto-generated environment domain
 /// (`bright-dandelion-45.authkit.app`), which is what anyone signing in would

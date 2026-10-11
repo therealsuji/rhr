@@ -83,7 +83,7 @@ final class DirectSessionTransport implements SessionTransport {
         // misses, roughly the 30s RFC 7675 allows before consent expires.
         // `closed` is the device tearing its peer down on purpose: it does
         // that when it replaces the session (connector mode adopting a new
-        // target VM), when the tester taps Disconnect, or when its own relay
+        // target VM), when the user taps Disconnect, or when its own relay
         // socket drops — and in all but the second case it redials within a
         // second. That is a reason to re-dial and renegotiate, not to quit.
         // No direct_error goes back either: it would land on the device's
@@ -157,7 +157,7 @@ final class DirectSessionTransport implements SessionTransport {
     // its peer notification through _relay.sendControl for that reason.
     //
     // Gating it here meant a WebRTC failure silently took out the farewell
-    // (dev_gone), the presence heartbeat (ping) and the re-signaling that
+    // (host_gone), the presence heartbeat (ping) and the re-signaling that
     // would have rebuilt the very channel that died.
     if (_closed) throw StateError('direct session transport is closed');
     _relay.sendControl(message);

@@ -34,7 +34,7 @@ Uri sessionConnectionLink(String code, List<String> relays) => Uri(
       relays.isEmpty ||
       uri.queryParametersAll['code']?.length != 1) {
     throw const FormatException(
-      'Invalid RHR connection link. Ask your developer for a new link.',
+      'Invalid RHR connection link. Get a new link from your terminal.',
     );
   }
   for (final value in relays) {

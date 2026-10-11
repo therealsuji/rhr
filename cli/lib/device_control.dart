@@ -16,7 +16,7 @@ final class DeviceControlException implements Exception {
   String toString() => message;
 }
 
-/// The developer end of device control: requests to the RHR Agent on the
+/// The host end of device control: requests to the RHR Agent on the
 /// phone, through the session's device endpoint (see session_control.dart).
 ///
 /// Framing, mirrored by the agent's Frames.kt: a 4-byte big-endian length,

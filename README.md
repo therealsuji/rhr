@@ -4,7 +4,7 @@
   <img src="assets/brand/rhr-mark-25d-paper-depth.png" alt="rhr logo" width="240" />
 </p>
 
-Hot reload a Flutter app on an Android phone **anywhere on the internet** — about 2 seconds, app state intact. No adb, no USB, no shared Wi‑Fi, no VPN.
+Hot reload a Flutter app on your Android phone, wherever it is **on the internet** — about 2 seconds, app state intact. No adb, no USB, no shared Wi‑Fi, no VPN.
 
 Install one app on the phone — the **rhr player** — and stream *any* of your Flutter projects into it. One install, no per-project setup, no rebuild when you change code.
 
@@ -135,7 +135,7 @@ Fault-injected USB run recovered without falling back to wireless; independent i
 
 ## Let a coding agent drive the phone
 
-`rhr mcp` is an MCP server that lets an agent see and debug the app on the tester's phone through your running `rhr run`:
+`rhr mcp` is an MCP server that lets an agent see and debug the app on your phone through your running `rhr run`:
 
 `rhr setup` registers it in the user config of Claude Code, Codex and OpenCode, whichever are installed, so it is there in every project. `rhr setup --no-mcp` leaves those configs alone, and `rhr doctor` shows which clients have it. Another MCP client can run `/usr/local/bin/rhr mcp` from the project directory.
 
@@ -143,7 +143,7 @@ Fault-injected USB run recovered without falling back to wireless; independent i
 
 The agent gets screenshots, the screen's element tree (Flutter, native views and system dialogs), taps, swipes, typing, system buttons, the app's native log, `evaluate`, and hot reload or restart with Flutter's output. Coordinates are fractions of the screen.
 
-Seeing and tapping need RHR Agent, a small accessibility add-on. Play Protect blocks browser installs of any APK with an accessibility service, so it's separate from the player, and the player installs it. The agent calls `install_agent`; the tester confirms the install and turns RHR Agent on in Accessibility settings. It only answers the player signed with its own key, and only during a session. While it acts, the phone says so, and the session notification offers "Stop agent control". After a stop, every device request fails until the tester taps "Allow agent control" or connects again.
+Seeing and tapping need RHR Agent, a small accessibility add-on. Play Protect blocks browser installs of any APK with an accessibility service, so it's separate from the player, and the player installs it. The agent calls `install_agent`; you confirm the install on the phone and turn RHR Agent on in Accessibility settings. It only answers the player signed with its own key, and only during a session. While it acts, the phone says so, and the session notification offers "Stop agent control". After a stop, every device request fails until you tap "Allow agent control" or connect again.
 
 Logs, evaluate and hot reload work without it.
 
@@ -184,9 +184,9 @@ Session code = **bearer token**. Anyone with it can attach to the relayed VM ser
 
 The automatic LAN path is unencrypted `ws://` on the local network. Compiled debug artifacts only, not source — still needs the random session code. Don't use it on untrusted networks; stick to `wss://` if local observers matter.
 
-With RHR Agent turned on, the session code also lets the developer's agent see the whole screen and tap anywhere on the phone, system dialogs included. That reaches past the app, so the tester can stop it from the session notification or turn RHR Agent off in Accessibility settings.
+With RHR Agent turned on, the session code also lets your agent see the whole screen and tap anywhere on the phone, system dialogs included. That reaches past the app, so you can stop it from the session notification or turn RHR Agent off in Accessibility settings.
 
-The agent reads the phone's screen and logs, and they can show any app or web page. `rhr mcp` tells the agent to treat that text as data, but a prompt injection on screen is still text your agent reads. Keep the agent's other permissions narrow while it drives a tester's phone.
+The agent reads the phone's screen and logs, and they can show any app or web page. `rhr mcp` tells the agent to treat that text as data, but a prompt injection on screen is still text your agent reads. Keep the agent's other permissions narrow while it drives your phone.
 
 The relay sees compiled kernel bytes, not source. Logs don't record session codes, VM Service URIs, or frame contents. See [SECURITY.md](SECURITY.md) before reporting issues.
 

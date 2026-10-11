@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * Replays the phase sequences the CLI actually sends and asserts what the
- * tester reads.
+ * user reads.
  *
  * Each sequence below is taken from a real path through `rhr attach`, cited
  * by file and function, not invented. The bugs these cover were all seen on
@@ -101,7 +101,7 @@ class SessionBannerTest {
 	}
 
 	/**
-	 * Streaming is not installing. The tester watched "Installing your app"
+	 * Streaming is not installing. The user watched "Installing your app"
 	 * for the whole ~60 s of transfer, which is both wrong and unhelpful —
 	 * it hides the step that may actually need their tap.
 	 */
@@ -140,7 +140,7 @@ class SessionBannerTest {
 	 * `_updatePlayerOverTheWire` sends "building", then "updating" per 256 KB,
 	 * and the device adds the install states it alone can see.
 	 *
-	 * Every one of these must be visible — this is minutes of a tester's life
+	 * Every one of these must be visible — this is minutes of the user's life
 	 * and the whole point is that the phone explains itself.
 	 */
 	@Test
@@ -159,7 +159,7 @@ class SessionBannerTest {
 		for (i in sequence.indices) {
 			val banner = replay(sequence.take(i + 1), foreignApp = true)
 			assertTrue(
-				"step ${i + 1} (${sequence[i].phase}) told the tester nothing",
+				"step ${i + 1} (${sequence[i].phase}) told the user nothing",
 				banner.isVisible && banner.label.isNotBlank())
 		}
 
@@ -191,7 +191,7 @@ class SessionBannerTest {
 	// ---- every phase has an end -------------------------------------------
 
 	/**
-	 * The rule the tester's patience depends on: a bar that went up must come
+	 * The rule the user's patience depends on: a bar that went up must come
 	 * down. Each terminal message below is one the CLI or the service really
 	 * sends, and each must leave the phone somewhere final — not frozen on
 	 * the last percentage it happened to see.
@@ -219,9 +219,9 @@ class SessionBannerTest {
 		assertEquals(1000, installed.progress)
 		assertNotEquals(SessionBanner.Style.FAILED, installed.style)
 
-		// dev_gone / socket death: the service calls setProgress("", 0, 0).
-		val devGone = replay(midTransfer + Progress(""), status = "waiting_dev")
-		assertFalse(devGone.isVisible)
+		// host_gone / socket death: the service calls setProgress("", 0, 0).
+		val hostGone = replay(midTransfer + Progress(""), status = "waiting_host")
+		assertFalse(hostGone.isVisible)
 
 		// Disconnect: the phase clears and the session goes idle.
 		val disconnected = replay(midTransfer + Progress(""), status = "idle")
@@ -234,7 +234,7 @@ class SessionBannerTest {
 		val silent = SessionBanner.of(
 			phase = "update_failed", status = "connected")
 		assertEquals(SessionBanner.Style.FAILED, silent.style)
-		assertTrue(silent.label.contains("developer's terminal"))
+		assertTrue(silent.label.contains("your terminal"))
 	}
 
 	// ---- the connection underneath ----------------------------------------
@@ -267,14 +267,14 @@ class SessionBannerTest {
 	}
 
 	/**
-	 * Resting is not an event. A phone waiting for a developer sits here for
+	 * Resting is not an event. A phone waiting for the computer sits here for
 	 * hours and must not be wearing a card while it does.
 	 */
 	@Test
 	fun `resting states show no card`() {
-		for (status in listOf("connected", "waiting_dev", "idle", "")) {
+		for (status in listOf("connected", "waiting_host", "idle", "")) {
 			assertFalse(
-				"status '$status' put a card over the tester's app",
+				"status '$status' put a card over the user's app",
 				SessionBanner.of(phase = "", status = status).isVisible)
 		}
 	}
@@ -287,7 +287,7 @@ class SessionBannerTest {
 	fun `a live phase outranks the connection status`() {
 		val banner = SessionBanner.of(
 			phase = "building", status = "connected")
-		assertTrue(banner.label.contains("building"))
+		assertTrue(banner.label.contains("building", ignoreCase = true))
 	}
 
 	// ---- stalls ------------------------------------------------------------
@@ -300,13 +300,13 @@ class SessionBannerTest {
 		val stuck = SessionBanner.of(
 			phase = "building", status = "connected", stalled = true)
 		assertNotEquals(moving.label, stuck.label)
-		assertTrue(stuck.label.contains("developer's terminal"))
+		assertTrue(stuck.label.contains("your terminal"))
 	}
 
 	// ---- agent control -----------------------------------------------------
 
 	/**
-	 * The developer's agent at work shows on a phone that would otherwise
+	 * The coding agent at work shows on a phone that would otherwise
 	 * rest, but never hides what the session itself has to say.
 	 */
 	@Test
@@ -322,7 +322,7 @@ class SessionBannerTest {
 		assertFalse(idle.isVisible)
 	}
 
-	/** The agent add-on is named for what it is, not as the tester's app. */
+	/** The agent add-on is named for what it is, not as the user's app. */
 	@Test
 	fun `a foreign install names what it installs`() {
 		val agent = SessionBanner.of(

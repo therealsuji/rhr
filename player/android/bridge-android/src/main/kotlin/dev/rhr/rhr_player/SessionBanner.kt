@@ -1,7 +1,7 @@
 package dev.rhr.rhr_player
 
 /**
- * What the tester should be told, right now, in one place.
+ * What the user should be told, right now, in one place.
  *
  * The phone has two surfaces that answer the same question — the native
  * overlay card and the Flutter lobby — and they used to answer it with two
@@ -17,7 +17,7 @@ package dev.rhr.rhr_player
  * than something you have to catch on a phone.
  */
 data class SessionBanner(
-	/** The line the tester reads. */
+	/** The line the user reads. */
 	val label: String,
 	/** Per-mille (0..1000) when the work has a known size, else null. */
 	val progress: Int?,
@@ -47,7 +47,7 @@ data class SessionBanner(
 
 	companion object {
 		/**
-		 * Decide from the phase the developer reports and the connection
+		 * Decide from the phase the host reports and the connection
 		 * status underneath it.
 		 *
 		 * A phase always wins over a status: the socket being merely
@@ -69,10 +69,10 @@ data class SessionBanner(
 			agentActive: Boolean = false,
 		): SessionBanner {
 			val banner = ofPhase(phase, status, done, total, message, stalled, foreignApp, foreignAppName)
-			// The developer's agent seeing and tapping the phone is never
+			// The coding agent seeing and tapping the phone is never
 			// silent, but anything the session has to say comes first.
 			return if (agentActive && !banner.isVisible) {
-				SessionBanner("Your developer's coding agent is using this phone", null, Style.BUSY)
+				SessionBanner("Your coding agent is using this phone", null, Style.BUSY)
 			} else {
 				banner
 			}
@@ -89,7 +89,7 @@ data class SessionBanner(
 			foreignAppName: String,
 		): SessionBanner = when (phase) {
 			"reload_complete" -> SessionBanner("App updated", 1000, Style.DETERMINATE)
-			"reload_failed" -> SessionBanner("Could not update the app. Check the developer’s terminal.", null, Style.FAILED, failure = "Reload failed")
+			"reload_failed" -> SessionBanner("Could not update the app. Check your terminal.", null, Style.FAILED, failure = "Reload failed")
 			"ready" -> SessionBanner("Your app is running", null, Style.HIDDEN)
 			"checking", "launching", "native_changed" -> SessionBanner(message, null, Style.BUSY)
 			"setup", "approval", "approval_needed" -> SessionBanner(message, null, Style.WAITING)
@@ -99,7 +99,7 @@ data class SessionBanner(
 				"Syncing assets", perMille(done, total), Style.DETERMINATE)
 
 			// Bytes are moving. This is NOT the install — saying "Installing"
-			// here left the tester reading "Installing your app 54%" for the
+			// here left the user reading "Installing your app 54%" for the
 			// whole minute of transfer, and then reading it still, unchanged,
 			// long after the install had actually finished.
 			"updating" -> SessionBanner(
@@ -108,7 +108,7 @@ data class SessionBanner(
 				Style.DETERMINATE)
 
 			// The bytes landed and the system installer has them. Short, but
-			// it is the step the tester may have to tap through, so it gets
+			// it is the step the user may have to tap through, so it gets
 			// its own state instead of hiding inside the transfer's.
 			"installing" -> SessionBanner(
 				if (foreignApp) "Installing $foreignAppName" else "Installing the update",
@@ -117,7 +117,7 @@ data class SessionBanner(
 
 			// Waiting on a tap on Android's install sheet. A debug app RHR built
 			// is new to Play Protect, which then asks to scan it; the way past
-			// is two taps the tester would not guess.
+			// is two taps the user would not guess.
 			"install_confirm" -> SessionBanner(
 				if (foreignApp) "Confirm the install. If Play Protect asks, tap More details, then Install without scanning"
 				else "Confirm the install on this phone",
@@ -130,16 +130,16 @@ data class SessionBanner(
 				Style.DETERMINATE)
 
 			"outdated" -> SessionBanner(
-				"Out of date — waiting for the developer", null, Style.WAITING)
+				"Out of date — waiting for your computer", null, Style.WAITING)
 
 			"building" -> SessionBanner(
-				if (stalled) "Still building — check the developer's terminal"
-				else message.ifEmpty { "Developer is building an update…" },
+				if (stalled) "Still building — check your terminal"
+				else message.ifEmpty { "Building an update…" },
 				null,
 				Style.BUSY)
 
 			"update_failed" -> SessionBanner(
-				if (message.isEmpty()) "Update failed — check the developer's terminal"
+				if (message.isEmpty()) "Update failed — check your terminal"
 				else "Update failed: $message",
 				0,
 				Style.FAILED,
@@ -150,19 +150,19 @@ data class SessionBanner(
 			"awaiting_restart" -> SessionBanner(
 				if (stalled)
 					"App synced — awaiting Hot Restart (taking a while — " +
-						"check the developer's terminal)"
+						"check your terminal)"
 				else "App synced — awaiting Hot Restart",
 				1000,
 				Style.DETERMINATE)
 
 			"restarting" -> SessionBanner(
-				if (stalled) "Restart is taking a while — check the developer's terminal"
+				if (stalled) "Restart is taking a while — check your terminal"
 				else "Restarting your app…",
 				null,
 				Style.BUSY)
 
 			"reloading" -> SessionBanner(
-				if (stalled) "Reload is taking a while — check the developer's terminal"
+				if (stalled) "Reload is taking a while — check your terminal"
 				else "Reloading…",
 				null,
 				Style.BUSY)
@@ -176,12 +176,12 @@ data class SessionBanner(
 		 * Every status the service can publish is named here. The old
 		 * default arm said "Connecting…" for all of them, which meant a
 		 * session that had been deliberately stopped — nothing dialing,
-		 * nothing queued — still told the tester it was connecting, forever.
+		 * nothing queued — still told the user it was connecting, forever.
 		 */
 		private fun ofStatus(status: String): SessionBanner = when (status) {
 			// The resting state. A phone sits here for hours between
 			// sessions and must not be covered by a card to do it.
-			"connected", "waiting_dev", "idle", "" -> SessionBanner(
+			"connected", "waiting_host", "idle", "" -> SessionBanner(
 				restingLabel(status), null, Style.HIDDEN)
 
 			"rejected" -> SessionBanner(
@@ -191,7 +191,7 @@ data class SessionBanner(
 				"Can't reach relay — retrying…", null, Style.BUSY)
 
 			"paused" -> SessionBanner(
-				"Paused — this phone is not accepting developers", null, Style.WAITING)
+				"Paused — this phone is not accepting connections", null, Style.WAITING)
 
 			// The loop ended on its own. Nothing is retrying, so do not
 			// imply that something is.
@@ -208,7 +208,7 @@ data class SessionBanner(
 		 */
 		private fun restingLabel(status: String): String = when (status) {
 			"connected" -> "Phone connected"
-			"waiting_dev" -> "Waiting for developer"
+			"waiting_host" -> "Waiting for your computer"
 			"idle" -> "Not connected"
 			else -> "Ready to connect"
 		}

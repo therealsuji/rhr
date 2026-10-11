@@ -36,7 +36,7 @@ import org.json.JSONObject
  * Android's freezing of backgrounded apps.
  *
  * Protocol (mirror of bridge/lib/tunnel.dart):
- *   TEXT frames   = JSON control ({"t":"info","vm":<uri>} announced device->dev)
+ *   TEXT frames   = JSON control ({"t":"info","vm":<uri>} announced device->host)
  *   BINARY frames = [1B op][4B channel BE][payload], carried by WebRTC unless
  *                   relay-only mode was explicit; op 0=open 1=data 2=close
  *                   (an open's payload is empty for the VM service, or one
@@ -67,35 +67,35 @@ class RhrSessionService : Service() {
 		private const val WINDOW_BYTES = 512 * 1024
 		private const val LOW_WATER = WINDOW_BYTES / 2
 
-		// Developer presence lease: while the CLI is attached it pings every 20s
-		// (all dev frames are forwarded to us by the dumb relay). If we hear
-		// nothing for this long, the developer is gone — surface "Waiting for
-		// developer" and clear any progress that belonged to their connection.
-		private const val DEV_LEASE_MS = 45_000L
+		// Host presence lease: while the CLI is attached it pings every 20s
+		// (the dumb relay forwards every host frame to us). If we hear nothing
+		// for this long, the host is gone: surface "Waiting for your computer"
+		// and clear any progress that belonged to its connection.
+		private const val HOST_LEASE_MS = 45_000L
 
 		/**
-		 * States a developer can go absent FROM. "connected" is the obvious one;
+		 * States the host can go absent FROM. "connected" is the obvious one;
 		 * "retrying" matters because a direct-transport failure moves us there
 		 * (failDirectSession) while the relay socket is still perfectly alive.
 		 * Gating the lease on "connected" alone meant the session that lost its
-		 * WebRTC path — the one case where the developer is most likely already
+		 * WebRTC path — the one case where the host is most likely already
 		 * gone — was the one case the lease could never reclaim.
 		 */
-		private val DEV_PRESENT_STATES = setOf("connected", "retrying")
+		private val HOST_PRESENT_STATES = setOf("connected", "retrying")
 
 		/**
-		 * Set when the developer says dev_gone, cleared when one arrives again.
+		 * Set when the host says host_gone, cleared when one arrives again.
 		 *
-		 * Their departure tears the tunnel down a moment later, and that
-		 * teardown used to overwrite "waiting_dev" with "retrying" — so a
-		 * tester whose developer quit cleanly was told the phone could not
-		 * reach the relay. Same shape as the tester-initiated stop being undone
-		 * by the socket close it caused; this is the developer-initiated twin.
+		 * Its departure tears the tunnel down a moment later, and that
+		 * teardown used to overwrite "waiting_host" with "retrying", so a user
+		 * who quit rhr cleanly was told the phone could not reach the relay.
+		 * Same shape as a stop on the phone being undone by the socket close
+		 * it caused; this is the host-initiated twin.
 		 */
 		@Volatile
-		var devLeft: Boolean = false
+		var hostLeft: Boolean = false
 
-		// How long the direct tunnel may outlive the developer that opened it.
+		// How long the direct tunnel may outlive the host that opened it.
 		//
 		// Payload rides WebRTC, never the relay, so once a session is up the
 		// relay is not in the data path and cannot end it: a relay outage, or a
@@ -104,8 +104,8 @@ class RhrSessionService : Service() {
 		// nobody watching. Only this side can close it, so this deadline is the
 		// enforcement rather than a backstop.
 		//
-		// Longer than DEV_LEASE_MS: presence expiring is routine (a laptop
-		// sleeps, Wi-Fi moves) and the developer usually returns to the same
+		// Longer than HOST_LEASE_MS: presence expiring is routine (a laptop
+		// sleeps, Wi-Fi moves) and the host usually returns to the same
 		// tunnel. This is the outer bound on that patience.
 		private const val DIRECT_AUTHORIZATION_MS = 120_000L
 
@@ -145,7 +145,7 @@ class RhrSessionService : Service() {
 				"clear" -> {
 					debugRebuildDelayMs = 0
 					setProgress("", 0, 0)
-					status = if (current?.reconnectThread?.isAlive == true) "waiting_dev" else "idle"
+					status = if (current?.reconnectThread?.isAlive == true) "waiting_host" else "idle"
 				}
 				"relay-loss" -> current?.ws?.close(4001, "fault: relay loss")
 				"tunnel-loss" -> current?.let { service ->
@@ -156,7 +156,7 @@ class RhrSessionService : Service() {
 				}
 				"status-retrying" -> status = "retrying"
 				"status-rejected" -> status = "rejected"
-				"status-waiting" -> status = "waiting_dev"
+				"status-waiting" -> status = "waiting_host"
 				"status-connected" -> status = "connected"
 				"phase-restarting" -> setProgress("restarting", 0, 0)
 				"phase-awaiting-restart" -> setProgress("awaiting_restart", 0, 0)
@@ -198,7 +198,7 @@ class RhrSessionService : Service() {
 			}
 
 		// Latest session code / VM URI, surfaced in the native dev menu so the
-		// tester can see them even after the guest app has taken the screen.
+		// user can see them even after the guest app has taken the screen.
 		@Volatile var currentCode: String = ""
 			private set
 		@Volatile var usesExternalVm = false
@@ -209,7 +209,7 @@ class RhrSessionService : Service() {
 		// Host-provided factory for over-the-wire APK updates (the player's
 		// RhrPlayerUpdater does PackageInstaller self-updates). The factory
 		// receives the live socket's send functions; invoked lazily when the
-		// dev side starts an update transfer. Null => update frames are
+		// CLI starts an update transfer. Null => update frames are
 		// ignored (a host that ships no update hook).
 		@Volatile var updateHandlerFactory:
 			((ctx: Context, sendText: (String) -> Unit, sendBinary: (ByteArray) -> Unit)
@@ -218,7 +218,7 @@ class RhrSessionService : Service() {
 		@Volatile var runRequestHandler:
 			((Context, JSONObject, (JSONObject) -> Unit, (vm: String, pkg: String) -> Unit, () -> Boolean) -> Unit)? = null
 
-		// Latest transfer/lifecycle progress, pushed by the dev over the tunnel
+		// Latest transfer/lifecycle progress, pushed by the host over the tunnel
 		// ({"t":"progress",...}) or set locally (e.g. "restarting"). The native
 		// overlay in MainActivity renders this above the Flutter surface — it
 		// must be native because a guest kernel owns the Flutter UI after boot.
@@ -240,26 +240,26 @@ class RhrSessionService : Service() {
 				updateListeners.forEach { it() }
 			}
 
-		// Why the last phase ended, when the developer's side failed. Carried
-		// on the progress message so the tester reads the actual reason
+		// Why the last phase ended, when the computer's side failed. Carried
+		// on the progress message so the user reads the actual reason
 		// instead of watching a bar sit still.
 		@Volatile var progressMessage: String = ""
 
-		// True while the in-flight transfer is the developer's OWN app
+		// True while the in-flight transfer is the user's OWN app
 		// (kind=app) rather than a player self-update, so the overlay can
 		// name what is actually being installed.
 		@Volatile var updatingForeignApp: Boolean = false
 
-		// What the tester is told the foreign install is: their app, or the
-		// RHR Agent add-on the developer's agent asked for.
+		// What the user is told the foreign install is: their app, or the
+		// RHR Agent add-on their coding agent asked for.
 		@Volatile var foreignAppName: String = "your app"
 
 		/**
-		 * Device control, as the tester sees it. [agentActive] holds for a few
+		 * Device control, as the user sees it. [agentActive] holds for a few
 		 * seconds after each request, so both surfaces can say the agent is
 		 * at work. [agentControlling] holds from the agent's first answer
-		 * until the developer leaves, and is when the notification offers
-		 * "Stop agent control". [agentStopped] is the tester's choice: it
+		 * until the host leaves, and is when the notification offers
+		 * "Stop agent control". [agentStopped] is the user's choice: it
 		 * refuses every request until they allow it again or connect again.
 		 */
 		private const val AGENT_ACTIVE_MS = 5_000L
@@ -293,9 +293,9 @@ class RhrSessionService : Service() {
 		 * The install steps, which only this phone can see.
 		 *
 		 * Everything else on the progress card is relayed from the
-		 * developer's CLI, but the CLI's view ends at the last byte it
+		 * CLI on the computer, but the CLI's view ends at the last byte it
 		 * sent: it cannot know when PackageInstaller took the APK, or that
-		 * Android is holding an install sheet in front of the tester. Those
+		 * Android is holding an install sheet in front of the user. Those
 		 * are minutes where the phone would otherwise still be showing a
 		 * finished transfer, so the updater reports them locally.
 		 */
@@ -359,7 +359,7 @@ class RhrSessionService : Service() {
 	private val unacked = ConcurrentHashMap<Int, Int>()
 	private val flowLock = Object()
 	// Bumped under flowLock whenever the channel table resets. Channel numbers
-	// restart at 1 for every developer connection, so work that outlives one
+	// restart at 1 for every host connection, so work that outlives one
 	// (a DevFS rebuild) must not write into a new connection's channel of the
 	// same number.
 	@Volatile private var channelEpoch = 0L
@@ -384,11 +384,11 @@ class RhrSessionService : Service() {
 	// because the install kills the process and the transfer must survive
 	// guest hot-restarts.
 	private var updater: RhrUpdateHandler? = null
-	// Last time we heard from the developer (any dev→device message, or a
-	// relay dev_present). Drives the presence lease expiry.
-	@Volatile private var lastDevActivity = 0L
+	// Last time we heard from the host (any host→device message). Drives the
+	// presence lease expiry.
+	@Volatile private var lastHostActivity = 0L
 
-	/** True while the tester has made this phone unavailable. */
+	/** True while the user has made this phone unavailable. */
 	@Volatile private var paused = false
 	private var presenceWatchThread: Thread? = null
 	private var devfsObserver: FileObserver? = null
@@ -500,19 +500,19 @@ class RhrSessionService : Service() {
 					currentVm = vmUri
 					readySent = false // re-arm sync-ready for a genuinely new session
 					stopped.set(false)
-					// A new session starts with no developer having left it; a
+					// A new session starts with no host having left it; a
 					// stale flag here would suppress a real reconnect notice.
-					devLeft = false
-					// "Stop agent control" lasts until the tester connects again.
+					hostLeft = false
+					// "Stop agent control" lasts until the user connects again.
 					agentStopped = false
 					agentControlling = false
 					sweepOrphanedDevfsDirs()
 					if (watchOwnVm) watchForDevfsDirs()
 					// The VM watcher tracks OUR own service URI across guest hot
-					// restarts; the presence watcher tracks the developer and
+					// restarts; the presence watcher tracks the host and
 					// enforces the tunnel deadline. Different jobs, and hosted
 					// mode needs both — it used to run only the first, so a
-					// hosted session's tunnel outlived its developer unchecked.
+					// hosted session's tunnel outlived its host unchecked.
 					if (watchOwnVm) startVmUriWatch()
 					startPresenceWatch()
 					startReconnectLoop(sessionGeneration)
@@ -521,8 +521,8 @@ class RhrSessionService : Service() {
 				startForeground(NOTIF_ID, buildNotification())
 			}
 			"kick" -> synchronized(flowLock) { flowLock.notifyAll() } // also wakes backoff
-			// The tester making the phone unavailable without ending the session:
-			// the code stays, the relay refuses new claims, and the developer who
+			// The user making the phone unavailable without ending the session:
+			// the code stays, the relay refuses new claims, and the host that
 			// was connected is dropped. Stop alone would hand the phone straight
 			// to whoever asked next.
 			"pause" -> {
@@ -536,13 +536,13 @@ class RhrSessionService : Service() {
 			"resume" -> {
 				paused = false
 				ws?.send(JSONObject().put("t", "resume").toString())
-				status = "waiting_dev"
+				status = "waiting_host"
 				updateListeners.forEach { it() }
 			}
-			// The tester asking for their app back in its opening state. Only
-			// the developer can do this — a hot restart is Flutter's, driven
-			// from their machine — so this asks rather than acts, and the menu
-			// only offers it while a developer is attached to ask.
+			// The user asking for their app back in its opening state. Only
+			// the host can do this — a hot restart is Flutter's, driven from
+			// the computer — so this asks rather than acts, and the menu only
+			// offers it while a host is attached to ask.
 			"restart_guest" -> {
 				if (status == "connected" && progressPhase != "restarting" && progressPhase != "reloading") {
 					setProgress("restarting", 0, 0)
@@ -612,10 +612,10 @@ class RhrSessionService : Service() {
 	private var screenHold: android.view.View? = null
 
 	/**
-	 * Keeps the display from timing out while a developer is connected,
+	 * Keeps the display from timing out while the host is connected,
 	 * whatever the session is doing: building, installing, or running.
 	 *
-	 * The tester may be looking at the player or at a separate debug app, and
+	 * The user may be looking at the player or at a separate debug app, and
 	 * the player cannot set FLAG_KEEP_SCREEN_ON on another app's window. It
 	 * can set it on a window of its own above everything: the flag holds the
 	 * screen for as long as any visible window carries it. So this is a 1×1,
@@ -722,12 +722,12 @@ class RhrSessionService : Service() {
 
 	/**
 	 * Points the tunnel back at the player's own engine. A target app belongs
-	 * to the run that launched it: once that developer is gone the app may be
+	 * to the run that launched it: once that host is gone the app may be
 	 * too (closed, crashed, uninstalled), and announcing its address would
-	 * hand the next developer a dead VM. Their run launches it again.
+	 * hand the next host a dead VM. Its run launches it again.
 	 *
-	 * Announced at once: the relay replays the last info to a developer who
-	 * connects, before this side hears their hello.
+	 * Announced at once: the relay replays the last info to a host that
+	 * connects, before this side hears its hello.
 	 */
 	private fun resumeOwnVm() {
 		synchronized(vmUriLock) {
@@ -777,11 +777,11 @@ class RhrSessionService : Service() {
 		.put("deviceName", android.os.Build.MODEL)
 		.put("deviceId", InstallationIdentity.id(this))
 		.put("vm", vmUri)
-		// The developer hello this answers. The relay replays the last info to
-		// every developer who connects, and an attaching one waits for its own.
-		.put("answers", developerConnectionId ?: JSONObject.NULL)
+		// The host hello this answers. The relay replays the last info to
+		// every host that connects, and an attaching one waits for its own.
+		.put("answers", hostConnectionId ?: JSONObject.NULL)
 		.put("transport", activeRelayUrl)
-		// Readiness is state, not merely an edge-triggered event. A developer
+		// Readiness is state, not merely an edge-triggered event. A host
 		// tool can detach and reconnect to the same live VM after the original
 		// {"t":"ready"} frame has already been consumed.
 		.put("ready", readySent)
@@ -793,13 +793,13 @@ class RhrSessionService : Service() {
 		// certificate with its VM address.
 		.put("playerPackage", packageName)
 		.put("playerCertificate", ownCertificate)
-		// "player" | "connector", which is how the dev side decides whether to
+		// "player" | "connector", which is how the host side decides whether to
 		// run the compatibility gate and offer a player update.
 		//
 		// Connector mode is the exception: we are tunneling a THIRD-party
 		// app's VM service, so the identity in this hello describes US, not
-		// the target. Announcing "player" there would gate the developer
-		// against the wrong app's Flutter version — and offer them a player
+		// the target. Announcing "player" there would gate the host
+		// against the wrong app's Flutter version — and offer it a player
 		// update that could not fix it. `watchOwnVm` is false exactly when
 		// the vmUri belongs to someone else, so it is the honest signal.
 		.put("host", if (watchOwnVm) RhrConfig.hostKind(this) else "connector")
@@ -817,7 +817,7 @@ class RhrSessionService : Service() {
 				.put("androidPermissions", androidPermissions()))
 		.toString()
 
-	private var developerConnectionId: String? = null
+	private var hostConnectionId: String? = null
 
 	private fun startDirectTransport(webSocket: WebSocket) {
 		directTransport?.close()
@@ -844,11 +844,11 @@ class RhrSessionService : Service() {
 		if (!preferDirect || directFailureReported) return
 		directFailureReported = true
 		Log.w(TAG, "[$sessionCode] direct WebRTC session failed: $reason")
-		// Same reason as the socket failure above: a teardown the tester asked
+		// Same reason as the socket failure above: a teardown the user asked
 		// for must not report itself as a connection problem. Nor one the
-		// developer caused by leaving — their dev_gone arrives seconds before
+		// host caused by leaving — its host_gone arrives seconds before
 		// the ICE teardown it sets off.
-		if (!stopped.get() && !devLeft) status = "retrying"
+		if (!stopped.get() && !hostLeft) status = "retrying"
 		if (notifyPeer) {
 			webSocket.send(
 				JSONObject()
@@ -857,7 +857,7 @@ class RhrSessionService : Service() {
 					.put("message", reason)
 					.toString())
 		}
-		// Keep signaling alive so the next developer hello can replace the peer
+		// Keep signaling alive so the next host hello can replace the peer
 		// without waiting for a WebSocket close handshake and relay backoff.
 	}
 
@@ -897,10 +897,10 @@ class RhrSessionService : Service() {
 						directFailureReported = false
 						activeRelayUrl = relayUrl
 						failuresThisRound = 0
-						// Assume no developer until we actually hear one — the
-						// relay is a dumb pipe, so dev presence is learned from
-						// forwarded dev frames, not from the relay.
-						status = "waiting_dev"
+						// Assume no host until we actually hear one — the
+						// relay is a dumb pipe, so host presence is learned from
+						// forwarded host frames, not from the relay.
+						status = "waiting_host"
 						Log.i(TAG, "[$sessionCode] connected (http ${response.code})")
 						if (runRequestHandler != null || !vmUri.contains(":0/")) {
 							val sent = webSocket.send(infoMessage())
@@ -913,13 +913,13 @@ class RhrSessionService : Service() {
 					override fun onMessage(webSocket: WebSocket, text: String) {
 						if (generation != sessionGeneration) return
 						Log.i(TAG, "[$sessionCode] RX text: ${text.take(60)}")
-						lastDevActivity = System.currentTimeMillis()
+						lastHostActivity = System.currentTimeMillis()
 						if (text.contains("\"t\":\"direct_") || text.contains("\"t\": \"direct_")) {
 							val directMessage = try { JSONObject(text) } catch (_: Exception) { null }
 							if (directMessage?.optString("t") == "direct_error") {
 								failDirectSession(
 									webSocket,
-									directMessage.optString("message", "developer direct transport failed"),
+									directMessage.optString("message", "host direct transport failed"),
 									notifyPeer = false)
 								return
 							}
@@ -928,7 +928,7 @@ class RhrSessionService : Service() {
 						}
 						val runRequest = try { JSONObject(text) } catch (_: Exception) { null }
 						if (runRequest?.optString("t") == "run_request") {
-							devLeft = false
+							hostLeft = false
 							if (runRequest.optString("action") == "host_player") {
 								val available = ownVmUri.isNotEmpty() && !ownVmUri.contains(":0/")
 								if (available) synchronized(vmUriLock) {
@@ -955,12 +955,12 @@ class RhrSessionService : Service() {
 										}
 										announceInfo()
 									}
-								}, { generation == sessionGeneration && !stopped.get() && !devLeft })
+								}, { generation == sessionGeneration && !stopped.get() && !hostLeft })
 							return
 						}
 						// Over-the-wire update control messages. The handler is
 						// host-provided; without one the frames are
-						// ignored and the dev side surfaces the
+						// ignored and the CLI surfaces the
 						// "did not acknowledge" timeout.
 						if (text.contains("\"update_begin\"") ||
 							text.contains("\"update_commit\"")) {
@@ -985,58 +985,58 @@ class RhrSessionService : Service() {
 						}
 						// The CLI's farewell on clean quit: leave "Connected" and
 						// clear progress it owned. Honoured from "retrying" too —
-						// a dev whose direct tunnel died still says goodbye over
-						// the relay, and that is the case where the tester is
+						// a host whose direct tunnel died still says goodbye over
+						// the relay, and that is the case where the user is
 						// otherwise left reading a connection error.
-						if (text.contains("\"dev_gone\"")) {
-							Log.i(TAG, "[$sessionCode] developer left the session")
-							devLeft = true
-							if (status in DEV_PRESENT_STATES) status = "waiting_dev"
-							// Failures, and a run waiting on the developer's approval,
-							// stay up: they tell the tester why nothing is happening.
+						if (text.contains("\"host_gone\"")) {
+							Log.i(TAG, "[$sessionCode] host left the session")
+							hostLeft = true
+							if (status in HOST_PRESENT_STATES) status = "waiting_host"
+							// Failures, and a run waiting on the user's approval,
+							// stay up: they tell the user why nothing is happening.
 							if (progressPhase !in setOf("preparation_failed", "update_failed", "approval_needed", "native_changed")) {
 								setProgress("", 0, 0)
 							}
-							// The peer belonged to the developer who just left; it
+							// The peer belonged to the host that just left; it
 							// can only decay to ICE failed from here, and while it
-							// exists the next developer's hello does not start a
+							// exists the next host's hello does not start a
 							// fresh offer (that hello then waits on a corpse and
 							// inherits its failure). Drop it now.
 							directTransport?.close()
 							directTransport = null
 							directFailureReported = false
 							resumeOwnVm()
-							// Their agent left with them.
+							// The coding agent left with it.
 							if (agentControlling) {
 								agentControlling = false
 								refreshNotification()
 							}
 							return
 						}
-						// Anything else is developer traffic (hello, ping, progress,
-						// reload signals) — a live developer is attached.
-						devLeft = false
+						// Anything else is host traffic (hello, ping, progress,
+						// reload signals) — a live host is attached.
+						hostLeft = false
 						if (status != "connected") status = "connected"
-						// A dev that connects AFTER us relies on the relay replaying
-						// our cached info. If that ever misses (TTL, ordering, a dev
-						// that reconnected mid-session), the dev sends {"t":"hello"}
+						// A host that connects AFTER us relies on the relay replaying
+						// our cached info. If that ever misses (TTL, ordering, a host
+						// that reconnected mid-session), the host sends {"t":"hello"}
 						// and we answer with a fresh info so pairing is robust to
 						// connection order. Unknown text (e.g. pings) is ignored.
-						// Abrupt CLI exits do not send dev_gone. A new attempt numbers its
+						// Abrupt CLI exits do not send host_gone. A new attempt numbers its
 						// channels from 1 again, owns a new peer, and is owed an info
 						// addressed to it, whichever transport carries its payload.
 						val hello = text.contains("\"hello\"")
-						val newConnection = hello && runRequest?.optString("connectionId") != developerConnectionId
+						val newConnection = hello && runRequest?.optString("connectionId") != hostConnectionId
 						if (newConnection) {
-							developerConnectionId = runRequest?.optString("connectionId")
+							hostConnectionId = runRequest?.optString("connectionId")
 							cleanupChannels()
 							resumeOwnVm()
 						}
 						if (hello && (runRequestHandler != null || !vmUri.contains(":0/"))) {
-							// Wait for the developer hello before creating the offer. A
+							// Wait for the host hello before creating the offer. A
 							// device can connect to the relay before the CLI subscribes;
 							// starting here keeps the first offer and ICE candidates on a
-							// live developer stream instead of losing them in the relay.
+							// live host stream instead of losing them in the relay.
 							if (preferDirect && (newConnection || directFailureReported || directTransport == null)) {
 								directFailureReported = false
 								if (!newConnection) cleanupChannels()
@@ -1044,7 +1044,7 @@ class RhrSessionService : Service() {
 							}
 							announceInfo()
 						} else if (text.contains("\"reloading\"")) {
-							// The dev detected reload/sync traffic starting → show an
+							// The host detected reload/sync traffic starting → show an
 							// indeterminate "Reloading…" bar right away so there's no
 							// dead gap. Explicit asset/kernel sync progress is more
 							// specific and must not be overwritten by this traffic
@@ -1054,11 +1054,11 @@ class RhrSessionService : Service() {
 							}
 						} else if (text.contains("\"reloaded\"")) {
 							// Transfer went quiet → reload done, hide the bar. (A hot
-							// reload keeps the same VM URI, so this dev signal is the
+							// reload keeps the same VM URI, so this host signal is the
 							// only reliable "done".)
 							if (progressPhase == "reloading") setProgress("", 0, 0)
 						} else if (text.contains("\"progress\"")) {
-							// The dev reports real transfer/lifecycle progress; the
+							// The host reports real transfer/lifecycle progress; the
 							// native overlay renders it above the Flutter surface.
 							try {
 								val o = JSONObject(text)
@@ -1079,7 +1079,7 @@ class RhrSessionService : Service() {
 								"relay sent binary payload in direct-only mode")
 							return
 						}
-						lastDevActivity = System.currentTimeMillis()
+						lastHostActivity = System.currentTimeMillis()
 						if (status != "connected") status = "connected"
 						handleFrame(bytes.toByteArray())
 					}
@@ -1095,20 +1095,20 @@ class RhrSessionService : Service() {
 							// found) or a relay policy block. Stay visible as
 							// "Session not found" while the reconnect loop keeps
 							// trying in the background — the code becomes valid
-							// the moment the real developer starts rhr.
+							// the moment you start rhr on the computer.
 							Log.i(TAG, "[$sessionCode] session rejected (http $code)")
 							status = "rejected"
-						} else if (!stopped.get() && !devLeft) {
+						} else if (!stopped.get() && !hostLeft) {
 							// Disconnect closes this socket itself, so the
 							// failure it raises arrives on a callback thread
 							// AFTER the stop set "idle" — and overwrote it with
 							// "retrying". The lobby then said disconnected while
 							// the overlay said it was still trying, and nothing
-							// was trying at all. A developer who said dev_gone
+							// was trying at all. A host that said host_gone
 							// leaves the same way, from the other end.
 							status = "retrying"
 						}
-						// Transfer progress belongs to this developer connection. If it
+						// Transfer progress belongs to this host connection. If it
 						// dies, keeping the last byte count makes a completed guest app
 						// look permanently stuck (for example, "Syncing assets 1%").
 						setProgress("", 0, 0)
@@ -1125,7 +1125,7 @@ class RhrSessionService : Service() {
 					override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
 						if (generation != sessionGeneration) return
 						Log.w(TAG, "[$sessionCode] ONCLOSED code=$code reason=\"$reason\"")
-						// A close the tester asked for is not a lost connection.
+						// A close the user asked for is not a lost connection.
 						if (!stopped.get()) status = "closed"
 						setProgress("", 0, 0)
 						directTransport?.close()
@@ -1164,7 +1164,7 @@ class RhrSessionService : Service() {
 				}
 				// Sleep on the flow lock so a manual Reconnect ({"cmd":"kick"}
 				// → notifyAll) interrupts the backoff instead of making the
-				// tester wait up to 30s. Interrupt (stop) breaks it the same.
+				// user wait up to 30s. Interrupt (stop) breaks it the same.
 				synchronized(flowLock) {
 					try { flowLock.wait(backoffMs) }
 					catch (_: InterruptedException) {}
@@ -1180,37 +1180,37 @@ class RhrSessionService : Service() {
 		}.also { it.isDaemon = true; it.start() }
 	}
 
-	// Watches the developer presence lease and phase stall detection. While
-	// `connected`, a dev message must arrive at least every DEV_LEASE_MS (the
-	// CLI pings every 20s) or the developer is assumed gone — even when the
+	// Watches the host presence lease and phase stall detection. While
+	// `connected`, a host message must arrive at least every HOST_LEASE_MS (the
+	// CLI pings every 20s) or the host is assumed gone — even when the
 	// relay connection is healthy.
 	private fun startPresenceWatch() {
 		if (presenceWatchThread?.isAlive == true) return
 		presenceWatchThread = Thread {
 			while (!stopped.get()) {
 				try {
-					val sinceDev = System.currentTimeMillis() - lastDevActivity
-					if (status in DEV_PRESENT_STATES && sinceDev > DEV_LEASE_MS) {
-						Log.i(TAG, "[$sessionCode] developer lease expired — waiting for developer")
-						status = "waiting_dev"
+					val sinceHost = System.currentTimeMillis() - lastHostActivity
+					if (status in HOST_PRESENT_STATES && sinceHost > HOST_LEASE_MS) {
+						Log.i(TAG, "[$sessionCode] host lease expired — waiting for host")
+						status = "waiting_host"
 						setProgress("", 0, 0)
 					}
 					// Presence expiring only changes what the screen says; the
-					// tunnel itself stays open so a developer who steps away can
+					// tunnel itself stays open so a user who steps away can
 					// pick up where they left off. Past this outer deadline that
 					// patience becomes a hole: nobody is watching, and the relay
 					// cannot close a WebRTC channel it was never part of.
-					if (directTransport != null && sinceDev > DIRECT_AUTHORIZATION_MS) {
+					if (directTransport != null && sinceHost > DIRECT_AUTHORIZATION_MS) {
 						Log.w(
 							TAG,
-							"[$sessionCode] no developer for ${sinceDev / 1000}s — " +
+							"[$sessionCode] no host for ${sinceHost / 1000}s — " +
 								"closing the direct tunnel",
 						)
 						closeDirectForExpiry()
 					}
 					// A phase that stays on "restarting"/"awaiting_restart" with
 					// no VM change is a stalled restart, not slow progress — the
-					// dev is still attached (pings), so presence can't catch it.
+					// host is still attached (pings), so presence can't catch it.
 					// Flag it honestly instead of leaving the card frozen.
 					val setAt = RhrSessionService.Companion.phaseSetAt
 					if (setAt != 0L) {
@@ -1238,12 +1238,12 @@ class RhrSessionService : Service() {
 	}
 
 	/**
-	 * Ends VM access when no developer has been heard from for too long.
+	 * Ends VM access when the host has not been heard from for too long.
 	 *
 	 * Closing the peer connection is what actually revokes access: the tunnel
 	 * carries the VM service, and the VM service is arbitrary code execution
 	 * inside the app. The relay socket is left alone on purpose — the session
-	 * is still valid and the developer may come back, at which point their
+	 * is still valid and the host may come back, at which point its
 	 * hello starts a fresh offer and a new tunnel.
 	 */
 	private fun closeDirectForExpiry() {
@@ -1251,7 +1251,7 @@ class RhrSessionService : Service() {
 		directTransport = null
 		resumeOwnVm()
 		setProgress("", 0, 0)
-		if (status in DEV_PRESENT_STATES) status = "waiting_dev"
+		if (status in HOST_PRESENT_STATES) status = "waiting_host"
 	}
 
 	// ---- tunnel frames ----------------------------------------------------
@@ -1503,10 +1503,10 @@ class RhrSessionService : Service() {
 	// push lands in permanent storage and later sessions start warm.
 
 	// Debounced "guest kernel ready" signal. When Flutter creates its DevFS dir
-	// and syncs the guest kernel, the dev end needs to hot-restart to boot it —
+	// and syncs the guest kernel, the host end needs to hot-restart to boot it —
 	// but only ONCE the sync has settled. We arm a timer on DevFS activity and
-	// fire {"t":"ready"} to the dev after a quiet window so asset sync can finish
-	// and the overlay can ask the developer for the initial Hot Restart.
+	// fire {"t":"ready"} to the host after a quiet window so asset sync can finish
+	// and the overlay can ask the host for the initial Hot Restart.
 	private val readyHandler = android.os.Handler(android.os.Looper.getMainLooper())
 	private var readyRunnable: Runnable? = null
 	@Volatile private var readySent = false
@@ -1637,7 +1637,7 @@ class RhrSessionService : Service() {
 		when {
 			agentStopped -> builder.setContentText("You turned off agent control for this session")
 				.addAction(action("allow_agent", "Allow agent control"))
-			agentControlling -> builder.setContentText("Your developer's coding agent can see and tap this phone")
+			agentControlling -> builder.setContentText("Your coding agent can see and tap this phone")
 				.addAction(action("stop_agent", "Stop agent control"))
 			else -> builder.setContentText("Remote hot reload tunnel is running")
 		}

@@ -1,9 +1,9 @@
 // Joining an account by redeeming a scanned invitation.
 //
 // The phone never signs in. It generates an installation identity on first
-// run, redeems an invite, and holds a membership from then on — which is what
-// lets a tester lend their phone to a developer without being asked to create
-// an account of their own.
+// run, redeems an invite, and holds a membership from then on. That is how the
+// user adds a phone to their own account: they scan an invite from the
+// computer, and nobody types a password on the phone.
 //
 // Redemption goes straight to the account service over HTTPS, never through
 // the relay: the relay does not authenticate its peers, and one of the
@@ -25,7 +25,7 @@ class JoinedAccount {
 
   final String id;
 
-  /// Whose account it is, as the developer's sign-in reported it.
+  /// Whose account it is, as the user's sign-in on the computer reported it.
   final String email;
 
   Map<String, Object?> toJson() => {'id': id, 'email': email};
@@ -112,7 +112,7 @@ Future<JoinOutcome> redeemInvite(AccountInvite invite) async {
 /// The session name this phone waits on when reached through an account.
 ///
 /// Derived from the installation id rather than fetched, so it is the same
-/// name the account service gives a developer, computed without a round trip
+/// name the account service gives the host, computed without a round trip
 /// and available offline. Not a secret: it says where to wait, and membership
 /// is what decides who may.
 String rendezvousFor(String installationId) {
@@ -133,7 +133,7 @@ Future<String?> ownRendezvous() async {
   return id == null ? null : rendezvousFor(id);
 }
 
-/// What the developer will see this phone called in their device list.
+/// What the user will see this phone called in their device list.
 Future<String> _deviceLabel() async {
   final model = await _connector.invokeMethod<String>('deviceLabel');
   return model?.trim().isNotEmpty == true ? model!.trim() : 'phone';
@@ -166,9 +166,9 @@ Future<void> _remember(JoinedAccount account) async {
 
 /// Forgets an account locally.
 ///
-/// Blocks it here immediately, whatever the network is doing: the tester's
-/// decision to stop lending their phone should not wait on a server they may
-/// not be able to reach. The account's own record is removed separately.
+/// Blocks it here immediately, whatever the network is doing: removing the
+/// phone from the account should not wait on a server the phone may not be
+/// able to reach. The account's own record is removed separately.
 Future<void> forgetAccount(String accountId) async {
   final remaining = (await joinedAccounts()).where((a) => a.id != accountId);
   final prefs = await SharedPreferences.getInstance();

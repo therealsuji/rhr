@@ -67,7 +67,7 @@ These logs are temporary and may contain session details. They are not committed
 Focused regressions cover the relay announcement cache, relay-close/send race,
 APK cache invalidation, install cancellation after commit, project VM identity,
 route selection, setup gating, and character-by-character full-code entry.
-The final native change preserving a failure banner after developer departure
+The final native change preserving a failure banner after the host disconnects
 compiled successfully but was not installed for a separate device retest.
 
 ## Remaining release gates and limits
@@ -511,7 +511,7 @@ Both `run` and `attach` use this policy. Flutter readiness polling now checks th
 PID file every 100 ms instead of adding up to 1 or 2 seconds after attach completes.
 
 The native player keeps a healthy signaling WebSocket when its direct peer fails.
-The next developer hello replaces that peer. Previously it closed the signaling
+The next host hello replaces that peer. Previously it closed the signaling
 connection too, paying the close-handshake delay and relay backoff. The phone also
 records whether each relay attempt ever connected. Previously the failure callback
 cleared the flag before the retry loop checked it, so backoff grew across successful
@@ -600,7 +600,7 @@ and was not a valid code check.
 ## Agent control through `rhr mcp`, October 1
 
 A coding agent can see and drive the phone, and debug the connected app,
-through the developer's running `rhr run`. The tester needs nothing beyond the
+through the user's running `rhr run`. The phone needs nothing beyond the
 player and the code. No adb, root or cable is involved.
 
 ### Setup
@@ -667,7 +667,7 @@ fixture's `lib/` folder.
 | Allow again | A tap on "Allow agent control" brought back the stop action. `launch_app` and `wait_for` worked at once, and the count kept its value. |
 | Reload into a backgrounded app | With the launcher in front, `hot_reload` failed at once, naming the launcher and pointing at `launch_app`. |
 | Bad `grep` | `logs` with `(unclosed` returned "grep is not a valid regular expression: Unterminated group". |
-| Developer leaves | After Ctrl-C on `rhr run`, the notification went back to "Remote hot reload tunnel is running". |
+| Host leaves | After Ctrl-C on `rhr run`, the notification went back to "Remote hot reload tunnel is running". |
 | `rhr doctor` | Listed Claude Code, Codex and OpenCode as installed without rhr mcp, which matched their configs on this Mac. |
 
 Not covered: `rhr setup` itself (it would replace this Mac's launcher), and

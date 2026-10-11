@@ -31,7 +31,7 @@ dependencies:
   shared_preferences_android: 2.4.27
   sqflite: ^2.4.3
   url_launcher: ^6.3.2
-  # Scan the dev's QR (relay + code) to connect — the Expo Go flow.
+  # Scan the QR that rhr prints in the terminal (relay + code) to connect — the Expo Go flow.
   mobile_scanner: 7.4.0
   image_picker: ^1.2.3
   permission_handler: ^13.0.0

@@ -1,4 +1,4 @@
-// Signature verification for the developer's access token.
+// Signature verification for the user's access token.
 //
 // Reading a JWT's claims without checking who signed them authenticates
 // nobody: anyone can write `{"sub":"<someone else>"}` and base64 it. Every
@@ -28,7 +28,7 @@ export interface VerifiedClaims {
  *
  * Null covers every failure — wrong signature, unknown key, expired, wrong
  * issuer or audience — deliberately: the caller has no decision to make
- * beyond "this is not a developer", and distinguishing the reasons to an
+ * beyond "this is not a signed-in user", and distinguishing the reasons to an
  * unauthenticated client only helps someone probing.
  */
 export async function verifyAccessToken(

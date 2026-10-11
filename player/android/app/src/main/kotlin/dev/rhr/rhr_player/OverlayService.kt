@@ -11,7 +11,7 @@ import android.os.Handler
 import android.os.Looper
 
 /**
- * Owns the dev overlay in CONNECTOR mode, where the tester is looking at their
+ * Owns the dev overlay in CONNECTOR mode, where the user is looking at their
  * own app and the player has no Activity on screen.
  *
  * It is a foreground service for the same reason the session service is: once

@@ -18,7 +18,7 @@
 
         <!-- Opened once after install: Android only binds an accessibility
              service of an app that has been launched, and this is where the
-             tester is walked to the setting. -->
+             user is walked to the setting. -->
         <activity
             android:name=".MainActivity"
             android:exported="true">

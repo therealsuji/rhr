@@ -9,7 +9,7 @@
 //   The Dart VM service is listening on http://127.0.0.1:<port>/<auth>/
 //
 // Flutter then connects to that localhost port and drives hot reload / restart
-// itself — so "save in VS Code" reloads the QA phone with zero rhr involvement
+// itself — so "save in VS Code" reloads the remote phone with zero rhr involvement
 // in the reload path. We declare NO port forwarding in the device config; this
 // process already presents the service on 127.0.0.1, so Flutter connects
 // straight to it.
@@ -59,7 +59,7 @@ Future<void> runDeviceRun(List<String> args) async {
   // avoids leftover sessions on the shared public relay.
   code ??= mintRhrSessionCode();
 
-  // Show the QR the tester scans. Keep the payload SMALL so the QR stays small:
+  // Show the QR you scan on the phone. Keep the payload SMALL so the QR stays small:
   // when the relay is the player's built-in default, encode just the bare code
   // (the player's scanner falls back to its default relay for a non-JSON
   // payload). Only when a custom relay is used do we encode the full {relay,
@@ -113,7 +113,7 @@ Future<void> runDeviceRun(List<String> args) async {
 /// instead of relaunching. Hot restart lives solely in the Flutter tool/adapter
 /// (the IDE's ⟳ button or terminal `R`). The supported IDE flow leaves this
 /// explicit: after sync the native
-/// player overlay asks the developer to use Flutter's normal Hot Restart.
+/// player overlay asks the user to use Flutter's normal Hot Restart.
 Future<void> _syncAssetsOnReady(
   Future<void> ready,
   Uri vmService,
@@ -312,7 +312,7 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
     },
   );
 
-  final keepalive = Timer.periodic(developerLeasePingInterval, (_) {
+  final keepalive = Timer.periodic(hostLeasePingInterval, (_) {
     try {
       transport.sendControl(jsonEncode({'t': 'ping'}));
     } catch (_) {}
@@ -344,8 +344,8 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
 
   // Reload activity indicator: the compile happens on THIS machine, so the
   // phone can't know a reload started until bytes arrive — leaving a silent gap
-  // while the dev-side compiles. We can't cleanly parse the (WS-masked) VM
-  // traffic, but a dev→phone data burst after a quiet period reliably marks a
+  // while the host compiles. We can't cleanly parse the (WS-masked) VM
+  // traffic, but a host→phone data burst after a quiet period reliably marks a
   // reload/sync starting. On the first byte after idle, tell the phone to show
   // "Reloading…"; the phone clears it when its DevFS write settles.
   var reloadingShown = false;

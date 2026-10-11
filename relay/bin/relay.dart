@@ -1,15 +1,15 @@
-// rhr relay: pairs a device bridge and a dev CLI by session code and pipes
+// rhr relay: pairs a device bridge and a host CLI by session code and pipes
 // text control messages between them. Binary tunnel payloads are rejected:
 // they belong on the direct WebRTC data channel.
 //
 // Endpoints:
 //   GET /s/<code>/device   — device bridge dials out here
-//   GET /s/<code>/dev      — dev CLI connects here
+//   GET /s/<code>/host     — host CLI connects here
 //   GET /healthz
 //
 // The relay never parses tunnel frames. The one exception: the most recent
 // TEXT frame from the device (the bridge's "info" hello carrying the VM
-// service URI) is cached and replayed to a dev that connects later, so
+// service URI) is cached and replayed to a host that connects later, so
 // connection order doesn't matter.
 
 import 'dart:convert';
@@ -30,7 +30,7 @@ class Session {
   final void Function()? onEmpty;
   final bool allowBinaryPayloads;
   WebSocketChannel? device;
-  WebSocketChannel? dev;
+  WebSocketChannel? host;
   String? lastDeviceInfo;
 
   void pipeDevice(WebSocketChannel ch) {
@@ -51,34 +51,36 @@ class Session {
           return;
         }
         if (_isInfoMessage(msg)) lastDeviceInfo = msg;
-        dev?.sink.add(msg);
+        host?.sink.add(msg);
       },
       onDone: () => _deviceClosed(ch),
       onError: (_) => _deviceClosed(ch),
     );
     final info = lastDeviceInfo;
-    if (info != null && dev != null) dev!.sink.add(info);
+    if (info != null && host != null) host!.sink.add(info);
   }
 
-  void pipeDev(WebSocketChannel ch) {
-    dev?.sink.close(4001, 'replaced by new connection');
-    dev = ch;
+  void pipeHost(WebSocketChannel ch) {
+    host?.sink.close(4001, 'replaced by new connection');
+    host = ch;
     ch.stream.listen(
       (msg) {
         if (!allowBinaryPayloads && msg is! String) {
-          stderr.writeln('[relay] rejected binary payload from dev');
+          stderr.writeln('[relay] rejected binary payload from host');
           ch.sink.close(4002, 'binary payload disabled');
           return;
         }
         if (msg is String && utf8.encode(msg).length > maxControlMessageBytes) {
-          stderr.writeln('[relay] rejected oversized control message from dev');
+          stderr.writeln(
+            '[relay] rejected oversized control message from host',
+          );
           ch.sink.close(4003, 'control message too large');
           return;
         }
         device?.sink.add(msg);
       },
-      onDone: () => _devClosed(ch),
-      onError: (_) => _devClosed(ch),
+      onDone: () => _hostClosed(ch),
+      onError: (_) => _hostClosed(ch),
     );
     final info = lastDeviceInfo;
     if (info != null) ch.sink.add(info);
@@ -86,28 +88,28 @@ class Session {
 
   void _deviceClosed(WebSocketChannel ch) {
     stderr.writeln('[relay] device channel done');
-    // A dead device's info is worse than none: a dev attaching later would
+    // A dead device's info is worse than none: a host attaching later would
     // tunnel to a VM service port that no longer exists.
     if (device == ch) {
       device = null;
       lastDeviceInfo = null;
-      // The session is dead without a device: drop the dev too so the
+      // The session is dead without a device: drop the host too so the
       // CLI's recovery loop re-dials and re-pairs when the device returns.
-      dev?.sink.close(4000, 'device disconnected');
-      dev = null;
+      host?.sink.close(4000, 'device disconnected');
+      host = null;
       _maybeEvict();
     }
   }
 
-  void _devClosed(WebSocketChannel ch) {
-    if (dev == ch) {
-      dev = null;
+  void _hostClosed(WebSocketChannel ch) {
+    if (host == ch) {
+      host = null;
       _maybeEvict();
     }
   }
 
   void _maybeEvict() {
-    if (device == null && dev == null && lastDeviceInfo == null)
+    if (device == null && host == null && lastDeviceInfo == null)
       onEmpty?.call();
   }
 }
@@ -141,7 +143,7 @@ Future<HttpServer> startRelay(
     if (seg.length == 3 && seg[0] == 's') {
       final code = seg[1];
       final role = seg[2];
-      if (role != 'device' && role != 'dev')
+      if (role != 'device' && role != 'host')
         return Response.notFound('bad role');
       if (code.length < minSessionCodeLength) {
         return Response(
@@ -155,7 +157,7 @@ Future<HttpServer> startRelay(
       return webSocketHandler((WebSocketChannel ws, _) {
         final s = _sessionFor(code, allowBinaryPayloads: allowBinaryPayloads);
         stderr.writeln('[relay] $role connected');
-        role == 'device' ? s.pipeDevice(ws) : s.pipeDev(ws);
+        role == 'device' ? s.pipeDevice(ws) : s.pipeHost(ws);
       })(req);
     }
     return Response.notFound('not found');

@@ -49,8 +49,8 @@ Future<File> agentApkFor(String playerCertificate) async {
 }
 
 /// Downloads this version's published agent ahead of time, so the first
-/// `install_agent` does not wait on GitHub while a tester holds the phone.
-/// A message for the developer; a failure only means it is fetched later.
+/// `install_agent` does not wait on GitHub while the user holds the phone.
+/// A message for the user; a failure only means it is fetched later.
 Future<String> prefetchPublishedAgent() async {
   try {
     final apk = await _publishedAgent();

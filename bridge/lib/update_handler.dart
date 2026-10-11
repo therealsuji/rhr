@@ -16,24 +16,24 @@ import 'dart:typed_data';
 
 /// Handles the device side of one update transfer.
 ///
-/// Wire protocol, dev → device unless noted (mirrors `player_update.dart`):
+/// Wire protocol, host → device unless noted (mirrors `player_update.dart`):
 ///
 ///   {"t":"update_begin", id, size, sha256, kind, target?}
 ///   binary opUpdateData frames                  the gzipped payload, flow-controlled
 ///   {"t":"update_commit", id}                   the stream is complete
 ///
-/// and back, device → dev, as `{"t":"update_status","id":N,"state":…}`:
+/// and back, device → host, as `{"t":"update_status","id":N,"state":…}`:
 ///
 ///   "ready"         accepted; chunks may flow
 ///   "committed"     verified and handed to the installer
-///   "pending_user"  the OS is asking the tester to confirm
+///   "pending_user"  the OS is asking the user to confirm
 ///   "installed"     confirmed on the device
 ///   "failure"       with a "message" saying why
 ///
-/// A device that never answers "ready" has no updater; the dev side times
+/// A device that never answers "ready" has no updater; the host times
 /// out and reports it.
 abstract interface class RhrUpdateHandler {
-  /// The dev announced a transfer. Answer "ready" to accept it.
+  /// The host announced a transfer. Answer "ready" to accept it.
   void handleBegin(Map<String, dynamic> message);
 
   /// One payload frame. Acking is the caller's job — the bridge does it, so

@@ -138,8 +138,8 @@ void main() {
           ),
         ),
       );
-      // With nothing built yet there is nothing to compare, and the tester
-      // is asked for nothing before the developer approves the build.
+      // With nothing built yet there is nothing to compare, and the phone
+      // asks for nothing before the user approves the build.
       expect(
         phone.messages.where((message) => message['t'] == 'run_request'),
         isEmpty,

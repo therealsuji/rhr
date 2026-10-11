@@ -310,7 +310,7 @@ internal class RhrDirectTransport(
 	}
 
 	/**
-	 * The route ICE settled on, for the developer's log: whether it is IPv4 or
+	 * The route ICE settled on, for the CLI's log: whether it is IPv4 or
 	 * IPv6, and which candidate types met. Nothing else records this, and it
 	 * is the fact that separates "these networks cannot connect directly"
 	 * from a bug. Named `path`, outside the `direct_*` family, because it is a

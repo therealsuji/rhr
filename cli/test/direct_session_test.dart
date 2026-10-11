@@ -108,7 +108,7 @@ void main() {
 
       Future<void> stop(Process process) async {
         // SIGTERM first so the CLI runs its farewell (it releases the device
-        // claim and tells the phone the developer left), then SIGKILL if it
+        // claim and tells the phone the host left), then SIGKILL if it
         // does not go. Waiting only on SIGTERM made teardown the flakiest part
         // of this file on CI: the handler does a short flush before exiting,
         // and a loaded runner can outlast a fixed wait.
@@ -203,7 +203,7 @@ void main() {
 
       Future<void> stop(Process process) async {
         // SIGTERM first so the CLI runs its farewell (it releases the device
-        // claim and tells the phone the developer left), then SIGKILL if it
+        // claim and tells the phone the host left), then SIGKILL if it
         // does not go. Waiting only on SIGTERM made teardown the flakiest part
         // of this file on CI: the handler does a short flush before exiting,
         // and a loaded runner can outlast a fixed wait.

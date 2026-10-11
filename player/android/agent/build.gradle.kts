@@ -3,12 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// RHR Agent: the accessibility service that lets a developer's agent see and
-// tap anywhere on the tester's phone, system dialogs included.
+// RHR Agent: the accessibility service that lets the user's coding agent see
+// and tap anywhere on the phone, system dialogs included.
 //
 // A separate APK from the player on purpose. Play Protect blocks any APK that
 // declares an accessibility service when it is installed from a browser or a
-// file manager, which is how testers get the player. Installed by the player
+// file manager, which is how the player gets onto a phone. Installed by the player
 // itself, it only gets the usual unknown-app prompt (verified on Android 16,
 // 2026-09-30). The player and the agent must be signed with the same key: the
 // agent only serves callers signed like itself.

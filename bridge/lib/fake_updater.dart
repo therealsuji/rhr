@@ -26,7 +26,7 @@ enum FakeInstallOutcome {
   committed,
 
   /// Report "pending_user", then "installed" after a beat — Android showing
-  /// its confirmation sheet and the tester tapping through it.
+  /// its confirmation sheet and the user tapping through it.
   pendingUser,
 
   /// Report "installed" directly: a foreign package that needed no sheet.
@@ -67,7 +67,7 @@ class FakeUpdater implements RhrUpdateHandler {
   final _decoded = BytesBuilder(copy: false);
 
   /// Raw wire bytes, before any gunzip. Counted separately because the
-  /// bar's honesty depends on which of the two the dev is measuring.
+  /// bar's honesty depends on which of the two the host is measuring.
   int _wireBytes = 0;
 
   /// Gunzip is a stream transform, so the compressed frames are fed through
@@ -118,7 +118,7 @@ class FakeUpdater implements RhrUpdateHandler {
     if (_finished) return;
     _wireBytes += payload.length;
     _inflateInput?.add(payload);
-    // The dev may commit before the tail arrives on the direct path, so the
+    // The host may commit before the tail arrives on the direct path, so the
     // completion check lives here too, not only in handleCommit.
     if (_commitRequested) unawaited(_finishIfComplete());
   }

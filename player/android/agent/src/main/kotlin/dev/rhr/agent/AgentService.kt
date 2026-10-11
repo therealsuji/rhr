@@ -24,7 +24,7 @@ import org.json.JSONObject
 /**
  * The accessibility service behind device control. It acts only on requests
  * the player passes through [AgentProvider], and the player passes them only
- * while a developer's session is live. Between sessions it reads nothing and
+ * while a session is live. Between sessions it reads nothing and
  * does nothing.
  *
  * Coordinates are fractions of the screen (0–1), the same space as the frames
@@ -32,7 +32,7 @@ import org.json.JSONObject
  */
 class AgentService : AccessibilityService() {
 	companion object {
-		/** The bound service, or null while the tester has it turned off. */
+		/** The bound service, or null while the user has it turned off. */
 		@Volatile
 		var running: AgentService? = null
 			private set

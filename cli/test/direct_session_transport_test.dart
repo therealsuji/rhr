@@ -107,9 +107,9 @@ void main() {
   );
 
   // A dead WebRTC payload path used to veto control traffic, which rides the
-  // relay and never touches WebRTC. That took out the farewell (dev_gone), the
+  // relay and never touches WebRTC. That took out the farewell (host_gone), the
   // presence heartbeat, and the re-signaling that would rebuild the channel —
-  // so a tester was left reading "Can't reach relay - retrying..." after a
+  // so the phone was left reading "Can't reach relay - retrying..." after a
   // clean quit.
   test(
     'control still reaches the relay after the payload path fails',
@@ -136,10 +136,10 @@ void main() {
       );
 
       // Control does not, so it must go out regardless.
-      transport.sendControl(jsonEncode({'t': 'dev_gone'}));
+      transport.sendControl(jsonEncode({'t': 'host_gone'}));
       expect(
         relay.sent.map((message) => jsonDecode(message)['t']),
-        contains('dev_gone'),
+        contains('host_gone'),
       );
 
       await subscription.cancel();

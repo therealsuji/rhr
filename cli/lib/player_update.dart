@@ -246,7 +246,7 @@ final class PlayerUpdateSender {
     // the last byte, so progress had to be reported as wire-bytes-so-far
     // against the UNCOMPRESSED apk size — two different currencies. An APK
     // compresses to roughly half, so the bar stopped near 55% and stayed
-    // there: the tester watched a finished transfer claim to be half done.
+    // there: the phone showed a finished transfer as half done.
     // Compressing first costs one pass over a file that was just written
     // (so it is in page cache) and buys a total the bar can actually reach.
     stderr.writeln('[rhr] compressing the transfer (gzip)');
@@ -305,7 +305,7 @@ final class PlayerUpdateSender {
     if (kind == UpdateKind.app) {
       // Foreign package: the player process survives, the system sheet
       // waits for a user tap, and the result broadcast carries the
-      // terminal state. Wait generously — the tester may be away.
+      // terminal state. Wait generously — the user may be away from the phone.
       await _awaitState(
         {'installed'},
         timeout: const Duration(minutes: 10),

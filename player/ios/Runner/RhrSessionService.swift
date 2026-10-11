@@ -111,7 +111,7 @@ final class RhrSessionService: NSObject, URLSessionWebSocketDelegate {
 			case .success(let message):
 				switch message {
 				case .data(let d): self.handleFrame(Array(d))
-				case .string: break  // control from dev; none yet
+				case .string: break  // control from the host; none yet
 				@unknown default: break
 				}
 				self.receive()

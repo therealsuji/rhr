@@ -6,7 +6,7 @@ If a local `notes/` directory is present, check it for working notes.
 
 ## Project Overview
 
-Remote hot reload for Flutter — "Expo Go for Flutter over the internet." A tester anywhere holds a phone running a debug Flutter app; the dev hot reloads from their machine in ~2 s with app state preserved. Works by tunneling the Dart VM Service protocol through a relay: the app dials out (no NAT/firewall issues), the dev's `flutter attach` connects to a localhost tunnel. No adb, no USB, no shared network.
+Remote hot reload for Flutter — "Expo Go for Flutter over the internet." The user's phone runs a debug Flutter app anywhere on the internet; the user hot reloads it from their computer in ~2 s with app state preserved. Works by tunneling the Dart VM Service protocol through a relay: the app dials out (no NAT/firewall issues), and `flutter attach` on the computer connects to a localhost tunnel. No adb, no USB, no shared network.
 
 See `README.md` for the full concept and the platform analysis (iOS is the hard part).
 
@@ -52,10 +52,10 @@ dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8123 <cod
 ## Architecture
 
 Tunnel protocol (`bridge/lib/tunnel.dart`, mirrored in both relays which never parse it):
-- TEXT WebSocket frames = JSON control messages. Device→dev `{"t":"info","vm":"<uri>"}` announces the VM service URI; the relay caches the latest one and replays it to a late-joining dev, clearing it when the device disconnects.
-- BINARY frames = multiplexed TCP: `[1B op][4B channel BE][payload]`, op 0=open 1=data 2=close. The dev CLI opens a channel per local TCP connection from the Flutter tool; the bridge answers each open with a TCP connection to the local VM service.
+- TEXT WebSocket frames = JSON control messages. Device→host `{"t":"info","vm":"<uri>"}` announces the VM service URI; the relay caches the latest one and replays it to a late-joining host, clearing it when the device disconnects.
+- BINARY frames = multiplexed TCP: `[1B op][4B channel BE][payload]`, op 0=open 1=data 2=close. The host CLI opens a channel per local TCP connection from the Flutter tool; the bridge answers each open with a TCP connection to the local VM service.
 
-Session flow: bridge dials `wss://relay/s/<code>/device` (outbound, firewall-proof) → CLI dials `/s/<code>/dev`, gets the info message, binds a localhost listener, rewrites the VM URI to it, and spawns `flutter attach --debug-url`. Hot reload/restart/DevTools all ride the same tunnel.
+Session flow: bridge dials `wss://relay/s/<code>/device` (outbound, firewall-proof) → CLI dials `/s/<code>/host`, gets the info message, binds a localhost listener, rewrites the VM URI to it, and spawns `flutter attach --debug-url`. Hot reload/restart/DevTools all ride the same tunnel.
 
 App integration: add `rhr_bridge` as a path dep, call `RhrBridge.start(relayUrl: …, sessionCode: …)` in `main()` guarded by `kDebugMode`. Configurable via `--dart-define=RHR_RELAY=…` / `RHR_CODE=…`.
 
@@ -64,10 +64,10 @@ App integration: add `rhr_bridge` as a path dep, call `RhrBridge.start(relayUrl:
 - **Buffer data frames racing a channel open.** The bridge connects to the VM service asynchronously; data frames arriving before the socket is ready must be buffered, not dropped (`_pending` in `rhr_bridge.dart`).
 - **Handle `Socket.done` errors.** Peer resets during DevFS sync surface there and crash the process if unhandled (both CLI and bridge do `sock.done.catchError`).
 - **Never mutate socket maps while iterating.** `destroy()` fires `onDone` handlers that remove entries — iterate a `.toList()` snapshot. A `ConcurrentModificationError` here permanently kills the bridge's reconnect loop.
-- **The dev machine must have NO adb devices connected during `flutter attach`.** If any adb device is visible, the tool "helpfully" rewrites the debug-url through `adb forward` to that device and the attach fails with `Connection closed before full header`.
+- **The host computer must have NO adb devices connected during `flutter attach`.** If any adb device is visible, the tool "helpfully" rewrites the debug-url through `adb forward` to that device and the attach fails with `Connection closed before full header`.
 - **DO WebSocket messages cap at 1 MiB.** Tunnel frames are TCP-read-sized (≤64 KB) so this holds today; keep it true if the framing changes.
 - **Durable Object in-memory state dies on hibernation.** Anything that must survive (the cached device info) lives in `ctx.storage`.
-- **Android freezes backgrounded apps** — the bridge socket and its retry loop stop until the app is foregrounded again (reconnects within ~30 s of unfreeze). A tester actively using the app is unaffected.
+- **Android freezes backgrounded apps** — the bridge socket and its retry loop stop until the app is foregrounded again (reconnects within ~30 s of unfreeze). A phone with the app in the foreground is unaffected.
 - **Hot restart into a guest app kills the player's Dart bridge.** The bridge is code in the lobby kernel; the restart swaps in the guest's kernel and re-runs `main()`, so the tunnel's device end dies the moment a guest boots (and can't come back — guests are zero-integration by design). The player's bridge must move to the native layer (Kotlin service in the player APK), which DevFS kernel swaps can't touch. The pure-Dart bridge remains correct for bridge-in-your-own-app use.
 - **Samsung freezes background processes between binder calls**, accessibility service or not. Cross-app requests must each be their own binder call (`AgentProvider.call("request")`); a socket served by the other app stalls within seconds.
 - **RHR Agent must subscribe to window content/windows-changed events** even though it ignores them: they invalidate its node cache, or a tree read after a tap shows the screen before it.

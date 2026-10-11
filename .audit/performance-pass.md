@@ -14,7 +14,7 @@ Delegation skipped under repository requirement to ask before invoking another a
 
 Throughput checkpoint: use one timestamped log watcher for repeated fault/restart measurements, then test each accepted change before adding another. Test both player and connector routes. Cellular remains deferred.
 
-Ground: developer retry loop reconstructs transport and Flutter attach after failure. Player Restart forwards SIGUSR2 to Flutter attach. Candidate gathering precedes direct negotiation. Native mux connects TCP sockets to the VM service.
+Ground: host retry loop reconstructs transport and Flutter attach after failure. Player Restart forwards SIGUSR2 to Flutter attach. Candidate gathering precedes direct negotiation. Native mux connects TCP sockets to the VM service.
 
 Argent update 0.25.2 is available; no update authorized or performed.
 
@@ -31,7 +31,7 @@ A readiness callback supplies that fact to both outer retry loops.
 
 Phone alternative: reduce the WebSocket close timeout after direct failure.
 Rejected because the signaling connection is still usable. Keep it until real relay
-failure and replace the failed direct peer when the new developer hello arrives.
+failure and replace the failed direct peer when the new host hello arrives.
 
 Fix Root Causes shaped the choice to preserve healthy signaling and correct the
 backoff state. Model the Domain shaped the shared retry policy. Prove It Works and

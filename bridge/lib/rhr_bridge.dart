@@ -39,7 +39,7 @@ class RhrBridge {
   final bool preferDirect;
 
   /// Top-level kind announced in the hello: "player" | "app" | "connector"
-  /// (the dev-side gate routes on this).
+  /// (the CLI's gate routes on this).
   final String? host;
 
   /// When set, this bridge tunnels a DIFFERENT app's VM service (the M3
@@ -63,7 +63,7 @@ class RhrBridge {
 
   /// Host-provided hook for over-the-wire APK updates, matching the Android
   /// player's `RhrSessionService.updateHandlerFactory`. Left null, update
-  /// frames are ignored and the dev side surfaces its "did not acknowledge"
+  /// frames are ignored and the CLI surfaces its "did not acknowledge"
   /// timeout, which is the correct behaviour for a host that ships no
   /// updater.
   static RhrUpdateHandlerFactory? updateHandlerFactory;
@@ -71,7 +71,7 @@ class RhrBridge {
   /// The handler for the current session, built on the first update message.
   RhrUpdateHandler? _updater;
 
-  /// Notified whenever the developer reports a progress phase.
+  /// Notified whenever the CLI reports a progress phase.
   ///
   /// On a phone the equivalent state drives the overlay's progress card. A
   /// desktop host can use it to assert the sequence the CLI really sends,
@@ -98,7 +98,7 @@ class RhrBridge {
   /// Starts the bridge and keeps it connected (with backoff) forever.
   /// [relayUrl] like `ws://relay.example.com:8123`.
   /// [assetStoreId] and [compatibility] are announced in the info message so
-  /// the dev CLI's compatibility gate can pass on desktop/testing devices
+  /// the CLI's compatibility gate can pass on desktop/testing devices
   /// (the Android player supplies these from BuildConfig).
   static RhrBridge start({
     required String relayUrl,
@@ -241,7 +241,7 @@ class RhrBridge {
               unawaited(sendFrame(encodeAck(f.channel, f.payload.length)));
             case opUpdateData:
               // The payload of an APK transfer, not tunnel traffic. Ack it
-              // here rather than in the handler: the dev side's flow-control
+              // here rather than in the handler: the CLI's flow-control
               // window is what keeps a ~60 MB stream from outrunning the
               // device, and it must not depend on an implementation
               // remembering to open it.
@@ -257,9 +257,9 @@ class RhrBridge {
           }
         }
 
-        // [answers] names the developer hello this info replies to. The
-        // relay replays the last info to every developer who connects, so an
-        // attaching developer waits for one addressed to it.
+        // [answers] names the CLI hello this info replies to. The relay
+        // replays the last info to every CLI that connects, so an attaching
+        // CLI waits for one addressed to it.
         void announce({String? answers}) => ws.sink.add(
           jsonEncode({
             't': 'info',
@@ -406,10 +406,10 @@ class RhrBridge {
   /// Routes `update_begin` / `update_commit` to the host's update handler,
   /// building one on the first message of a transfer.
   ///
-  /// Anything else — hello, ping, progress, dev_gone — is not ours; the
+  /// Anything else — hello, ping, progress, host_gone — is not ours; the
   /// session's other machinery handles it and this returns quietly. A host
   /// with no [updateHandlerFactory] ignores update messages entirely, which
-  /// the dev side reports as an update the device did not acknowledge.
+  /// the CLI reports as an update the device did not acknowledge.
   void _handleUpdateControl(
     String message,
     IOWebSocketChannel ws,
@@ -423,7 +423,7 @@ class RhrBridge {
     }
     if (decoded is! Map<String, dynamic>) return;
     final kind = decoded['t'];
-    // The phase the developer wants shown. The bridge has no screen, but a
+    // The phase the CLI wants shown. The bridge has no screen, but a
     // host does — on Android this is what draws the progress card — and a
     // desktop stand-in can assert the sequence, which is the only way the
     // banner wording gets checked without someone holding a phone.
@@ -532,7 +532,7 @@ class RhrBridge {
     }
   }
 
-  /// The connection id of a developer hello, or null for anything else.
+  /// The connection id of a CLI hello, or null for anything else.
   static String? _helloConnection(String message) {
     if (!_isHello(message)) return null;
     final id = (jsonDecode(message) as Map<String, dynamic>)['connectionId'];

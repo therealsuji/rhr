@@ -1,5 +1,5 @@
 // Cable-free APK install: stream an APK to the rhr player over a relay and
-// let the tester confirm the system install sheet.
+// let the user confirm the system install sheet.
 //
 // The player installs a foreign package here rather than updating itself, so
 // its own process survives the install and reports the sheet's outcome back.
@@ -28,12 +28,12 @@ class DeliveryFailure implements Exception {
   String toString() => message;
 }
 
-/// Streams [apk] to the rhr player over [relay] and waits for the tester to
+/// Streams [apk] to the rhr player over [relay] and waits for the user to
 /// confirm the install sheet. [applicationId] is the package the APK
 /// installs as — the player uses it to report the terminal install state.
 ///
 /// Mints its own session code and prints it: delivery is a separate,
-/// short-lived session from whatever the developer is otherwise doing.
+/// short-lived session from whatever the user is otherwise doing.
 Future<void> deliverViaRelay({
   required File apk,
   required String applicationId,

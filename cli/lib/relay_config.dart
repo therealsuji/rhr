@@ -5,8 +5,8 @@ import 'package:rhr_bridge/relay_defaults.dart';
 /// from drifting apart.
 export 'package:rhr_bridge/relay_defaults.dart';
 
-/// Must stay below the native player's 45-second developer presence lease.
-const developerLeasePingInterval = Duration(seconds: 20);
+/// Must stay below the native player's 45-second host presence lease.
+const hostLeasePingInterval = Duration(seconds: 20);
 
 /// Orders relay candidates for one run. A local relay is always preferred for
 /// same-network traffic; an explicitly configured relay replaces the public

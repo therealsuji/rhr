@@ -6,7 +6,7 @@
 // restart swaps the entire kernel — including any Dart-side bridge — and a
 // foreground service also survives Android freezing the backgrounded app.
 //
-// The dev then runs `rhr attach --sync-assets` from THEIR project; flutter's
+// The user then runs `rhr attach --sync-assets` from their project; flutter's
 // DevFS sync pushes the kernel, the asset push lands in the service's
 // persistent store via the DevFS symlink, and a hot restart (R) boots the
 // guest in place of this lobby.
@@ -87,8 +87,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   // surfaces ask SessionBanner now, so they cannot drift apart again.
   ({String label, int? progress, bool visible})? _banner;
   Timer? _statusTimer;
-  // When the current "waiting for developer" stretch began (used to surface a
-  // stale-saved-code hint after a grace period with no developer).
+  // When the current "waiting for your computer" stretch began (used to surface
+  // a stale-saved-code hint after a grace period with no host).
   DateTime? _waitingSince;
   bool _showWaitingHint = false;
   // Hidden QA entry: tap the footer 7× to open the fault-injection sheet.
@@ -102,7 +102,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   ///
   /// Joining is how this is used now, so the code is a way in round the back:
   /// still there for a LAN with no account service, or a phone nobody wants
-  /// joined to anything, but no longer the first thing a tester reads.
+  /// joined to anything, but no longer the first thing the user reads.
   bool _showCodeEntry = false;
 
   // Design tokens matching the native DevOverlay.
@@ -141,7 +141,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         });
         // Auto-resume: Android reaps backgrounded players (memory pressure,
         // crash, reboot); on relaunch, re-arm the session unprompted so a
-        // mid-QA process death is invisible to the tester — the dev's CLI
+        // mid-QA process death is invisible to the user — the host CLI's
         // reconnect loop is already retrying and just needs the device back.
         if (autoResume && saved.length >= 16) {
           _connect(auto: true);
@@ -149,8 +149,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         return;
       }
       // No saved code, but this phone may have joined an account — then it
-      // waits on its own rendezvous instead, so a developer who picks it from
-      // their device list finds it already there. A phone that has joined
+      // waits on its own rendezvous instead, so when the user picks it from
+      // their device list on the computer, it is already there. A phone that has joined
       // nothing stays on the lobby, which is what keeps the code path whole.
       _waitOnAccountRendezvous();
     });
@@ -161,7 +161,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   ///
   /// A release APK carries the release version, stamped by the release
   /// workflow; a locally built one carries player/pubspec.yaml's. Either
-  /// way the tester can say which player they are holding, which they could
+  /// way the user can tell which player is on the phone, which they could
   /// not do before.
   Future<void> _readInstalledVersion() async {
     try {
@@ -169,14 +169,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() => _installedVersion = info.version);
     } catch (_) {
-      // Not worth telling the tester about: the footer simply keeps its
+      // Not worth telling the user about: the footer simply keeps its
       // version-less wording.
     }
   }
 
   /// Compares this build with the newest GitHub release, on request.
   ///
-  /// Manual, never on a timer: a tester's phone may be on cellular, and the
+  /// Manual, never on a timer: the phone may be on cellular, and the
   /// answer is only interesting when someone is asking.
   Future<void> _checkForUpdate() async {
     if (_checkingUpdate) return;
@@ -216,7 +216,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 progress: decided['progress'] as int?,
                 visible: decided['visible'] as bool? ?? false,
               );
-        final waiting = _active && s == 'waiting_dev';
+        final waiting = _active && s == 'waiting_host';
         if (waiting) {
           _waitingSince ??= DateTime.now();
         } else {
@@ -255,7 +255,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     return (
       switch (_nativeStatus) {
         'connected' => 'Connected',
-        'waiting_dev' => 'Waiting for developer',
+        'waiting_host' => 'Waiting for your computer',
         'retrying' || 'closed' => 'Reconnecting',
         'rejected' => 'Connection unavailable',
         _ => 'Connecting…',
@@ -344,7 +344,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         builder: (context) => AlertDialog(
           title: const Text('Switch sessions?'),
           content: const Text(
-            'Disconnect from the current developer and connect to this link?',
+            'Disconnect from the current session and connect to this link?',
           ),
           actions: [
             TextButton(
@@ -367,7 +367,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// Waits on this phone's own rendezvous, when it belongs to an account.
   ///
   /// Nobody types anything for this: the name comes from the installation
-  /// identity, and a developer who was invited computes the same one. Doing
+  /// identity, and the account service computes the same one for the host. Doing
   /// nothing when no account has been joined is deliberate — a phone that has
   /// joined nothing must still reach the code path.
   Future<void> _waitOnAccountRendezvous() async {
@@ -388,10 +388,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
 
   /// Asks before joining, then joins.
   ///
-  /// This phone usually belongs to the tester rather than the developer, so a
-  /// scan must not quietly attach it to someone's account: the sheet names
-  /// whose account it is and what joining allows, and does nothing until they
-  /// accept.
+  /// A QR can come from any screen, so a scan must not quietly attach this
+  /// phone to an account: the sheet names whose account it is and what
+  /// joining allows, and does nothing until the user accepts.
   Future<void> _onInvite(AccountInvite invite) async {
     final accepted = await showModalBottomSheet<bool>(
       context: context,
@@ -418,11 +417,11 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 ),
               ),
               const SizedBox(height: 10),
-              // Two facts decide this: what they get, and that it is
-              // reversible. Everything else was reassurance the tester has to
+              // Two facts decide this: what joining allows, and that it is
+              // reversible. Everything else was reassurance the user has to
               // read before they can answer.
               const Text(
-                'They can connect to this phone to test their app. '
+                'Your computer can connect to this phone to run your app. '
                 'Leave any time.',
                 style: TextStyle(color: _inkDim, fontSize: 13.5, height: 1.4),
               ),
@@ -460,13 +459,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         JoinAccepted(:final account, alreadyJoined: true) =>
           'Already joined ${account.email}.',
         JoinAccepted(:final account) =>
-          'Joined ${account.email}. They can now connect to this phone.',
+          'Joined ${account.email}. Your computer can now connect to this phone.',
         JoinRejected(:final reason) => reason,
       };
     });
   }
 
-  /// A scan carries its own relay when the dev's QR named one; a typed code
+  /// A scan carries its own relay when the host's QR named one; a typed code
   /// leaves whatever relay we already had in place.
   Future<void> _onScanned(SessionCodeEntry entry) async {
     setState(() {
@@ -536,7 +535,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     setState(() {
       _active = true;
       _status =
-          'Waiting for the developer. RHR will check this phone '
+          'Waiting for your computer. RHR will check this phone '
           'before preparing your app.';
     });
   }
@@ -601,7 +600,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 12),
                         const Text(
-                          'Scan the QR from your developer to let them test on '
+                          'Scan the QR in your terminal to run your app on '
                           'this phone. You stay in control — leave any time.',
                           style: TextStyle(
                             color: _inkDim,
@@ -996,7 +995,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 ),
               ),
               // The installation identity is minted lazily and lives only in
-              // native storage, so this is the one place a tester can read it
+              // native storage, so this is the one place the user can read it
               // back — useful when an account says it does not recognise this
               // phone.
               ListTile(
@@ -1045,20 +1044,20 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   String _activeStatusCopy() {
     switch (_nativeStatus) {
       case 'connected':
-        return 'Connected to your developer. RHR is preparing your app.';
+        return 'Connected to your computer. RHR is preparing your app.';
       case 'rejected':
-        return 'No session on this code yet. Check the code, or ask the developer to run rhr run first.';
+        return 'No session on this code yet. Check the code, or run rhr run in your terminal first.';
       case 'retrying':
       case 'closed':
         return "Can't reach the relay. Retrying every few seconds — "
             "check the phone's internet connection.";
-      case 'waiting_dev':
+      case 'waiting_host':
       case 'idle':
       default:
-        final base = 'Waiting for your developer to connect. Keep RHR open.';
+        final base = 'Waiting for your computer to connect. Keep RHR open.';
         if (_showWaitingHint) {
-          return '$base\n\nNo developer has connected on this code yet. '
-              'If they started a fresh session, Disconnect and scan the new QR.';
+          return '$base\n\nYour computer has not connected on this code yet. '
+              'If you started a fresh session, Disconnect and scan the new QR.';
         }
         return base;
     }

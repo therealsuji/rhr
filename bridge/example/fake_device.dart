@@ -3,7 +3,7 @@
 //   dart run --enable-vm-service=0 example/fake_device.dart ws://127.0.0.1:8123 test
 //
 // Reports the LOCAL Flutter SDK's compatibility profile (same machine as the
-// dev CLI, so the CLI's compatibility gate passes) plus a stable per-process
+// host CLI, so the CLI's compatibility gate passes) plus a stable per-process
 // asset-store id.
 //
 // Flags:
@@ -27,7 +27,7 @@ import 'package:rhr_bridge/fake_updater.dart';
 import 'package:rhr_bridge/rhr_bridge.dart';
 
 /// With `--outdated`, reports a Flutter revision that cannot match the
-/// developer's, so the CLI's compatibility gate blocks and offers an update.
+/// computer's, so the CLI's compatibility gate blocks and offers an update.
 ///
 /// The gate compares revisions for equality, so a made-up one is enough and
 /// is honest about being made up — the alternative is pinning a real old
@@ -110,7 +110,7 @@ Map<String, dynamic> _localCompatibility() {
 Future<void> main(List<String> args) async {
   final preferDirect = args.contains('--direct');
 
-  // Print the phase sequence the developer sends. This is what the phone's
+  // Print the phase sequence the CLI sends. This is what the phone's
   // progress card is drawn from, so seeing it here is how the banner
   // wording gets checked without holding a phone. Percentages are only
   // printed when they move, or a 60 MB transfer buries the log.
@@ -170,7 +170,7 @@ Future<void> main(List<String> args) async {
     );
   }
   // A clean close on termination so the local relay's device-death handling
-  // (drop the dev connection) is exercised in tests.
+  // (drop the host connection) is exercised in tests.
   Future<void> shutDown() async {
     await RhrBridge.instance?.dispose();
     exit(0);

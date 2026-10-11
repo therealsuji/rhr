@@ -36,12 +36,12 @@ import java.util.regex.Pattern;
  * own log, and only this process may read that log without adb. The CLI adds
  * this provider to the debug build it generates (never to the project, never
  * to a release build). It starts with the process, watches the log, and hands
- * the address to the player, which tunnels the VM service to the developer.
+ * the address to the player, which tunnels the VM service to the host.
  *
  * The address is a credential, so it goes only to a player whose signing
  * certificate matches the one the CLI baked into this build.
  *
- * The same player may also ask for this app's native log, for the developer's
+ * The same player may also ask for this app's native log, for the user's
  * agent: only this app can read it without adb.
  */
 public final class RhrBeacon extends ContentProvider {

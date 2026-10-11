@@ -1,4 +1,4 @@
-// Shared tunnel protocol between the device bridge and the dev CLI.
+// Shared tunnel protocol between the device bridge and the host CLI.
 //
 // Over the relay WebSocket:
 //   - TEXT frames are JSON control messages, e.g. {"t":"info","vm":"<uri>"}.
@@ -6,7 +6,7 @@
 //       [1 byte op][4 bytes channel id, big-endian][payload]
 //     op 0 = open channel, 1 = data, 2 = close channel.
 //
-// The dev CLI opens channels (one per local TCP connection from the Flutter
+// The host CLI opens channels (one per local TCP connection from the Flutter
 // tool); the device bridge answers each open with a TCP connection to the
 // local VM service.
 //
@@ -45,7 +45,7 @@ Uint8List targetRefusal(int target, String message) {
       .takeBytes();
 }
 
-/// Player update transfer: [op][4B transfer id][APK chunk]. The dev streams a
+/// Player update transfer: [op][4B transfer id][APK chunk]. The host streams a
 /// replacement player APK to the device (announced by a {"t":"update_begin"}
 /// text message, sealed by {"t":"update_commit"}). Transfer ids set bit 30 so
 /// they can never collide with tunnel channel ids (which count up from 1),
@@ -57,7 +57,7 @@ const updateTransferIdBase = 0x40000000;
 
 /// Flow control: receiver acks consumed bytes (payload = 4-byte big-endian
 /// count). A sender pauses its TCP source once [windowBytes] are unacked —
-/// without this, a fast dev machine pumping into a slow phone builds up
+/// without this, a fast computer pumping into a slow phone builds up
 /// megabytes inside the relay, and Durable Objects kill the socket rather
 /// than buffer unboundedly.
 const opAck = 3;

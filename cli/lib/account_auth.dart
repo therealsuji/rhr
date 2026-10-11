@@ -1,13 +1,13 @@
-// Developer sign-in for the CLI, over the OAuth 2.0 Device Authorization
+// Account sign-in for the CLI, over the OAuth 2.0 Device Authorization
 // Grant (RFC 8628).
 //
 // A terminal is not a browser, so the usual redirect dance does not fit: the
-// device flow prints a short code, the developer approves it in a browser
+// device flow prints a short code, the user approves it in a browser
 // anywhere — another machine, a phone — and this process polls until a token
 // comes back. That also keeps working over SSH and inside containers, where a
 // localhost callback has no port to listen on.
 //
-// Nothing here touches the session path. A developer who never logs in keeps
+// Nothing here touches the session path. A user who never logs in keeps
 // using session codes exactly as before.
 
 import 'dart:async';
@@ -27,7 +27,7 @@ const rhrClientId = String.fromEnvironment(
   defaultValue: 'client_01M20J8AWHXDECB250NDEB8YYJ',
 );
 
-/// What the CLI shows the developer while it waits for them to approve.
+/// What the CLI shows the user while it waits for them to approve.
 class DeviceCodePrompt {
   const DeviceCodePrompt({
     required this.deviceCode,
@@ -40,7 +40,7 @@ class DeviceCodePrompt {
 
   final String deviceCode;
 
-  /// Short, human-transcribable code (`ABCD-EFGH`) the developer types in.
+  /// Short, human-transcribable code (`ABCD-EFGH`) the user types in.
   final String userCode;
   final String verificationUri;
 
@@ -52,7 +52,7 @@ class DeviceCodePrompt {
   final Duration interval;
 }
 
-/// A signed-in developer's credentials.
+/// A signed-in user's credentials.
 class AccountSession {
   const AccountSession({
     required this.accessToken,
@@ -67,7 +67,7 @@ class AccountSession {
   final String userId;
   final String email;
 
-  /// Which identity provider signed this developer in, when the service says.
+  /// Which identity provider signed this user in, when the service says.
   ///
   /// Recorded from the start because the same person arriving once through
   /// Google and once through GitHub is the case that decides whether they get
@@ -100,7 +100,7 @@ class AccountSession {
   }
 }
 
-/// Raised when sign-in cannot proceed: the developer declined, the code
+/// Raised when sign-in cannot proceed: the user declined, the code
 /// expired, or the service said no.
 class AuthFailure implements Exception {
   const AuthFailure(this.message);
@@ -111,7 +111,7 @@ class AuthFailure implements Exception {
   String toString() => message;
 }
 
-/// Asks the service for a code the developer can approve in a browser.
+/// Asks the service for a code the user can approve in a browser.
 Future<DeviceCodePrompt> requestDeviceCode({HttpClient? client}) async {
   final http = client ?? HttpClient();
   try {
@@ -139,7 +139,7 @@ Future<DeviceCodePrompt> requestDeviceCode({HttpClient? client}) async {
   }
 }
 
-/// Polls until the developer approves in their browser, or the attempt ends.
+/// Polls until the user approves in their browser, or the attempt ends.
 ///
 /// `authorization_pending` is the normal answer while they are still typing;
 /// `slow_down` means back off, and RFC 8628 says by five seconds. Everything
@@ -343,7 +343,7 @@ File accountSessionFile() {
 
 /// Stores the session readable only by its owner.
 ///
-/// The token authorises this developer's devices, so it deserves the same care
+/// The token authorises this user's devices, so it deserves the same care
 /// as an SSH key: on a shared machine the default umask would otherwise leave
 /// it world-readable.
 Future<void> saveAccountSession(AccountSession session) async {
@@ -363,7 +363,7 @@ Future<AccountSession?> loadAccountSession() async {
     if (json is! Map<String, Object?>) return null;
     return AccountSession.fromJson(json);
   } on FormatException {
-    // A truncated or hand-edited file should send the developer back through
+    // A truncated or hand-edited file should send the user back through
     // sign-in rather than crash the command they actually ran.
     return null;
   }

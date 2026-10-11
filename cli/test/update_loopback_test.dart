@@ -6,7 +6,7 @@
 // FakeUpdater — the same one fake_device.dart installs — so a change to
 // either side that breaks the protocol fails here rather than on hardware.
 //
-// What it is really guarding is the progress the tester reads. That number
+// What it is really guarding is the progress the phone shows. That number
 // was wrong for as long as the feature existed: the sender counted gzipped
 // wire bytes against the uncompressed APK size, so a finished transfer
 // reported 55% and the phone's bar stopped there, through the install and
@@ -83,7 +83,7 @@ void main() {
 
   // Shaped like an APK: native libraries are STORED so Android can mmap
   // them and gzip gets nowhere on them, while the rest compresses well. The
-  // mix lands near half, which is where the tester's 54% came from. A
+  // mix lands near half, which is where the phone's 54% came from. A
   // payload that compressed to nothing would pass this file's assertions
   // without ever exercising the mismatch they exist to catch.
   final apkBytes = () {
@@ -150,7 +150,7 @@ void main() {
       last.done,
       last.total,
       reason:
-          'the tester reads ${(last.done * 100 / last.total).round()}% '
+          'the phone shows ${(last.done * 100 / last.total).round()}% '
           'for a transfer that has finished',
     );
 
@@ -193,7 +193,7 @@ void main() {
       target: 'dev.rhrtest.native_skew',
     );
     // kind=app waits past pending_user for the terminal "installed" — the
-    // tester's tap on Android's sheet.
+    // user's tap on Android's sheet.
     expect(result.outcome, PlayerUpdateOutcome.installed);
     expect(
       result.transport.progress.last.done,

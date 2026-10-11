@@ -1,10 +1,10 @@
 // "Am I running the current player?" — asked from the phone, answered
 // without a computer.
 //
-// A tester holds the phone and the developer holds the terminal, so the two
-// people who need this answer are not in the same place. Until now nobody
-// could get it: every release reported `versionName=0.1.0`, so beta.6, .7
-// and .8 were indistinguishable on the device. The release workflow stamps
+// The phone is often on a desk or in a hand far from the terminal, so the
+// answer has to come from the phone itself. Until now nobody could get it:
+// every release reported `versionName=0.1.0`, so beta.6, .7 and .8 were
+// indistinguishable on the device. The release workflow stamps
 // the real version in now, and this compares it with what GitHub has.
 //
 // Deliberately small. It reads a version and opens a URL; it does not
@@ -42,7 +42,7 @@ final class UpdateAvailable extends UpdateStatus {
   final String latest;
 }
 
-/// The check could not be completed. [reason] is for the tester, not a log.
+/// The check could not be completed. [reason] is for the user, not a log.
 final class UpdateCheckFailed extends UpdateStatus {
   const UpdateCheckFailed(this.reason);
 
@@ -100,7 +100,7 @@ UpdateStatus compareVersions({
 
 /// Strips a leading `v` and surrounding whitespace.
 ///
-/// Equality is the comparison, not ordering. A tester whose build differs
+/// Equality is the comparison, not ordering. A phone whose build differs
 /// from the release should look at the release either way, and guessing
 /// which of `0.1.0-beta.8` and `0.1.0` is "newer" invites being confidently
 /// wrong about a locally built player.
