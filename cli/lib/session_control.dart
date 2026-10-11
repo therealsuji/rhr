@@ -119,6 +119,45 @@ SessionEndpoints? readSessionEndpoints(String project) {
   return null;
 }
 
+/// The pairing info of the session running for [project], from the
+/// `connection.json` that `rhr run` and `rhr attach` write next to the
+/// control file: the session code, the tap link and the deep link, the
+/// relays, and `qrPayload`, the data encoded by the terminal QR. Null when
+/// no session has written one.
+typedef ConnectionInfo = ({
+  String code,
+  String url,
+  String deepLink,
+  List<String> relays,
+  String qrPayload,
+});
+
+ConnectionInfo? readConnectionInfo(String project) {
+  try {
+    final saved = jsonDecode(
+      File('$project/.dart_tool/rhr/connection.json').readAsStringSync(),
+    );
+    if (saved case {
+      'code': final String code,
+      'url': final String url,
+      'deepLink': final String deepLink,
+      'relays': final List<Object?> relays,
+      'qrPayload': final String qrPayload,
+    }) {
+      return (
+        code: code,
+        url: url,
+        deepLink: deepLink,
+        relays: relays.whereType<String>().toList(),
+        qrPayload: qrPayload,
+      );
+    }
+  } on Object {
+    // No session, or one mid-write.
+  }
+  return null;
+}
+
 /// The project whose rhr session an MCP client in [start] means: [start]
 /// or the nearest folder above it with a running session, else the one
 /// project below it (a few levels down, as in a monorepo) that has one.

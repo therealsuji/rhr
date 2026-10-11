@@ -99,16 +99,24 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
   static final _statusTool = Tool(
     name: 'status',
     description:
-        'What rhr can reach on the phone right now: the session, device '
-        'control (RHR Agent), native logs, and the Dart VM.',
+        'What rhr can reach on the phone right now: the session, its connect '
+        'info for pairing a phone, device control (RHR Agent), native logs, '
+        'and the Dart VM.',
     inputSchema: Schema.object(),
   );
 
   Future<CallToolResult> _status(CallToolRequest request) => _run(() async {
+    final project = _project();
     final session = await _current();
     final lines = <String>[
       'session: running (${session.endpoints.vm})',
       if (session.endpoints.app case final app?) 'app package: $app',
+      if (readConnectionInfo(project) case final connect?) ...[
+        'connect code: ${connect.code} (type into the RHR player)',
+        'connect url: ${connect.url} (open on the phone)',
+        'connect qrPayload: ${connect.qrPayload} '
+            '(the data the terminal QR encodes)',
+      ],
     ];
     try {
       final info = await (await session.device()).request('info');

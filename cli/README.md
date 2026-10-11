@@ -83,7 +83,8 @@ Agents can read `.dart_tool/rhr/connection.json` in the Flutter project. Share
 its `url` as a Markdown link and include `code` as a fallback. `deepLink` is the
 direct `rhr://connect` URL for clients that permit custom schemes. `qrPayload`
 contains the data encoded by the terminal QR. Treat this file as session access
-information and do not commit it.
+information and do not commit it. The `status` tool of `rhr mcp` reports the
+same fields, so an agent does not have to find the file.
 
 The HTTPS connection page is `/connect` on `getrhr.dev`. It reads the session
 from the URL fragment in the browser and passes it to RHR; it does not send that

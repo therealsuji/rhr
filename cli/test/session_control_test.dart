@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:rhr_cli/session_control.dart';
@@ -54,6 +55,32 @@ void main() {
     final answer = await sendSessionCommand(project.path, 'release');
     expect(served, isFalse);
     expect(answer?.ok, isFalse);
+  });
+
+  test('readConnectionInfo reads the pairing file, or nothing', () {
+    expect(readConnectionInfo(project.path), isNull);
+    File('${project.path}/.dart_tool/rhr/connection.json')
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        jsonEncode({
+          'code': 'rhr-abcd-efgh-ijkl',
+          'url':
+              'https://getrhr.dev/connect#rhr%3A%2F%2Fconnect%3Fcode%3Drhr-abcd-efgh-ijkl',
+          'deepLink': 'rhr://connect?code=rhr-abcd-efgh-ijkl',
+          'relays': ['ws://192.168.1.12:39857', 'wss://getrhr.dev'],
+          'qrPayload':
+              '{"code":"rhr-abcd-efgh-ijkl","relays":["ws://192.168.1.12:39857","wss://getrhr.dev"]}',
+        }),
+      );
+    final info = readConnectionInfo(project.path);
+    expect(info?.code, 'rhr-abcd-efgh-ijkl');
+    expect(info?.url, startsWith('https://getrhr.dev/connect#'));
+    expect(info?.deepLink, startsWith('rhr://connect?'));
+    expect(info?.relays, ['ws://192.168.1.12:39857', 'wss://getrhr.dev']);
+    expect(
+      info?.qrPayload,
+      '{"code":"rhr-abcd-efgh-ijkl","relays":["ws://192.168.1.12:39857","wss://getrhr.dev"]}',
+    );
   });
 
   test('findSessionProject finds the session above, or the one below', () {
