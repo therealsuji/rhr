@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext stays permitted, deliberately. The player hosts the developer's
+     own app, and that app may talk to an http:// backend on the developer's
+     LAN through platform stacks (WebView, native plugins); refusing cleartext
+     here would break those apps, not just RHR.
+
+     RHR's own traffic does not rely on this policy: relays must be wss (or ws
+     on loopback), enforced in code by RelayDial.allowed and the session link
+     parser, and the account service is https. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

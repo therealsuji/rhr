@@ -2,9 +2,6 @@ package dev.rhr.rhr_player
 
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -20,7 +17,7 @@ class MainActivity : FlutterActivity() {
 	private lateinit var connector: MethodChannel
 
 
-	/** Debug-only adb entry point for the QA faults; null on a release build. */
+	/** adb entry point for the QA faults; null unless the build opted in. */
 	private var debugFaultReceiver: DebugFaultReceiver? = null
 
 	companion object {
@@ -61,22 +58,15 @@ class MainActivity : FlutterActivity() {
 	 * there, every fault injected before the first connection reached
 	 * nothing, while `am broadcast` still reported success.
 	 *
-	 * In code rather than the manifest so a release build has nothing to
-	 * export, and gated on the host's debuggable flag.
+	 * In code rather than the manifest so a published player has nothing to
+	 * export; [AdbReceivers] decides whether this build may register it.
 	 */
 	private fun registerDebugFaultReceiver() {
-		if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
 		if (debugFaultReceiver != null) return
 		val receiver = DebugFaultReceiver()
-		val filter = IntentFilter(DebugFaultReceiver.ACTION)
-		if (Build.VERSION.SDK_INT >= 33) {
-			// An adb broadcast comes from outside this app, so the receiver
-			// must be exported — which is why it is debug-only.
-			registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-		} else {
-			registerReceiver(receiver, filter)
+		if (AdbReceivers.register(this, receiver, DebugFaultReceiver.ACTION)) {
+			debugFaultReceiver = receiver
 		}
-		debugFaultReceiver = receiver
 	}
 
 	override fun provideFlutterEngine(context: Context): FlutterEngine? = sessionEngine
@@ -204,6 +194,7 @@ class MainActivity : FlutterActivity() {
 								.putExtra("cmd", "start")
 								.putExtra("relayUrl", call.argument<String>("relayUrl"))
 								.putStringArrayListExtra("relayUrls", ArrayList(relayUrls))
+								.putExtra("relayPin", call.argument<String>("relayPin"))
 								.putExtra("code", call.argument<String>("code"))
 								.putExtra("vmUri", call.argument<String>("vmUri"))
 								.putExtra("preferDirect", call.argument<Boolean>("preferDirect") ?: true))
@@ -283,12 +274,6 @@ class MainActivity : FlutterActivity() {
 			flutterEngine.dartExecutor.binaryMessenger, "rhr/connector")
 		connector.setMethodCallHandler { call, result ->
 			when (call.method) {
-				// The shake-to-open bubble needs "Display over other apps" to
-				// draw above the user's own app. There is no runtime prompt
-				// for it — only a settings screen the user has to visit.
-				// Who this installation is, for joining an account. The secret
-				// deliberately stays native: Dart is replaced wholesale by a guest
-				// hot restart, so anything a guest could read is not a secret.
 				// An invitation that arrived as a link rather than a QR, if this
 				// launch carried one. Consumed once: a relaunch must not
 				// re-offer a join the user already answered.
@@ -300,17 +285,24 @@ class MainActivity : FlutterActivity() {
 					result.success(pendingSessionLink)
 					pendingSessionLink = null
 				}
+				// Who this installation is. Public: it names the phone's
+				// rendezvous and appears in device listings.
 				"installationId" -> result.success(InstallationIdentity.id(this))
-				// Proves this installation is itself. The id alone is public —
-				// it appears in device listings — so anything that acts on a
-				// membership has to carry this too.
-				"installationSecret" -> result.success(
-					InstallationIdentity.secret(this))
-				// What the user will see this phone called in their device
-				// list. A starting point the account owner can rename, not an
-				// identifier — the installation id is what identifies it.
-				"deviceLabel" -> result.success(
-					"${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
+				// The account service this build trusts, so the lobby can tell
+				// the user when an invite was made for a different one.
+				"accountService" -> result.success(RhrConfig.accountService(this))
+				// Invites are read and redeemed here rather than in Dart. The
+				// join carries the installation secret, and Dart is replaced
+				// wholesale by a guest hot restart, so no Dart code ever sees it.
+				"previewInvite" -> accountCall(result) {
+					AccountClient.previewInvite(this, call.argument<String>("invite").orEmpty())
+				}
+				"joinAccount" -> accountCall(result) {
+					AccountClient.join(this, call.argument<String>("invite").orEmpty())
+				}
+				// The shake-to-open bubble needs "Display over other apps" to
+				// draw above the user's own app. There is no runtime prompt
+				// for it — only a settings screen the user has to visit.
 				"overlayGranted" -> result.success(SystemOverlayHost.granted(this))
 				"requestOverlay" -> {
 					startActivity(SystemOverlayHost.permissionIntent(this))
@@ -319,5 +311,20 @@ class MainActivity : FlutterActivity() {
 				else -> result.notImplemented()
 			}
 		}
+	}
+
+	/** Runs a blocking account request off the main thread, answering on it. */
+	private fun accountCall(
+		result: MethodChannel.Result,
+		request: () -> AccountClient.Outcome,
+	) {
+		Thread {
+			val answer = when (val outcome = request()) {
+				is AccountClient.Outcome.Ok -> outcome.body.toString()
+				is AccountClient.Outcome.Refused ->
+					org.json.JSONObject().put("error", outcome.reason).toString()
+			}
+			main.post { result.success(answer) }
+		}.start()
 	}
 }

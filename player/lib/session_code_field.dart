@@ -31,49 +31,41 @@ class SessionCodeEntry {
     required this.code,
     this.relay,
     this.fallbackRelays = const [],
+    this.pin,
   });
 
   final String code;
   final String? relay;
   final List<String> fallbackRelays;
+
+  /// Certificate pin for relays addressed by IP (see SessionConnection).
+  final String? pin;
 }
 
 /// An invitation to join an account, scanned from `rhr invite`.
 ///
 /// Distinct from a session code: a code starts one session, while this joins
-/// the phone to an account for good. The payload names the service so the
-/// phone redeems over HTTPS with the account service rather than through the
-/// relay, which does not authenticate its peers.
+/// the phone to an account for good. The phone redeems it with the account
+/// service its own build names; [service] only lets it tell the tester when
+/// the invite was made for a different one. Whose account it is comes from
+/// the service, not from the QR (see previewInvite).
 class AccountInvite {
-  const AccountInvite({
-    required this.token,
-    required this.service,
-    required this.account,
-  });
+  const AccountInvite({required this.token, required this.service});
 
   final String token;
   final String service;
-
-  /// Whose account this is, for the consent screen. A display name only.
-  final String account;
 }
 
 /// Reads a join invitation, or null when the QR is something else.
 AccountInvite? parseAccountInvite(String raw) {
   try {
     final map = jsonDecode(raw.trim()) as Map<String, dynamic>;
-    if (map['v'] != 1) return null;
+    if (map['v'] != 2) return null;
     final token = map['join'];
     final service = map['service'];
     if (token is! String || service is! String) return null;
-    // Only https: an invitation is a durable credential, and the plaintext
-    // LAN relay this tool also speaks would expose it to the network.
     if (!service.startsWith('https://')) return null;
-    return AccountInvite(
-      token: token,
-      service: service,
-      account: map['account'] is String ? map['account'] as String : '',
-    );
+    return AccountInvite(token: token, service: service);
   } on FormatException {
     return null;
   } on TypeError {
@@ -81,8 +73,9 @@ AccountInvite? parseAccountInvite(String raw) {
   }
 }
 
-/// Parses what a QR carries: either the structured payload the CLI prints
-/// (`{"code":..,"relay":..,"relays":[..]}`) or a bare code string.
+/// Parses what a QR carries: the session link the CLI prints, or a bare code
+/// string. A link names its relays, so it goes through the link parser and its
+/// relay checks; a bare code leaves the relay alone.
 SessionCodeEntry parseSessionPayload(String raw) {
   final trimmed = raw.trim();
   if (trimmed.startsWith('rhr:') ||
@@ -92,31 +85,10 @@ SessionCodeEntry parseSessionPayload(String raw) {
       code: link.code,
       relay: link.relays.first,
       fallbackRelays: link.relays.skip(1).toList(growable: false),
+      pin: link.pin,
     );
   }
-  try {
-    final map = jsonDecode(trimmed) as Map<String, dynamic>;
-    final code = map['code'] is String ? map['code'] as String : trimmed;
-    if (map['relays'] case final List relays) {
-      final parsed = relays.whereType<String>().toList(growable: false);
-      if (parsed.isNotEmpty) {
-        return SessionCodeEntry(
-          code: code,
-          relay: parsed.first,
-          fallbackRelays: parsed.skip(1).toList(growable: false),
-        );
-      }
-    }
-    if (map['relay'] case final String relay) {
-      return SessionCodeEntry(code: code, relay: relay);
-    }
-    return SessionCodeEntry(code: code);
-  } on FormatException {
-    return SessionCodeEntry(code: trimmed);
-  } on TypeError {
-    // Valid JSON that isn't an object — a bare quoted string, say.
-    return SessionCodeEntry(code: trimmed);
-  }
+  return SessionCodeEntry(code: trimmed);
 }
 
 /// Normalises anything a user can put in the field into `rhr-xxxx-xxxx-xxxx`.
@@ -231,6 +203,7 @@ class SessionCodeField extends StatelessWidget {
         code: controller.text,
         relay: entry.relay,
         fallbackRelays: entry.fallbackRelays,
+        pin: entry.pin,
       ),
     );
   }

@@ -17,8 +17,11 @@ import android.util.Log
  * one ends up somewhere it cannot describe. The first recorded QA flow failed
  * that way on a cold run, which is what this exists to stop.
  *
- * Debug builds only. It is registered from [RhrSessionService.onCreate], not
- * the manifest, so a release build has no receiver to export and no way in.
+ * Never in the manifest. The host registers it at runtime, and only in a
+ * build that opted into fault injection: the player's MainActivity does so
+ * through AdbReceivers, which also requires the sender to hold DUMP so only
+ * adb's shell can reach it. A debuggable flag is no gate, because the
+ * published player is itself a debug build.
  */
 class DebugFaultReceiver : BroadcastReceiver() {
 	override fun onReceive(context: Context, intent: Intent) {

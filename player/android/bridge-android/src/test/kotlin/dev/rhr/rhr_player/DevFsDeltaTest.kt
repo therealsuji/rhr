@@ -2,6 +2,7 @@ package dev.rhr.rhr_player
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -54,5 +55,35 @@ class DevFsDeltaTest {
 				store.deleteRecursively()
 			}
 		}
+	}
+
+	/** A small gzip that inflates past the limit is refused, not written out. */
+	@Test(expected = DevFsDelta.TooLarge::class)
+	fun rebuildStopsAtTheLimit() {
+		val content = ByteArray(1024 * 1024)
+		val body = gzip(content)
+		val head = DevFsDelta.Head(
+			"PUT / HTTP/1.1",
+			mapOf(DevFsDelta.CONTENT_SHA to sha(content), "content-length" to "${body.size}"),
+			0,
+		)
+		val store = Files.createTempDirectory("rhr-bases").toFile()
+		try {
+			DevFsDelta.rebuild(store, head, body, limit = 64 * 1024)
+		} finally {
+			assertEquals("nothing left behind", 0, store.listFiles()?.size ?: 0)
+			store.deleteRecursively()
+		}
+	}
+
+	@Test
+	fun projectNamesAreSinglePlainSegments() {
+		assertEquals("my-app", DevFsDelta.projectName("my-appQVGOIA"))
+		assertNull(DevFsDelta.projectName("..QVGOIA"))
+		assertNull(DevFsDelta.projectName(".QVGOIA"))
+		assertNull(DevFsDelta.projectName("a/bQVGOIA"))
+		assertNull(DevFsDelta.projectName("a\\bQVGOIA"))
+		assertNull(DevFsDelta.projectName("flutter_toolQVGOIA"))
+		assertNull(DevFsDelta.projectName("my-appqvgoia"))
 	}
 }

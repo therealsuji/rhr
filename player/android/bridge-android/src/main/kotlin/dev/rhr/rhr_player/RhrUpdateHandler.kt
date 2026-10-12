@@ -14,4 +14,7 @@ interface RhrUpdateHandler {
 	fun handleBegin(message: JSONObject)
 	fun handleCommit(message: JSONObject)
 	fun handleData(frame: ByteArray)
+
+	/** Ends any transfer or install question in flight, reporting [reason]. */
+	fun cancel(reason: String)
 }

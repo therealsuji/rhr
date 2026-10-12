@@ -254,13 +254,24 @@ internal class RhrDirectTransport(
 				}
 			}
 			override fun onMessage(buffer: DataChannel.Buffer) {
+				// A failed transport serves nothing more, even while the peer
+				// keeps sending.
+				if (state == State.FAILED || state == State.CLOSED) return
 				if (!buffer.binary) {
 					fail("data channel returned a non-binary message")
 					return
 				}
 				val bytes = ByteArray(buffer.data.remaining())
 				buffer.data.get(bytes)
-				onFrame(bytes)
+				// This runs inside a JNI callback on WebRTC's own thread. An
+				// exception escaping it does not reach any handler of ours; it
+				// takes down the process. Whatever the frame did, end the
+				// transport instead.
+				try {
+					onFrame(bytes)
+				} catch (e: Exception) {
+					fail("tunnel frame failed: ${e.javaClass.simpleName}")
+				}
 			}
 		})
 	}

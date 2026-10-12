@@ -31,6 +31,15 @@ internal object DevFsDelta {
 	// Both hashes name files in the store, and they arrive off the tunnel:
 	// anything but a SHA-256 in hex could reach outside it ("../").
 	private val SHA256_HEX = Regex("^[0-9a-f]{64}$")
+	// The largest file a rebuild may produce. Only whole programs come this
+	// way (a restart's .dill, kernel_blob.bin), tens of megabytes; the body is
+	// gzip and the delta can repeat its base, so a few kilobytes off the wire
+	// could otherwise fill the disk.
+	const val MAX_REBUILT_BYTES = 512L * 1024 * 1024
+
+	/** A rebuild that would pass its limit. Not a missing base, so it is not
+	 *  answered with a 409: a whole-file resend would be refused the same way. */
+	class TooLarge(limit: Long) : java.io.IOException("rebuilt DevFS file exceeds $limit bytes")
 
 	/** The request head, once the bytes so far hold all of it. */
 	class Head(val requestLine: String, val headers: Map<String, String>, val bodyStart: Int) {
@@ -60,7 +69,12 @@ internal object DevFsDelta {
 	 *  the whole file. */
 	class Forward(val head: ByteArray, val body: File?, val inlineBody: ByteArray?)
 
-	fun rebuild(storeDir: File, head: Head, body: ByteArray): Forward? {
+	fun rebuild(
+		storeDir: File,
+		head: Head,
+		body: ByteArray,
+		limit: Long = MAX_REBUILT_BYTES,
+	): Forward? {
 		val sha = head.headers[CONTENT_SHA]?.takeIf { SHA256_HEX.matches(it) } ?: return null
 		val baseSha = head.headers[DELTA_BASE]
 		if (baseSha != null && !SHA256_HEX.matches(baseSha)) return null
@@ -71,7 +85,7 @@ internal object DevFsDelta {
 		val digest = MessageDigest.getInstance("SHA-256")
 		try {
 			part.outputStream().buffered().use { out ->
-				val sink = DigestingStream(out, digest)
+				val sink = DigestingStream(out, digest, limit)
 				if (baseSha == null) {
 					GZIPInputStream(body.inputStream()).use { it.copyTo(sink) }
 				} else {
@@ -99,11 +113,33 @@ internal object DevFsDelta {
 				throw e
 			}
 			return Forward(vmHead(head, gz.length()), gz, null)
+		} catch (e: TooLarge) {
+			throw e
 		} catch (_: Exception) {
 			return null
 		} finally {
 			part.delete()
 		}
+	}
+
+	/**
+	 * The project a DevFS directory belongs to, or null when [dirName] is not
+	 * one. They look like `<project><6 UPPERCASE letters>`, e.g. my-appQVGOIA.
+	 *
+	 * The project part comes from the developer (Flutter's fsName) and becomes
+	 * a path segment under filesDir and inside the DevFS directory, so a name
+	 * that is not a single plain segment ("..", anything with a separator) is
+	 * refused rather than allowed to point somewhere else.
+	 */
+	fun projectName(dirName: String): String? {
+		if (dirName.length <= 6) return null
+		val suffix = dirName.takeLast(6)
+		if (!suffix.all { it in 'A'..'Z' }) return null
+		val project = dirName.dropLast(6)
+		if (project.startsWith("flutter")) return null // engine's own dirs
+		if (project == "." || project == ".." || '/' in project || '\\' in project ||
+			'\u0000' in project) return null
+		return project
 	}
 
 	/** The response that makes the CLI resend the whole file. */
@@ -172,15 +208,19 @@ internal object DevFsDelta {
 		}
 	}
 
+	/** Hashes what is written, and refuses to write past [limit] bytes. */
 	private class DigestingStream(
 		private val out: OutputStream,
 		private val digest: MessageDigest,
+		private val limit: Long,
 	) : OutputStream() {
-		override fun write(b: Int) {
-			digest.update(b.toByte())
-			out.write(b)
-		}
+		private var written = 0L
+
+		override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
 		override fun write(b: ByteArray, off: Int, len: Int) {
+			if (written + len > limit) throw TooLarge(limit)
+			written += len
 			digest.update(b, off, len)
 			out.write(b, off, len)
 		}

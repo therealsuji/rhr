@@ -120,30 +120,26 @@ void main() {
   });
 
   group('parseSessionPayload', () {
-    test('reads a session deep link', () {
+    test('reads a session deep link with its pin', () {
       final entry = parseSessionPayload(
-        'rhr://connect?code=rhr-abcd-efgh-jkmn&relay=wss%3A%2F%2Fone.example&relay=ws%3A%2F%2F192.168.1.5%3A8123',
+        'rhr://connect?code=rhr-abcd-efgh-jkmn&relay=wss%3A%2F%2Fone.example'
+        '&relay=wss%3A%2F%2F192.168.1.5%3A8123'
+        '&pin=n4bQgYhMfWWaL-qgxVrQFaO_TxsrC4Is0V1sFbDwCgg',
       );
       expect(entry.code, 'rhr-abcd-efgh-jkmn');
       expect(entry.relay, 'wss://one.example');
-      expect(entry.fallbackRelays, ['ws://192.168.1.5:8123']);
-    });
-    test('reads a code and its relay list', () {
-      final entry = parseSessionPayload(
-        '{"code":"rhr-abcd-efgh-jkmn",'
-        '"relays":["wss://one.example","wss://two.example"]}',
-      );
-      expect(entry.code, 'rhr-abcd-efgh-jkmn');
-      expect(entry.relay, 'wss://one.example');
-      expect(entry.fallbackRelays, ['wss://two.example']);
+      expect(entry.fallbackRelays, ['wss://192.168.1.5:8123']);
+      expect(entry.pin, 'n4bQgYhMfWWaL-qgxVrQFaO_TxsrC4Is0V1sFbDwCgg');
     });
 
-    test('accepts the single-relay form', () {
-      final entry = parseSessionPayload(
-        '{"code":"rhr-abcd-efgh-jkmn","relay":"wss://one.example"}',
+    test('refuses a link to a plaintext relay on the network', () {
+      expect(
+        () => parseSessionPayload(
+          'rhr://connect?code=rhr-abcd-efgh-jkmn'
+          '&relay=ws%3A%2F%2F192.168.1.5%3A8123',
+        ),
+        throwsFormatException,
       );
-      expect(entry.relay, 'wss://one.example');
-      expect(entry.fallbackRelays, isEmpty);
     });
 
     test('falls back to a bare code, leaving the relay alone', () {

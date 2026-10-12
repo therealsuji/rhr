@@ -12,6 +12,9 @@ import java.security.MessageDigest
 
 /** Phone setup and target inspection do not require a running target VM. */
 object RunPreparation {
+	/** A valid Android package name: dot-separated Java identifiers, two or more. */
+	val ANDROID_PACKAGE = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+")
+
 	@Volatile var setupAction = ""
 		private set
 	@Volatile var setupMessage = ""
@@ -105,7 +108,7 @@ object RunPreparation {
 
 	private fun packageName(request: JSONObject): String {
 		val pkg = request.getString("package")
-		require(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+").matches(pkg)) {
+		require(ANDROID_PACKAGE.matches(pkg)) {
 			"Invalid Android package name."
 		}
 		return pkg

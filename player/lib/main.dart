@@ -19,6 +19,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/relay_defaults.dart';
+import 'package:rhr_bridge/session_link.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:package_info_plus/package_info_plus.dart';
@@ -119,6 +120,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   String _relay = _relayUrl;
   List<String> _fallbackRelays = const [];
 
+  /// Certificate pin for the developer's LAN relay, from the scanned link.
+  String? _relayPin;
+
   @override
   void initState() {
     super.initState();
@@ -129,7 +133,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         return;
       }
       final saved = prefs.getString('rhr_session_code');
-      final savedRelays = prefs.getStringList('rhr_relay_urls');
+      // Relays saved by an older release may be plaintext ones this build no
+      // longer accepts; resuming onto them would expose the code.
+      final savedRelays = prefs
+          .getStringList('rhr_relay_urls')
+          ?.where((relay) => isAllowedRelay(Uri.parse(relay)))
+          .toList(growable: false);
+      final savedPin = prefs.getString('rhr_relay_pin');
       final autoResume = prefs.getBool('rhr_auto_resume') ?? true;
       if (saved != null && _code.text.isEmpty) {
         setState(() {
@@ -137,6 +147,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           if (savedRelays != null && savedRelays.isNotEmpty) {
             _relay = savedRelays.first;
             _fallbackRelays = savedRelays.skip(1).toList(growable: false);
+            _relayPin = savedPin;
           }
         });
         // Auto-resume: Android reaps backgrounded players (memory pressure,
@@ -336,30 +347,39 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     final relays = [entry.relay, ...entry.fallbackRelays];
     final sameSession =
+        _active &&
         _code.text == entry.code &&
         listEquals([_relay, ..._fallbackRelays], relays);
-    if (_active && !sameSession) {
-      final change = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Switch sessions?'),
-          content: const Text(
-            'Disconnect from the current session and connect to this link?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Stay here'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Switch'),
-            ),
-          ],
+    if (sameSession) return;
+    // A link can arrive from any web page or chat, so it never connects on
+    // its own: whoever made it gets to run code in RHR on this phone. Name
+    // where it leads so the user can tell a stranger's link from their own.
+    final hosts = {
+      for (final relay in relays) Uri.parse(relay!).host,
+    }.join(', ');
+    final connect = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_active ? 'Switch sessions?' : 'Connect to this computer?'),
+        content: Text(
+          '${_active ? 'Disconnect from the current session and connect ' : 'Connect '}'
+          'through $hosts? The computer that made this link will be able to '
+          'run apps, and their code, in RHR on this phone. Only continue if '
+          'you started it.',
         ),
-      );
-      if (change != true || !mounted) return;
-    }
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_active ? 'Stay here' : 'Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_active ? 'Switch' : 'Connect'),
+          ),
+        ],
+      ),
+    );
+    if (connect != true || !mounted) return;
     _code.text = entry.code;
     await _onScanned(entry);
   }
@@ -376,7 +396,15 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     if (accounts.isEmpty || !mounted) return;
     final rendezvous = await ownRendezvous();
     if (rendezvous == null || !mounted) return;
-    setState(() => _code.text = rendezvous);
+    // The rendezvous lives on the account service, and only there does the
+    // phone prove itself with its installation secret; a relay left over
+    // from an earlier session link must not be where it waits.
+    setState(() {
+      _code.text = rendezvous;
+      _relay = _relayUrl;
+      _fallbackRelays = const [];
+      _relayPin = null;
+    });
     await _connect(auto: true);
     if (!mounted) return;
     setState(() {
@@ -392,6 +420,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// phone to an account: the sheet names whose account it is and what
   /// joining allows, and does nothing until the user accepts.
   Future<void> _onInvite(AccountInvite invite) async {
+    final preview = await previewInvite(invite);
+    if (!mounted) return;
+    final account = preview.account;
+    if (account == null) {
+      setState(() => _status = preview.error);
+      return;
+    }
+    final service = Uri.parse(invite.service).host;
     final accepted = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: _surface,
@@ -407,9 +443,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                invite.account.isEmpty
-                    ? 'Join this account?'
-                    : 'Join ${invite.account}?',
+                account.isEmpty ? 'Join this account?' : 'Join $account?',
                 style: const TextStyle(
                   color: _ink,
                   fontSize: 19,
@@ -420,10 +454,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
               // Two facts decide this: what joining allows, and that it is
               // reversible. Everything else was reassurance the user has to
               // read before they can answer.
-              const Text(
+              Text(
                 'Your computer can connect to this phone to run your app. '
-                'Leave any time.',
-                style: TextStyle(color: _inkDim, fontSize: 13.5, height: 1.4),
+                'Leave any time.\nAccount verified by $service.',
+                style: const TextStyle(
+                  color: _inkDim,
+                  fontSize: 13.5,
+                  height: 1.4,
+                ),
               ),
               const SizedBox(height: 20),
               Row(
@@ -472,6 +510,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       if (entry.relay != null) {
         _relay = entry.relay!;
         _fallbackRelays = entry.fallbackRelays;
+        _relayPin = entry.pin;
       }
     });
     await _connect();
@@ -484,12 +523,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('rhr_session_code');
     await prefs.remove('rhr_relay_urls');
+    await prefs.remove('rhr_relay_pin');
     if (!mounted) return;
     setState(() {
       _active = false;
       _code.clear();
       _relay = _relayUrl;
       _fallbackRelays = const [];
+      _relayPin = null;
       _status = 'Disconnected. Scan a QR or enter a code to connect.';
     });
   }
@@ -499,7 +540,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     // A rendezvous is a session name too, just not a typed one: it is derived
     // from the installation identity and never looks like `rhr-xxxx-…`.
     // Validating it as a code rejected the account path outright.
-    if (!isValidRhrSessionCode(code) && !isRendezvousName(code)) {
+    if (!isValidRhrSessionCode(code) &&
+        rhrRendezvousInstallation(code) == null) {
       if (!auto) {
         setState(
           () => _status =
@@ -512,6 +554,12 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('rhr_session_code', code);
     await prefs.setStringList('rhr_relay_urls', [_relay, ..._fallbackRelays]);
+    final pin = _relayPin;
+    if (pin == null) {
+      await prefs.remove('rhr_relay_pin');
+    } else {
+      await prefs.setString('rhr_relay_pin', pin);
+    }
     if (!kDebugMode) {
       setState(
         () => _status =
@@ -528,6 +576,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     await _session.invokeMethod('start', {
       'relayUrl': _relay,
       'relayUrls': [_relay, ..._fallbackRelays],
+      'relayPin': _relayPin,
       'code': code,
       'vmUri': (vm ?? Uri.parse('http://127.0.0.1:0/')).toString(),
       'preferDirect': _preferDirect,

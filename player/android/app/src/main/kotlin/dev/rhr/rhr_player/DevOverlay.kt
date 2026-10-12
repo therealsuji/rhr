@@ -2,8 +2,6 @@ package dev.rhr.rhr_player
 
 import android.app.Activity
 import android.content.BroadcastReceiver
-import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -263,6 +261,10 @@ class DevOverlay(
 	private var dismissTarget: View? = null
 	private val dismissSize get() = dp(64)
 
+	/** The install question on screen, and the request it answers. */
+	private var consentSheet: View? = null
+	private var consentFor: InstallConsent.Request? = null
+
 	private var menuProgress: TextView? = null
 	private var menuRestart: View? = null
 	private var debugMenuReceiver: BroadcastReceiver? = null
@@ -274,21 +276,26 @@ class DevOverlay(
 		attached = true
 		root = host.createRoot(activity)
 		host.add(root)
-		// Back closes the panel rather than falling through to the app below.
-		host.onBackPressed = { ui.post { closeMenu() } }
+		// Back closes the panel rather than falling through to the app below,
+		// and on the install question it is a no.
+		host.onBackPressed = {
+			ui.post {
+				val asked = consentFor
+				if (asked != null) InstallConsent.answer(asked, allowed = false) else closeMenu()
+			}
+		}
 
-		if (activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
-			val receiver = object : BroadcastReceiver() {
-				override fun onReceive(context: Context, intent: Intent) {
-					if (host.transient || (activity as? Activity)?.hasWindowFocus() == true) {
-						reveal()
-						if (menu == null) toggleMenu()
-					}
+		// Opens the panel from adb, for QA flows that cannot shake a phone.
+		// Only in a fault-injection build, and only from adb's shell.
+		val receiver = object : BroadcastReceiver() {
+			override fun onReceive(context: Context, intent: Intent) {
+				if (host.transient || (activity as? Activity)?.hasWindowFocus() == true) {
+					reveal()
+					if (menu == null) toggleMenu()
 				}
 			}
-			val filter = IntentFilter("dev.rhr.DEBUG_MENU")
-			if (Build.VERSION.SDK_INT >= 33) activity.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-			else activity.registerReceiver(receiver, filter)
+		}
+		if (AdbReceivers.register(activity, receiver, "dev.rhr.DEBUG_MENU")) {
 			debugMenuReceiver = receiver
 		}
 		buildProgressCard()
@@ -732,6 +739,8 @@ class DevOverlay(
 
 	private fun toggleMenu() {
 		if (menu != null) { closeMenu(); return }
+		// The install question stays on top until it is answered.
+		if (consentSheet != null) return
 
 		// Full-screen scrim that closes on tap-outside.
 		val scrim = FrameLayout(activity).apply {
@@ -1059,10 +1068,98 @@ class DevOverlay(
 		armIdleHide(IDLE_AFTER_PANEL_MS)
 	}
 
+	// ---- install question -------------------------------------------------
+
+	/** Shows, replaces or removes the sheet so it matches [InstallConsent.pending]. */
+	private fun renderConsent() {
+		val request = InstallConsent.pending
+		if (request === consentFor) return
+		consentSheet?.let { if (host.transient) host.hideModal(it) else root.removeView(it) }
+		consentSheet = null
+		consentFor = request
+		if (request != null) showConsent(request)
+	}
+
+	/**
+	 * Asks the tester whether the developer may install [request]'s package.
+	 *
+	 * Built like the dev menu, a sheet over a scrim, but it does not close on
+	 * a tap outside: it waits for an answer. Back counts as a no.
+	 */
+	private fun showConsent(request: InstallConsent.Request) {
+		if (menu != null) closeMenu()
+		val scrim = FrameLayout(activity).apply {
+			setBackgroundColor(Color.parseColor("#99000000"))
+			// Swallow taps: outside the sheet is not an answer.
+			setOnClickListener { }
+		}
+		val sheet = LinearLayout(activity).apply {
+			orientation = LinearLayout.VERTICAL
+			background = rounded(surface, dpf(22f))
+			elevation = dpf(16f)
+			setPadding(dp(22), dp(22), dp(22), dp(20))
+			setOnClickListener { }
+		}
+		sheet.addView(TextView(activity).apply {
+			text = "Install an app from the developer?"
+			setTextColor(ink)
+			textSize = 16f
+			typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+		})
+		sheet.addView(TextView(activity).apply {
+			text = "The developer connected to this session wants to install this app on your phone:"
+			setTextColor(inkDim)
+			textSize = 13f
+			setPadding(0, dp(10), 0, 0)
+		})
+		sheet.addView(TextView(activity).apply {
+			text = request.packageName
+			setTextColor(ink)
+			textSize = 14f
+			typeface = Typeface.MONOSPACE
+			background = rounded(surfaceHi, dpf(10f))
+			setPadding(dp(12), dp(10), dp(12), dp(10))
+		}, LinearLayout.LayoutParams(
+			ViewGroup.LayoutParams.MATCH_PARENT,
+			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
+		sheet.addView(TextView(activity).apply {
+			text = "Only allow it if you expected an app from them."
+			setTextColor(inkDim)
+			textSize = 13f
+			setPadding(0, dp(10), 0, 0)
+		})
+		sheet.addView(iconRow("↓", "Install", primary = true) {
+			InstallConsent.answer(request, allowed = true)
+		}, LinearLayout.LayoutParams(
+			ViewGroup.LayoutParams.MATCH_PARENT,
+			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
+		sheet.addView(iconRow("✕", "Don't install", primary = false) {
+			InstallConsent.answer(request, allowed = false)
+		}, LinearLayout.LayoutParams(
+			ViewGroup.LayoutParams.MATCH_PARENT,
+			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+
+		val sheetLp = FrameLayout.LayoutParams(
+			ViewGroup.LayoutParams.MATCH_PARENT,
+			ViewGroup.LayoutParams.WRAP_CONTENT,
+			Gravity.BOTTOM)
+		sheetLp.leftMargin = dp(12); sheetLp.rightMargin = dp(12)
+		sheetLp.bottomMargin = safeBottom() + dp(12)
+		scrim.addView(sheet, sheetLp)
+		if (host.transient) {
+			host.showModal(scrim)
+		} else {
+			root.addView(scrim, FrameLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+		}
+		consentSheet = scrim
+	}
+
 	// ---- render -----------------------------------------------------------
 
 	private fun render() {
 		if (!attached) return
+		renderConsent()
 		// What to say is decided by [SessionBanner], which is pure and unit
 		// tested; this only paints it. The two used to be one `when` block
 		// here and a second, differently-wrong one in the Flutter lobby.
@@ -1082,7 +1179,7 @@ class DevOverlay(
 			text = banner.label
 			visibility = if (banner.isVisible) View.VISIBLE else View.GONE
 		}
-		if (!banner.isVisible || menu != null) {
+		if (!banner.isVisible || menu != null || consentSheet != null) {
 			hideCard()
 			return
 		}

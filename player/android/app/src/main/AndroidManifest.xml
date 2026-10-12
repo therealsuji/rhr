@@ -38,10 +38,17 @@
         <package android:name="dev.rhr.agent"/>
     </queries>
 
+    <!-- Cleartext only to loopback (the VM service); see
+         network_security_config.xml. Nothing is backed up or transferred:
+         the installation secret must never leave this phone, and nothing
+         else here is worth restoring (see data_extraction_rules.xml). -->
     <application
         android:label="RHR Player"
         android:name="${applicationName}"
-        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"

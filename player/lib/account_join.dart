@@ -5,14 +5,14 @@
 // user adds a phone to their own account: they scan an invite from the
 // computer, and nobody types a password on the phone.
 //
-// Redemption goes straight to the account service over HTTPS, never through
-// the relay: the relay does not authenticate its peers, and one of the
-// transports it speaks is a plaintext LAN socket.
+// Redemption goes to the account service baked into this build, over HTTPS
+// and from native code, never through the relay and never to a service an
+// invite names: the join carries the installation secret.
 
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:rhr_bridge/session_code.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'session_code_field.dart';
@@ -34,7 +34,10 @@ class JoinedAccount {
     if (json is! Map) return null;
     final id = json['id'];
     return id is String
-        ? JoinedAccount(id: id, email: json['email'] is String ? json['email'] as String : '')
+        ? JoinedAccount(
+            id: id,
+            email: json['email'] is String ? json['email'] as String : '',
+          )
         : null;
   }
 }
@@ -59,84 +62,76 @@ class JoinRejected extends JoinOutcome {
   final String reason;
 }
 
+/// Whose account [invite] joins, from the account service, or the reason it
+/// cannot be used. Asked before the consent screen so the address a tester
+/// reads comes from the service, not from a QR anyone can print.
+Future<({String? account, String? error})> previewInvite(
+  AccountInvite invite,
+) async {
+  final service = await _connector.invokeMethod<String>('accountService');
+  if (service == null ||
+      Uri.parse(service).origin != Uri.parse(invite.service).origin) {
+    return (
+      account: null,
+      error:
+          'This invite is for a different RHR service '
+          '(${Uri.parse(invite.service).host}).',
+    );
+  }
+  final json = await _call('previewInvite', invite);
+  return switch (json) {
+    {'account': final String account} => (account: account, error: null),
+    {'error': final String error} => (account: null, error: error),
+    _ => (
+      account: null,
+      error: 'The account service sent something unexpected.',
+    ),
+  };
+}
+
 /// Redeems [invite], joining this installation to the account behind it.
+///
+/// The request is made natively: it carries the installation secret, which
+/// Dart never holds (see AccountClient.kt).
 Future<JoinOutcome> redeemInvite(AccountInvite invite) async {
-  final installationId =
-      await _connector.invokeMethod<String>('installationId');
-  final secret = await _connector.invokeMethod<String>('installationSecret');
-  if (installationId == null || secret == null) {
-    return const JoinRejected('This phone could not identify itself.');
-  }
-  final http = HttpClient();
-  try {
-    final request = await http.postUrl(Uri.parse('${invite.service}/device/join'));
-    request.headers.contentType = ContentType.json;
-    request.write(
-      jsonEncode({
-        'invite': invite.token,
-        'installationId': installationId,
-        // Registered on the first join and required by anything that acts on
-        // a membership afterwards.
-        'secret': secret,
-        'label': await _deviceLabel(),
-      }),
-    );
-    final response = await request.close();
-    final body = await response.transform(utf8.decoder).join();
-    final json = jsonDecode(body) as Map<String, Object?>;
-    if (response.statusCode != 200) {
-      return JoinRejected(
-        json['error'] is String
-            ? json['error']! as String
-            : 'The invitation could not be used.',
+  final json = await _call('joinAccount', invite);
+  switch (json) {
+    case {'accountId': final String id}:
+      final account = JoinedAccount(
+        id: id,
+        email: json['account'] is String ? json['account']! as String : '',
       );
-    }
-    final account = JoinedAccount(
-      id: json['accountId']! as String,
-      email: json['account'] is String ? json['account']! as String : '',
-    );
-    await _remember(account);
-    return JoinAccepted(
-      account,
-      alreadyJoined: json['alreadyJoined'] == true,
-    );
-  } on SocketException {
-    return const JoinRejected('Could not reach the account service.');
-  } on FormatException {
-    return const JoinRejected('The account service sent something unexpected.');
-  } finally {
-    http.close();
+      await _remember(account);
+      return JoinAccepted(
+        account,
+        alreadyJoined: json['alreadyJoined'] == true,
+      );
+    case {'error': final String error}:
+      return JoinRejected(error);
+    default:
+      return const JoinRejected(
+        'The account service sent something unexpected.',
+      );
   }
 }
 
-/// The session name this phone waits on when reached through an account.
-///
-/// Derived from the installation id rather than fetched, so it is the same
-/// name the account service gives the host, computed without a round trip
-/// and available offline. Not a secret: it says where to wait, and membership
-/// is what decides who may.
-String rendezvousFor(String installationId) {
-  final safe = installationId.replaceAll(RegExp('[^A-Za-z0-9_-]'), '');
-  return 'dev-$safe'.padRight(16, '0');
+Future<Map<String, Object?>?> _call(String method, AccountInvite invite) async {
+  final raw = await _connector.invokeMethod<String>(method, {
+    'invite': invite.token,
+  });
+  if (raw == null) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    return decoded is Map<String, Object?> ? decoded : null;
+  } on FormatException {
+    return null;
+  }
 }
-
-/// Whether a session name is a derived rendezvous rather than a typed code.
-///
-/// Codes and rendezvous names both name a session, so both are valid here;
-/// they differ only in where they came from.
-bool isRendezvousName(String value) =>
-    value.startsWith('dev-') && value.length >= 16;
 
 /// This installation's rendezvous, or null before it has one.
 Future<String?> ownRendezvous() async {
   final id = await _connector.invokeMethod<String>('installationId');
-  return id == null ? null : rendezvousFor(id);
-}
-
-/// What the user will see this phone called in their device list.
-Future<String> _deviceLabel() async {
-  final model = await _connector.invokeMethod<String>('deviceLabel');
-  return model?.trim().isNotEmpty == true ? model!.trim() : 'phone';
+  return id == null ? null : rhrRendezvousFor(id);
 }
 
 const _accountsKey = 'rhr_joined_accounts';

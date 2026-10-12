@@ -94,12 +94,11 @@ data class SessionBanner(
 				null,
 				Style.BUSY)
 
-			// Waiting on a tap on Android's install sheet. A debug app RHR built
-			// is new to Play Protect, which then asks to scan it; the way past
-			// is two taps the user would not guess.
+			// Waiting on a tap on Android's install sheet. Whatever that sheet
+			// or Play Protect asks is the user's call; the banner does not
+			// coach them past a security prompt.
 			"install_confirm" -> SessionBanner(
-				if (foreignApp) "Confirm the install. If Play Protect asks, tap More details, then Install without scanning"
-				else "Confirm the install on this phone",
+				"Confirm the install on this phone",
 				null,
 				Style.WAITING)
 

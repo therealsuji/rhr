@@ -38,9 +38,11 @@ export function injectFault(fault, serial = process.env.RHR_DEVICE) {
 	}
 	if (!seen) {
 		throw new Error(
-			`"${fault}" reached no receiver — is a DEBUG player running, and ` +
-				`is it built from a tree that knows this fault? (an over-the-wire ` +
-				`player update can replace the instrumented build)`,
+			`"${fault}" reached no receiver — is a player built with ` +
+				`-P rhrFaultInjection=true running, and is it built from a tree ` +
+				`that knows this fault? (published players have no fault ` +
+				`receiver, and an over-the-wire player update can replace the ` +
+				`instrumented build)`,
 		);
 	}
 	console.log(`fault: ${fault}`);

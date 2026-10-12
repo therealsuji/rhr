@@ -21,7 +21,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -49,12 +48,19 @@ class RhrSessionService : Service() {
 		private const val TAG = "rhr_service"
 		private const val CHANNEL_ID = "rhr_session"
 		private const val NOTIF_ID = 7411
-		private const val OP_OPEN = 0
-		private const val OP_DATA = 1
-		private const val OP_CLOSE = 2
-		private const val OP_ACK = 3
-		private const val OP_UPDATE_DATA = 4
 		private const val DIRECT_SIGNAL_VERSION = 1
+		/** rhr_native preference: the session code the tester paused. */
+		private const val PAUSED_CODE = "paused_session_code"
+		// More concurrent VM channels than Flutter's tooling ever opens (a
+		// handful, plus DevTools). Each costs a socket and two threads, so a
+		// peer that keeps opening them must hit a ceiling.
+		private const val MAX_CHANNELS = 64
+		// A DevFS request whose head has not ended by now is not one this
+		// service rebuilds; it goes to the VM untouched.
+		private const val MAX_SNIFFED_HEAD = 64 * 1024
+		// Largest RHR upload body held in memory for a rebuild: a gzipped
+		// kernel or delta. Bounds what a peer can make this buffer.
+		private const val MAX_RHR_UPLOAD = 64 * 1024 * 1024
 		// SCTP's negotiated maximum message size, minus this protocol's 5-byte
 		// data header. The Dart answer emits no a=max-message-size, so libwebrtc
 		// falls back to the 64 KiB default from draft-ietf-mmusic-sdp-sctp-23 —
@@ -328,8 +334,13 @@ class RhrSessionService : Service() {
 	private var ws: WebSocket? = null
 	private val stopped = AtomicBoolean(false)
 	private var relayUrls: List<String> = emptyList()
+	// Certificate pin for relays addressed by IP (the developer's LAN relay),
+	// from the session link. See RelayDial.client.
+	private var relayPin: String? = null
 	@Volatile private var activeRelayUrl = ""
 	private var sessionCode = ""
+	// The code is a bearer token for this phone; logs carry only its prefix.
+	private val logTag get() = LogRedaction.session(sessionCode)
 	private var vmUri = ""
 	// Connector mode: the vmUri was handed to us (target app's door) —
 	// never override it from our own process log.
@@ -386,8 +397,36 @@ class RhrSessionService : Service() {
 	// presence lease expiry.
 	@Volatile private var lastHostActivity = 0L
 
-	/** True while the user has made this phone unavailable. */
+	/**
+	 * True while the user has made this phone unavailable.
+	 *
+	 * Enforced here, not only at the relay: the relay refuses new claims, but
+	 * a host already on the direct path is not routed through it, and a
+	 * pause sent while the socket was down never reached it at all. So while
+	 * this is set nothing from a host is acted on, no tunnel is opened,
+	 * and every reconnect tells the relay again.
+	 *
+	 * Remembered per session code, because every reconnect also tells the
+	 * relay when the phone is NOT paused (a resume can be lost the same way).
+	 * Forgotten in memory, a player restarted by Android would announce a
+	 * resume the tester never gave.
+	 */
 	@Volatile private var paused = false
+		set(value) {
+			field = value
+			val preferences = getSharedPreferences("rhr_native", Context.MODE_PRIVATE)
+			if (value) preferences.edit().putString(PAUSED_CODE, sessionCode).apply()
+			else preferences.edit().remove(PAUSED_CODE).apply()
+		}
+
+	private fun pausedEarlier(code: String): Boolean =
+		getSharedPreferences("rhr_native", Context.MODE_PRIVATE)
+			.getString(PAUSED_CODE, null) == code
+
+	/** Tells the relay whether developers may claim this phone. */
+	private fun availabilityMessage(): String =
+		JSONObject().put("t", if (paused) "pause" else "resume").toString()
+
 	private var presenceWatchThread: Thread? = null
 	private var devfsObserver: FileObserver? = null
 	@Volatile private var vmUriLock = Object()
@@ -422,7 +461,7 @@ class RhrSessionService : Service() {
 			val previous = defaultNetwork
 			defaultNetwork = network
 			if (previous != null && previous != network && !stopped.get()) {
-				Log.i(TAG, "[$sessionCode] default network changed; reconnecting now")
+				Log.i(TAG, "[$logTag] default network changed; reconnecting now")
 				ws?.cancel()
 			}
 			// Back from no network at all: cut short a backoff of up to 30 s.
@@ -444,11 +483,20 @@ class RhrSessionService : Service() {
 			"start" -> {
 				val requestedRelay =
 					intent.getStringExtra("relayUrl") ?: return START_NOT_STICKY
+				// A plaintext relay off loopback would hand the session code,
+				// and with it this app's VM service, to the network. Links are
+				// checked before they get here; this holds for every caller.
 				val requestedRelays =
 					(intent.getStringArrayListExtra("relayUrls") ?: arrayListOf(requestedRelay))
 						.filter { it.isNotBlank() }
 						.distinct()
 						.ifEmpty { listOf(requestedRelay) }
+						.filter(RelayDial::allowed)
+				if (requestedRelays.isEmpty()) {
+					Log.w(TAG, "refusing a session with no TLS relay")
+					return START_NOT_STICKY
+				}
+				val requestedPin = intent.getStringExtra("relayPin")
 				val requestedCode =
 					intent.getStringExtra("code") ?: return START_NOT_STICKY
 				val requestedVm =
@@ -476,7 +524,7 @@ class RhrSessionService : Service() {
 					// Service.getInfo() may report a stale VM URI. The native service
 					// survived and still owns the working tunnel, so do not replace its
 					// endpoint during same-session auto-resume.
-					Log.i(TAG, "[$sessionCode] preserving live VM URI $vmUri")
+					Log.i(TAG, "[$logTag] preserving live VM URI ${LogRedaction.vmUri(vmUri)}")
 				} else {
 					// Replace the old transport before adopting the new code. The old
 					// reconnect thread may still be inside an OkHttp callback; the
@@ -490,6 +538,7 @@ class RhrSessionService : Service() {
 					reconnectThread?.interrupt()
 					stopped.set(false)
 					relayUrls = requestedRelays
+					relayPin = requestedPin
 					sessionCode = requestedCode
 					watchOwnVm = requestedOwnVm
 					vmUri = requestedVm
@@ -504,6 +553,11 @@ class RhrSessionService : Service() {
 					// "Stop agent control" lasts until the user connects again.
 					agentStopped = false
 					agentControlling = false
+					// A pause stays with its session code until the user
+					// resumes or disconnects: the same code coming back after
+					// Android restarted the player is still paused.
+					paused = pausedEarlier(requestedCode)
+					if (paused) status = "paused"
 					sweepOrphanedDevfsDirs()
 					if (watchOwnVm) watchForDevfsDirs()
 					// The VM watcher tracks OUR own service URI across guest hot
@@ -525,16 +579,26 @@ class RhrSessionService : Service() {
 			// to whoever asked next.
 			"pause" -> {
 				paused = true
-				ws?.send(JSONObject().put("t", "pause").toString())
+				// If the socket is down this is lost, and onOpen says it again.
+				ws?.send(availabilityMessage())
+				// Drop the developer who was here, on every path they had in:
+				// the direct peer, the VM channels it or the relay carried, and
+				// any APK transfer or install prompt still open.
 				directTransport?.close()
 				directTransport = null
+				cleanupChannels()
+				updater?.cancel("the tester paused this phone")
+				// The progress was theirs, and a phase outranks the status on
+				// the banner, so leaving it would hide "Paused".
+				setProgress("", 0, 0)
+				updatingForeignApp = false
 				status = "paused"
-				updateListeners.forEach { it() }
 			}
 			"resume" -> {
 				paused = false
-				ws?.send(JSONObject().put("t", "resume").toString())
-				status = "waiting_host"
+				// Lost if the socket is down; onOpen says it again.
+				val told = ws?.send(availabilityMessage()) == true
+				status = if (told) "waiting_host" else "retrying"
 				updateListeners.forEach { it() }
 			}
 			// The user asking for their app back in its opening state. Only
@@ -559,6 +623,7 @@ class RhrSessionService : Service() {
 			}
 			"stop" -> {
 				stopped.set(true)
+				paused = false
 				ws?.close(1000, "stopped")
 				directTransport?.close()
 				directTransport = null
@@ -683,7 +748,7 @@ class RhrSessionService : Service() {
 				latest?.let {
 					ownVmUri = it
 					if (watchOwnVm && it != vmUri) {
-						Log.i(TAG, "VM service URI (from buffer) -> $it")
+						Log.i(TAG, "VM service URI (from buffer) -> ${LogRedaction.vmUri(it)}")
 						vmUri = it
 						announceInfo()
 					}
@@ -704,7 +769,7 @@ class RhrSessionService : Service() {
 							val uri = m.groupValues[1]
 							ownVmUri = uri
 							if (watchOwnVm && uri != vmUri) {
-								Log.i(TAG, "VM service URI changed -> $uri")
+								Log.i(TAG, "VM service URI changed -> ${LogRedaction.vmUri(uri)}")
 								vmUri = uri
 								announceInfo()
 							}
@@ -818,18 +883,26 @@ class RhrSessionService : Service() {
 	private var hostConnectionId: String? = null
 
 	private fun startDirectTransport(webSocket: WebSocket) {
+		// A paused phone opens no tunnel, whoever asks.
+		if (paused) return
 		directTransport?.close()
 		directTransport = RhrDirectTransport(
 			this,
 			sendSignal = { signal -> webSocket.send(signal) },
 			onFrame = { frame -> handleFrame(frame) },
 			onState = { state ->
-				Log.i(TAG, "[$sessionCode] direct transport $state")
+				Log.i(TAG, "[$logTag] direct transport $state")
 				if (state == RhrDirectTransport.State.OPEN) {
-					Log.i(TAG, "[$sessionCode] direct WebRTC payload path ready")
+					Log.i(TAG, "[$logTag] direct WebRTC payload path ready")
 				}
 			},
-			onFailure = { reason -> failDirectSession(webSocket, reason) },
+			onFailure = { reason ->
+				failDirectSession(webSocket, reason)
+				// Every channel's payload rode this transport, so they are
+				// dead with it. Close them now rather than at the next hello:
+				// their VM sockets otherwise stay open with nothing reading.
+				cleanupChannels()
+			},
 		)
 		directTransport?.startOffer()
 	}
@@ -841,12 +914,12 @@ class RhrSessionService : Service() {
 	) {
 		if (!preferDirect || directFailureReported) return
 		directFailureReported = true
-		Log.w(TAG, "[$sessionCode] direct WebRTC session failed: $reason")
+		Log.w(TAG, "[$logTag] direct WebRTC session failed: $reason")
 		// Same reason as the socket failure above: a teardown the user asked
 		// for must not report itself as a connection problem. Nor one the
 		// host caused by leaving — its host_gone arrives seconds before
 		// the ICE teardown it sets off.
-		if (!stopped.get() && !hostLeft) status = "retrying"
+		if (!stopped.get() && !hostLeft && !paused) status = "retrying"
 		if (notifyPeer) {
 			webSocket.send(
 				JSONObject()
@@ -870,12 +943,12 @@ class RhrSessionService : Service() {
 
 	private fun startReconnectLoop(generation: Long = sessionGeneration) {
 		if (reconnectThread?.isAlive == true && reconnectGeneration == generation) {
-			Log.w(TAG, "[$sessionCode] startReconnectLoop SKIPPED — a loop is already alive")
+			Log.w(TAG, "[$logTag] startReconnectLoop SKIPPED — a loop is already alive")
 			return
 		}
 		reconnectGeneration = generation
 		val loopId = loopSeq.incrementAndGet()
-		Log.i(TAG, "[$sessionCode] STARTING reconnect loop #$loopId")
+		Log.i(TAG, "[$logTag] STARTING reconnect loop #$loopId")
 		reconnectThread = Thread {
 			var backoffMs = 1000L
 			var candidateIndex = 0
@@ -885,10 +958,10 @@ class RhrSessionService : Service() {
 				val closed = Object()
 				val relayUrl = relayUrls[candidateIndex % relayUrls.size]
 				candidateIndex = (candidateIndex + 1) % relayUrls.size
-				val url = "$relayUrl/s/$sessionCode/device"
-				Log.i(TAG, "[$sessionCode] loop#$loopId DIALING $url")
-				val req = Request.Builder().url(url).build()
-				val socket = client.newWebSocket(req, object : WebSocketListener() {
+				Log.i(TAG, "[$logTag] loop#$loopId DIALING $relayUrl")
+				val req = RelayDial.request(this, relayUrl, sessionCode)
+				val socket = RelayDial.client(client, relayUrl, relayPin)
+					.newWebSocket(req, object : WebSocketListener() {
 					override fun onOpen(webSocket: WebSocket, response: Response) {
 						if (generation != sessionGeneration) return
 						wasConnected.set(true)
@@ -898,19 +971,28 @@ class RhrSessionService : Service() {
 						// Assume no host until we actually hear one — the
 						// relay is a dumb pipe, so host presence is learned from
 						// forwarded host frames, not from the relay.
-						status = "waiting_host"
-						Log.i(TAG, "[$sessionCode] connected (http ${response.code})")
+						status = if (paused) "paused" else "waiting_host"
+						Log.i(TAG, "[$logTag] connected (http ${response.code})")
+						// The relay keeps the pause, but one sent while the
+						// socket was down never reached it, and neither did a
+						// resume. Say which it is on every connection.
+						webSocket.send(availabilityMessage())
 						if (runRequestHandler != null || !vmUri.contains(":0/")) {
 							val sent = webSocket.send(infoMessage())
-							Log.i(TAG, "[$sessionCode] SENT info queued=$sent vm=$vmUri")
+							Log.i(TAG, "[$logTag] SENT info queued=$sent vm=${LogRedaction.vmUri(vmUri)}")
 						} else {
-							Log.i(TAG, "[$sessionCode] vm still :0 — not announcing yet")
+							Log.i(TAG, "[$logTag] vm still :0 — not announcing yet")
 						}
 					}
 
 					override fun onMessage(webSocket: WebSocket, text: String) {
 						if (generation != sessionGeneration) return
-						Log.i(TAG, "[$sessionCode] RX text: ${text.take(60)}")
+						Log.i(TAG, "[$logTag] RX text: ${text.take(60)}")
+						// Paused: a host still reaching this socket (one the
+						// relay admitted before the pause landed) gets nothing.
+						// OkHttp answers the relay's pings below this level, so
+						// dropping every message keeps the socket alive.
+						if (paused) return
 						lastHostActivity = System.currentTimeMillis()
 						if (text.contains("\"t\":\"direct_") || text.contains("\"t\": \"direct_")) {
 							val directMessage = try { JSONObject(text) } catch (_: Exception) { null }
@@ -953,7 +1035,7 @@ class RhrSessionService : Service() {
 										}
 										announceInfo()
 									}
-								}, { generation == sessionGeneration && !stopped.get() && !hostLeft })
+								}, { generation == sessionGeneration && !stopped.get() && !hostLeft && !paused })
 							return
 						}
 						// Over-the-wire update control messages. The handler is
@@ -987,7 +1069,7 @@ class RhrSessionService : Service() {
 						// the relay, and that is the case where the user is
 						// otherwise left reading a connection error.
 						if (text.contains("\"host_gone\"")) {
-							Log.i(TAG, "[$sessionCode] host left the session")
+							Log.i(TAG, "[$logTag] host left the session")
 							hostLeft = true
 							if (status in HOST_PRESENT_STATES) status = "waiting_host"
 							// Failures, and a run waiting on the user's approval,
@@ -1071,6 +1153,7 @@ class RhrSessionService : Service() {
 
 					override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
 						if (generation != sessionGeneration) return
+						if (paused) return
 						if (preferDirect) {
 							failDirectSession(
 								webSocket,
@@ -1086,15 +1169,18 @@ class RhrSessionService : Service() {
 						webSocket: WebSocket, t: Throwable, response: Response?) {
 						if (generation != sessionGeneration) return
 						val code = response?.code
-						Log.w(TAG, "[$sessionCode] ONFAILURE ${t.javaClass.simpleName}: " +
+						Log.w(TAG, "[$logTag] ONFAILURE ${t.javaClass.simpleName}: " +
 							"${t.message} httpResp=$code")
-						if (code != null && code != 101) {
+						if (paused) {
+							// Stays "paused": that is what the tester chose, and
+							// the loop re-sends it to the relay on reconnect.
+						} else if (code != null && code != 101) {
 							// HTTP-level rejection: unknown code (session not
 							// found) or a relay policy block. Stay visible as
 							// "Session not found" while the reconnect loop keeps
 							// trying in the background — the code becomes valid
 							// the moment you start rhr on the computer.
-							Log.i(TAG, "[$sessionCode] session rejected (http $code)")
+							Log.i(TAG, "[$logTag] session rejected (http $code)")
 							status = "rejected"
 						} else if (!stopped.get() && !hostLeft) {
 							// Disconnect closes this socket itself, so the
@@ -1117,14 +1203,15 @@ class RhrSessionService : Service() {
 
 					override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
 						if (generation != sessionGeneration) return
-						Log.w(TAG, "[$sessionCode] ONCLOSING code=$code reason=\"$reason\"")
+						Log.w(TAG, "[$logTag] ONCLOSING code=$code reason=\"$reason\"")
 					}
 
 					override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
 						if (generation != sessionGeneration) return
-						Log.w(TAG, "[$sessionCode] ONCLOSED code=$code reason=\"$reason\"")
-						// A close the user asked for is not a lost connection.
-						if (!stopped.get()) status = "closed"
+						Log.w(TAG, "[$logTag] ONCLOSED code=$code reason=\"$reason\"")
+						// A close the user asked for is not a lost connection,
+						// and a paused phone stays paused through the reconnect.
+						if (!stopped.get() && !paused) status = "closed"
 						setProgress("", 0, 0)
 						directTransport?.close()
 						directTransport = null
@@ -1189,7 +1276,7 @@ class RhrSessionService : Service() {
 				try {
 					val sinceHost = System.currentTimeMillis() - lastHostActivity
 					if (status in HOST_PRESENT_STATES && sinceHost > HOST_LEASE_MS) {
-						Log.i(TAG, "[$sessionCode] host lease expired — waiting for host")
+						Log.i(TAG, "[$logTag] host lease expired — waiting for host")
 						status = "waiting_host"
 						setProgress("", 0, 0)
 					}
@@ -1201,7 +1288,7 @@ class RhrSessionService : Service() {
 					if (directTransport != null && sinceHost > DIRECT_AUTHORIZATION_MS) {
 						Log.w(
 							TAG,
-							"[$sessionCode] no host for ${sinceHost / 1000}s — " +
+							"[$logTag] no host for ${sinceHost / 1000}s — " +
 								"closing the direct tunnel",
 						)
 						closeDirectForExpiry()
@@ -1266,36 +1353,53 @@ class RhrSessionService : Service() {
 		return ws?.send(frame.toByteString()) == true
 	}
 
-	private fun handleFrame(frame: ByteArray) {
-		if (frame.size < 5) return
-		val op = frame[0].toInt()
-		val channel = ByteBuffer.wrap(frame, 1, 4).int
-		when (op) {
-			OP_OPEN -> {
-				synchronized(flowLock) { pending[channel] = java.io.ByteArrayOutputStream() }
-				val epoch = channelEpoch
-				val target = if (frame.size > 5) frame[5].toInt() else null
+	private fun handleFrame(bytes: ByteArray) {
+		// Both transports are already dropping host traffic while paused;
+		// this catches a frame that was in flight when the pause landed.
+		if (paused) return
+		val frame = TunnelFrame.parse(bytes)
+		if (frame == null) {
+			Log.w(TAG, "[$logTag] dropped a malformed tunnel frame (${bytes.size} bytes)")
+			return
+		}
+		val channel = frame.channel
+		when (frame) {
+			is TunnelFrame.Open -> {
+				val epoch = synchronized(flowLock) {
+					// A reused number would orphan the first socket: the peer
+					// has lost track of it, so both go.
+					if (pending.containsKey(channel) || sockets.containsKey(channel)) {
+						Log.w(TAG, "[$logTag] channel $channel opened twice; closing it")
+						closeChannel(channel, notifyPeer = true)
+						return
+					}
+					// Every channel costs a socket and two threads.
+					if (pending.size + sockets.size >= MAX_CHANNELS) {
+						Log.w(TAG, "[$logTag] refused channel $channel: $MAX_CHANNELS already open")
+						sendBinaryFrame(encodeClose(channel))
+						return
+					}
+					pending[channel] = java.io.ByteArrayOutputStream()
+					channelEpoch
+				}
 				// Only VM service traffic can be a DevFS upload.
-				if (target == null) sniffers[channel] = DevFsDelta.Sniffer(epoch)
-				openChannel(channel, epoch, target)
+				if (frame.target == null) sniffers[channel] = DevFsDelta.Sniffer(epoch)
+				openChannel(channel, epoch, frame.target)
 			}
-			OP_DATA -> {
+			is TunnelFrame.Data -> {
 				val sniffer = sniffers[channel]
 				if (sniffer != null) {
 					sniff(channel, sniffer, frame)
-				} else if (deliver(channel, frame, 5, frame.size - 5)) {
-					sendBinaryFrame(encodeAck(channel, frame.size - 5))
+				} else if (deliver(channel, frame.frame, TunnelFrame.HEADER_BYTES, frame.length)) {
+					sendBinaryFrame(encodeAck(channel, frame.length))
 				}
 			}
-			OP_ACK -> {
-				val n = ByteBuffer.wrap(frame, 5, 4).int
-				synchronized(flowLock) {
-					unacked[channel] = maxOf(0, (unacked[channel] ?: 0) - n)
-					flowLock.notifyAll()
-				}
+			is TunnelFrame.Ack -> synchronized(flowLock) {
+				unacked[channel] = maxOf(0, (unacked[channel] ?: 0) - frame.bytes)
+				flowLock.notifyAll()
 			}
-			OP_CLOSE -> closeChannel(channel, notifyPeer = false)
-			OP_UPDATE_DATA -> updater?.handleData(frame)
+			is TunnelFrame.Close -> closeChannel(channel, notifyPeer = false)
+			is TunnelFrame.UpdateData -> updater?.handleData(frame.frame)
 		}
 	}
 
@@ -1326,18 +1430,35 @@ class RhrSessionService : Service() {
 		}
 
 	/** Holds a channel's first bytes until they show whether the request is an
-	 *  RHR DevFS upload. Anything else goes through exactly as sent. */
-	private fun sniff(channel: Int, sniffer: DevFsDelta.Sniffer, frame: ByteArray) {
-		sniffer.bytes.write(frame, 5, frame.size - 5)
-		sendBinaryFrame(encodeAck(channel, frame.size - 5))
+	 *  RHR DevFS upload. Anything else goes through exactly as sent.
+	 *
+	 *  Everything held here is acked as it arrives, so the peer's window does
+	 *  not bound it; the caps below do. Before the head ends, each frame
+	 *  rescans the bytes so far, which [MAX_SNIFFED_HEAD] keeps small. */
+	private fun sniff(channel: Int, sniffer: DevFsDelta.Sniffer, frame: TunnelFrame.Data) {
+		sniffer.bytes.write(frame.frame, TunnelFrame.HEADER_BYTES, frame.length)
+		sendBinaryFrame(encodeAck(channel, frame.length))
 		if (sniffer.head == null) {
 			if (sniffer.notAPut()) return passThrough(channel)
 			val bytes = sniffer.bytes.toByteArray()
-			val head = DevFsDelta.parseHead(bytes, bytes.size) ?: return
-			if (!head.isRhrUpload || head.contentLength == null) return passThrough(channel)
+			val head = DevFsDelta.parseHead(bytes, bytes.size)
+			if (head == null) {
+				if (bytes.size > MAX_SNIFFED_HEAD) passThrough(channel)
+				return
+			}
+			if (!head.isRhrUpload) return passThrough(channel)
+			val length = head.contentLength
+			if (length == null || length < 0 || length > MAX_RHR_UPLOAD) {
+				// An RHR upload cannot go to the VM as sent, and one this
+				// size is not ours to hold. The CLI reports the closed upload.
+				Log.w(TAG, "[$logTag] refused DevFS upload ch=$channel: content-length ${head.headers["content-length"]}")
+				closeChannel(channel, notifyPeer = true)
+				return
+			}
 			sniffer.head = head
 		}
 		val head = sniffer.head ?: return
+		// Both terms are bounded above, so this cannot overflow.
 		val end = head.bodyStart + (head.contentLength ?: return)
 		if (sniffer.bytes.size() < end) return
 		sniffers.remove(channel)
@@ -1481,14 +1602,14 @@ class RhrSessionService : Service() {
 	}
 
 	private fun encodeData(channel: Int, buf: ByteArray, n: Int): ByteArray =
-		ByteBuffer.allocate(5 + n).put(OP_DATA.toByte()).putInt(channel)
+		ByteBuffer.allocate(5 + n).put(TunnelFrame.OP_DATA.toByte()).putInt(channel)
 			.put(buf, 0, n).array()
 
 	private fun encodeAck(channel: Int, n: Int): ByteArray =
-		ByteBuffer.allocate(9).put(OP_ACK.toByte()).putInt(channel).putInt(n).array()
+		ByteBuffer.allocate(9).put(TunnelFrame.OP_ACK.toByte()).putInt(channel).putInt(n).array()
 
 	private fun encodeClose(channel: Int): ByteArray =
-		ByteBuffer.allocate(5).put(OP_CLOSE.toByte()).putInt(channel).array()
+		ByteBuffer.allocate(5).put(TunnelFrame.OP_CLOSE.toByte()).putInt(channel).array()
 
 	private fun ByteArray.toByteString(): ByteString = toByteString(0, size)
 
@@ -1537,7 +1658,7 @@ class RhrSessionService : Service() {
 		devfsObserver = object : FileObserver(cache, CREATE) {
 			override fun onEvent(event: Int, path: String?) {
 				if (path == null) return
-				val project = devfsProjectName(path) ?: return
+				val project = DevFsDelta.projectName(path) ?: return
 				armGuestReady() // guest kernel is arriving; debounce → ready
 				try {
 					// The engine roots DevFS writes under an extra <fsName>/
@@ -1570,7 +1691,7 @@ class RhrSessionService : Service() {
 		// idempotent cleanup; only reclaim genuinely old leftovers.
 		val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
 		codeCacheDir.listFiles()?.forEach { f ->
-			if (f.isDirectory && devfsProjectName(f.name) != null &&
+			if (f.isDirectory && DevFsDelta.projectName(f.name) != null &&
 				f.lastModified() < cutoff) {
 				deleteWithoutFollowingSymlinks(f)
 				Log.i(TAG, "swept orphaned DevFS dir ${f.name}")
@@ -1595,16 +1716,6 @@ class RhrSessionService : Service() {
 			f.listFiles()?.forEach { deleteWithoutFollowingSymlinks(it) }
 		}
 		f.delete()
-	}
-
-	/** DevFS dirs look like `<project><6 UPPERCASE letters>`, e.g. my-appQVGOIA. */
-	private fun devfsProjectName(name: String): String? {
-		if (name.length <= 6) return null
-		val suffix = name.takeLast(6)
-		if (!suffix.all { it in 'A'..'Z' }) return null
-		val project = name.dropLast(6)
-		if (project.startsWith("flutter")) return null // engine's own dirs
-		return project
 	}
 
 	// ---- notification -----------------------------------------------------

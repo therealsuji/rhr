@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import java.util.Base64
 import groovy.json.JsonOutput
 import java.util.Properties
 
@@ -128,6 +129,21 @@ android {
         resValue("string", "rhr_channel", flutterIdentityFieldOrNull("channel") ?: "")
         resValue("string", "rhr_android_plugins_json", JsonOutput.toJson(androidPluginProfile))
         resValue("string", "rhr_host", "player")
+        // The account service the phone trusts with its installation secret,
+        // from the same RHR_RELAY the Dart side is built with, so a build for
+        // a private deployment talks to that deployment's accounts.
+        resValue("string", "rhr_account_service", accountServiceFromDartDefines())
+        // QA fault injection over adb (`am broadcast dev.rhr.DEBUG_FAULT` and
+        // `dev.rhr.DEBUG_MENU`, see AdbReceivers.kt). Off unless the build
+        // passes -PrhrFaultInjection=true (`flutter build apk -P
+        // rhrFaultInjection=true`). Being a debug build is not the
+        // gate: the published player IS a debug build, so FLAG_DEBUGGABLE is
+        // set on every tester's phone. The release workflow never passes it.
+        buildConfigField(
+            "boolean",
+            "RHR_FAULT_INJECTION",
+            (project.findProperty("rhrFaultInjection") == "true").toString(),
+        )
     }
 
     val releaseKey = System.getenv("RHR_PLAYER_KEYSTORE")
@@ -207,4 +223,19 @@ dependencies {
 afterEvaluate {
     android.defaultConfig.ndk.abiFilters.clear()
     android.defaultConfig.ndk.abiFilters.addAll(keptAbis)
+}
+
+/**
+ * The account service origin from `--dart-define=RHR_RELAY=wss://...`, or blank
+ * for the public service. Flutter hands dart-defines to Gradle base64-encoded
+ * and comma-separated in the `dart-defines` property.
+ */
+fun accountServiceFromDartDefines(): String {
+    val encoded = project.findProperty("dart-defines") as String? ?: return ""
+    val relay = encoded.split(",")
+        .map { Base64.getDecoder().decode(it).toString(Charsets.UTF_8) }
+        .firstOrNull { it.startsWith("RHR_RELAY=") }
+        ?.removePrefix("RHR_RELAY=")
+        ?: return ""
+    return relay.replaceFirst("wss://", "https://").replaceFirst("ws://", "http://")
 }

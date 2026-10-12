@@ -85,7 +85,8 @@ final class RhrSessionService: NSObject, URLSessionWebSocketDelegate {
 	) {
 		status = "connected"
 		backoff = 1
-		NSLog("[rhr] connected to relay, vm=\(vmUri)")
+		// Not the VM URI: its path is the VM service's auth token.
+		NSLog("[rhr] connected to relay")
 		announceInfo()
 	}
 
@@ -98,7 +99,10 @@ final class RhrSessionService: NSObject, URLSessionWebSocketDelegate {
 
 	private func announceInfo() {
 		guard !vmUri.contains(":0/") else { return }
-		let json = "{\"t\":\"info\",\"vm\":\"\(vmUri)\"}"
+		guard
+			let data = try? JSONSerialization.data(withJSONObject: ["t": "info", "vm": vmUri]),
+			let json = String(data: data, encoding: .utf8)
+		else { return }
 		ws?.send(.string(json)) { _ in }
 	}
 

@@ -50,10 +50,14 @@ class OverlayService : Service() {
 	}
 
 	private fun refresh() {
-		if (!RhrSessionService.usesExternalVm) {
+		// Wanted over the tester's own app, and while an install question is
+		// up with the player in the background: the overlay is how that
+		// question reaches the screen.
+		val wanted = RhrSessionService.usesExternalVm || InstallConsent.pending != null
+		if (!wanted) {
 			stopSelf()
 		}
-		if (playerVisible || !RhrSessionService.usesExternalVm) {
+		if (playerVisible || !wanted) {
 			overlay?.detach()
 			overlay = null
 			return
@@ -92,7 +96,10 @@ class OverlayService : Service() {
 
 	companion object {
 		private var instance: OverlayService? = null
-		private var playerVisible = false
+
+		/** True while the player's own Activity is on screen. */
+		@Volatile var playerVisible = false
+			private set
 
 		fun setPlayerVisible(visible: Boolean) {
 			playerVisible = visible

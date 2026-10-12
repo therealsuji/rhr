@@ -34,9 +34,10 @@ import org.json.JSONObject
  *       kills the process, so "committed" is sent before commit() and
  *       STATUS_SUCCESS is normally unreachable.
  *   kind="app": the APK is a FOREIGN package delivered through the
- *       player. This process survives the install,
- *       so the result receiver reports the terminal "installed" (or
- *       "failure") after the user confirms the system sheet.
+ *       player. The tester is asked first ([InstallConsent]); until they
+ *       allow it the answer is "awaiting_approval" and no byte is taken, and
+ *       a no is a "failure". This process survives the install, so the
+ *       result receiver reports the terminal "installed" (or "failure").
  */
 class RhrPlayerUpdater(
 	private val context: Context,
@@ -50,6 +51,9 @@ class RhrPlayerUpdater(
 		// After commit, an incomplete transfer that stops making progress for
 		// this long is dead (the CLI's own ack-stall timeout is 60s too).
 		private const val COMMIT_STALL_MS = 60_000L
+		// Far past any APK a session sends (the player is ~100 MB). The
+		// announced size is the developer's word, so it is capped too.
+		private const val MAX_APK_BYTES = 1L shl 30
 
 		// The receiver runs in a fresh broadcast context; reach the live
 		// updater through the service singleton.
@@ -70,6 +74,8 @@ class RhrPlayerUpdater(
 			RhrSessionService.updatingForeignApp = value == "app"
 		}
 	private var installTarget = ""
+	/** The question in front of the tester for a kind=app transfer. */
+	private var consent: InstallConsent.Request? = null
 	private var file: File? = null
 	// OutputStream, not FileOutputStream: a gzip transfer inflates through
 	// GzipSink on the way to the file.
@@ -88,52 +94,118 @@ class RhrPlayerUpdater(
 		val id = message.optInt("id")
 		val size = message.optLong("size")
 		val sha = message.optString("sha256")
-		if (id == 0 || size <= 0 || sha.isEmpty()) {
-			status(id, "failure", "malformed update_begin")
+		// No kind means the player's own update, as the protocol documents.
+		val kind = message.optString("kind", "player")
+		val target = message.optString("target", "")
+		val refusal = when {
+			id == 0 || size <= 0 || sha.isEmpty() -> "malformed update_begin"
+			kind != "player" && kind != "app" -> "unknown update kind \"$kind\""
+			// A player update installs over this package and nothing else; a
+			// target here would turn it into an unconfirmed foreign install.
+			kind == "player" && target.isNotEmpty() && target != context.packageName ->
+				"a player update cannot target $target"
+			kind == "app" && !RunPreparation.ANDROID_PACKAGE.matches(target) ->
+				"an app install needs a valid target package"
+			size > MAX_APK_BYTES -> "the APK is over ${MAX_APK_BYTES shr 20} MB"
+			context.filesDir.usableSpace < size -> "the phone does not have room for the APK"
+			else -> null
+		}
+		if (refusal != null) {
+			status(id, "failure", refusal)
 			return
 		}
 		synchronized(this) {
 			closeQuietly()
+			consent?.let(InstallConsent::withdraw)
+			consent = null
 			installSessionId = null
 			transferId = id
 			expectedSize = size
 			expectedSha256 = sha
-			installKind = message.getString("kind")
-			installTarget = message.optString("target", "")
+			installKind = kind
+			installTarget = if (kind == "app") target else context.packageName
 			RhrSessionService.foreignAppName = if (installTarget == AGENT_PACKAGE) "RHR Agent" else "your app"
 			received = 0
 			commitRequested = false
 			finished = false
-			val dir = File(context.filesDir, "updates").apply { mkdirs() }
-			// One in-flight update at a time; a stale file from a dead
-			// transfer is simply overwritten.
-			file = File(dir, "player-update.apk")
-			// size and sha256 describe the APK, never the wire bytes, so the
-			// digest and the byte count both sit AFTER decompression and the
-			// verification below is identical either way.
-			digest = MessageDigest.getInstance("SHA-256")
-			// The dev always sends the APK gzipped. Counting and hashing sit
-			// at the FILE end of the chain, after decompression.
-			val counting = CountingSink(FileOutputStream(file), digest!!)
-			sink = counting
-			output = GzipSink(counting)
+			if (kind == "player") openFile()
 		}
 		active = this
-		Log.i(TAG, "update transfer $id started ($size bytes)")
-		status(id, "ready")
+		Log.i(TAG, "update transfer $id announced ($size bytes, kind=$kind)")
+		if (kind == "player") status(id, "ready") else askTester(id, target)
+	}
+
+	/**
+	 * Asks the tester before a foreign package's bytes are taken. Only a
+	 * yes opens the file and answers "ready"; the CLI sends nothing before.
+	 */
+	private fun askTester(id: Int, target: String) {
+		status(id, "awaiting_approval")
+		val request = InstallConsent.ask(target) { allowed ->
+			val accepted = synchronized(this) {
+				if (transferId != id || finished) return@ask
+				consent = null
+				if (!allowed) fail("the tester did not allow installing $target") else openFile()
+				allowed
+			}
+			if (accepted) status(id, "ready")
+		}
+		synchronized(this) {
+			if (transferId == id && !finished) consent = request
+			else InstallConsent.withdraw(request)
+		}
+		// The question needs a surface. The player's own Activity has one; with
+		// it in the background, the system overlay is the only other way onto
+		// the screen, and without that permission nobody can be asked. Asked
+		// before the overlay starts, so the overlay finds a question to show.
+		if (OverlayService.playerVisible) return
+		val shown = SystemOverlayHost.granted(context) &&
+			runCatching { OverlayService.start(context) }.isSuccess
+		if (!shown) {
+			InstallConsent.withdraw(request)
+			synchronized(this) {
+				if (transferId == id && !finished) {
+					consent = null
+					fail("open RHR Player on the phone to allow installing $target")
+				}
+			}
+		}
+	}
+
+	/** Opens the write chain for an accepted transfer. Callers hold the monitor. */
+	private fun openFile() {
+		val dir = File(context.filesDir, "updates").apply { mkdirs() }
+		// One in-flight update at a time; a stale file from a dead
+		// transfer is simply overwritten.
+		val apk = File(dir, "player-update.apk")
+		file = apk
+		// size and sha256 describe the APK, never the wire bytes, so the
+		// digest and the byte count both sit AFTER decompression and the
+		// verification below is identical either way.
+		val hash = MessageDigest.getInstance("SHA-256")
+		digest = hash
+		// The dev always sends the APK gzipped. Counting and hashing sit
+		// at the FILE end of the chain, after decompression, and so does
+		// the size limit: a small gzip can inflate to fill the disk.
+		val counting = CountingSink(FileOutputStream(apk), hash, limit = expectedSize)
+		sink = counting
+		output = GzipSink(counting)
 	}
 
 	override fun handleData(frame: ByteArray) {
 		val id = ByteBuffer.wrap(frame, 1, 4).int
 		synchronized(this) {
 			if (id != transferId || finished) return
+			// Nothing is accepted until the transfer is: a foreign package
+			// waits on the tester, and the CLI waits for "ready" to send.
+			val out = output ?: return
 			val n = frame.size - 5
 			try {
 				// expectedSize and expectedSha256 describe the APK, so both
 				// must be measured on the decoded bytes. Under gzip the wire
 				// frame is neither the right length nor the right content —
 				// the sink reports what actually reached the file.
-				output?.write(frame, 5, n)
+				out.write(frame, 5, n)
 				received = sink?.written ?: (received + n)
 			} catch (e: Exception) {
 				Log.w(TAG, "update write failed: $e")
@@ -224,19 +296,16 @@ class RhrPlayerUpdater(
 				)
 				return
 			}
-			val foreign = installKind == "app" && installTarget.isNotEmpty()
+			val foreign = installKind == "app"
 			val installer = context.packageManager.packageInstaller
 			val params = PackageInstaller.SessionParams(
 				PackageInstaller.SessionParams.MODE_FULL_INSTALL
 			).apply {
 				// kind=app delivers a FOREIGN package: the target comes
-				// from the wire and this process survives the install.
-				// kind=player is the self-update.
-				if (installTarget.isNotEmpty()) {
-					setAppPackageName(installTarget)
-				} else {
-					setAppPackageName(context.packageName)
-				}
+				// from the wire, the tester allowed exactly that name, and
+				// PackageInstaller refuses an APK whose package differs.
+				// kind=player is the self-update, always this package.
+				setAppPackageName(installTarget)
 				setSize(apk.length())
 				if (Build.VERSION.SDK_INT >= 31) {
 					// Installer-of-record self-updates apply with no user
@@ -258,6 +327,10 @@ class RhrPlayerUpdater(
 					apk.inputStream().use { it.copyTo(out) }
 					session.fsync(out)
 				}
+				// The session holds its own copy now. Keeping ours would leave
+				// up to an APK's worth of a stranger's app in the player's
+				// storage after every install.
+				apk.delete()
 				// A silent self-update kills this process during commit, so
 				// the "committed" status must be on the wire first. The relay
 				// socket send is async — give OkHttp a beat to flush.
@@ -310,6 +383,17 @@ class RhrPlayerUpdater(
 		fail(message)
 	}
 
+	override fun cancel(reason: String) {
+		synchronized(this) {
+			consent?.let(InstallConsent::withdraw)
+			consent = null
+			// A committed install is Android's sheet in front of the tester,
+			// theirs to answer; only a transfer still in flight is ended.
+			if (transferId == 0 || finished) return
+			fail(reason)
+		}
+	}
+
 	// Callers may or may not hold the monitor; status/cleanup are safe either
 	// way (send goes straight to the socket, file deletion is idempotent).
 	private fun fail(message: String) {
@@ -328,6 +412,7 @@ class RhrPlayerUpdater(
 		output = null
 		sink = null
 		file?.delete()
+		file = null
 	}
 
 	private fun status(
@@ -403,11 +488,17 @@ class UpdateResultReceiver : BroadcastReceiver() {
  * Inflater speaks zlib, not gzip, so the 10-byte header is skipped by hand and
  * the trailer is simply never fed (we stop at the Inflater's own end marker).
  */
-private class GzipSink(private val sink: OutputStream) : OutputStream() {
+internal class GzipSink(private val sink: OutputStream) : OutputStream() {
     private val inflater = java.util.zip.Inflater(true)
     private val buffer = ByteArray(64 * 1024)
     private val header = java.io.ByteArrayOutputStream()
     private var headerDone = false
+
+    private companion object {
+        // FNAME and FCOMMENT end at a zero byte that may never come; without
+        // a ceiling the header buffer would take whatever is sent.
+        const val MAX_HEADER = 64 * 1024
+    }
 
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
@@ -419,6 +510,7 @@ private class GzipSink(private val sink: OutputStream) : OutputStream() {
             // whatever the FLG byte adds, and frames split anywhere, so this
             // cannot assume one write holds it.
             header.write(b, start, count)
+            if (header.size() > MAX_HEADER) throw java.io.IOException("gzip header too long")
             val consumed = consumeHeader(header.toByteArray()) ?: return
             val pending = header.toByteArray()
             headerDone = true
@@ -501,9 +593,11 @@ private class GzipSink(private val sink: OutputStream) : OutputStream() {
  * verification hangs off this, the last link in the chain, and is identical
  * whether or not the transfer was compressed.
  */
-private class CountingSink(
+internal class CountingSink(
     private val sink: OutputStream,
     private val digest: MessageDigest,
+    /** The announced APK size. Anything past it is not that APK. */
+    private val limit: Long,
 ) : OutputStream() {
     var written = 0L
         private set
@@ -511,6 +605,9 @@ private class CountingSink(
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
     override fun write(b: ByteArray, off: Int, len: Int) {
+        if (written + len > limit) {
+            throw java.io.IOException("the APK is larger than the announced $limit bytes")
+        }
         sink.write(b, off, len)
         digest.update(b, off, len)
         written += len

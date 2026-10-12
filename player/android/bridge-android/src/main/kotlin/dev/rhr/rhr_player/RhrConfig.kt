@@ -15,6 +15,8 @@ import android.content.Context
  *   rhr_host          — "player" (default) or "connector". The dev side gates
  *                       on the player's identity and skips the gate entirely
  *                       for the connector, which tunnels a third-party VM.
+ *   rhr_account_service — the account service origin, derived at build time
+ *                       from RHR_RELAY. Blank means the public service.
  *
  * Lookups are by name (getIdentifier) because these resources live in the
  * host app, not in the library's own R class.
@@ -35,6 +37,14 @@ object RhrConfig {
 	fun dartSdkVersion(ctx: Context): String = res(ctx, "rhr_dart_sdk_version")
 	fun channel(ctx: Context): String = res(ctx, "rhr_channel")
 	fun androidPluginsJson(ctx: Context): String = res(ctx, "rhr_android_plugins_json")
+
+	/**
+	 * The account service this build trusts with the installation secret.
+	 * Baked in rather than taken from an invite or a session link, so nothing
+	 * a stranger hands the phone can redirect the secret.
+	 */
+	fun accountService(ctx: Context): String =
+		res(ctx, "rhr_account_service").ifBlank { "https://getrhr.dev" }.trimEnd('/')
 
 	/** "player" for the rhr player itself, "connector" for the connector. */
 	fun hostKind(ctx: Context): String = res(ctx, "rhr_host").ifBlank { "player" }
