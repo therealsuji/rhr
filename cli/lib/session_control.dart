@@ -3,13 +3,15 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'private_file.dart';
+
 /// How `rhr persist`, `rhr release` and `rhr mcp` reach an rhr session already
 /// holding the phone. The relay admits one host per phone, so a second
 /// CLI cannot connect; it asks the running one instead.
 ///
 /// The running session listens on loopback and writes the port and a random
-/// token to `.dart_tool/rhr/control.json` (mode 600), along with the session's
-/// other loopback endpoints (see [SessionEndpoints]). A command is one JSON
+/// token to `.dart_tool/rhr/control.json`, readable only by this user, along
+/// with the session's other loopback endpoints (see [SessionEndpoints]). A command is one JSON
 /// line `{"token", "command"}`; the answer is one line `{"ok", "message"}`,
 /// sent once the work is done. [SessionAnswer.then] runs after the answer is
 /// sent, for work that ends the session.
@@ -38,11 +40,10 @@ final class SessionControl {
       List<int>.generate(16, (_) => Random.secure().nextInt(256)),
     );
     final file = fileFor(project);
-    file.parent.createSync(recursive: true);
-    file.writeAsStringSync(
+    writePrivateFile(
+      file,
       jsonEncode({...endpoints, 'port': server.port, 'token': token}),
     );
-    if (!Platform.isWindows) Process.runSync('chmod', ['600', file.path]);
     server.listen((client) async {
       client.done.catchError((_) {});
       try {

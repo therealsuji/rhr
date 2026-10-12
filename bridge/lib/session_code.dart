@@ -29,3 +29,28 @@ String mintRhrSessionCode({Random? random}) {
   return 'rhr-${token.substring(0, 4)}-${token.substring(4, 8)}-'
       '${token.substring(8, 12)}';
 }
+
+/// Prefix of the session a phone waits on when reached through an account.
+const rhrRendezvousPrefix = 'dev-';
+
+/// An installation id is 16 random bytes, base64url without padding.
+final _installationIdPattern = RegExp(r'^[A-Za-z0-9_-]{22}$');
+
+/// The session name a phone that joined an account waits on.
+///
+/// Derived from the installation id, so the phone and the account service
+/// compute the same name without a round trip. It is not a credential: the
+/// relay admits a developer to it only with a ticket from the account service,
+/// and the phone only with its installation secret. Mirrors `rendezvousFor`
+/// in relay-worker/src/accounts.ts.
+String? rhrRendezvousFor(String installationId) =>
+    _installationIdPattern.hasMatch(installationId)
+    ? '$rhrRendezvousPrefix$installationId'
+    : null;
+
+/// The installation [name] is the rendezvous of, or null when it is not one.
+String? rhrRendezvousInstallation(String name) {
+  if (!name.startsWith(rhrRendezvousPrefix)) return null;
+  final id = name.substring(rhrRendezvousPrefix.length);
+  return _installationIdPattern.hasMatch(id) ? id : null;
+}

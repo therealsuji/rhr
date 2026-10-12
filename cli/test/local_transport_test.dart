@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:test/test.dart';
@@ -162,6 +163,52 @@ void main() {
     },
   );
 
+  test('the LAN end speaks TLS with the pinned certificate only', () async {
+    final relay = (await LocalRelay.start(
+      'rhr-test-2345-6789',
+      advertisedAddress: InternetAddress.loopbackIPv4,
+    ))!;
+    addTearDown(relay.close);
+    expect(relay.advertisedUrl, startsWith('wss://'));
+
+    Future<WebSocket> dial(String pin) {
+      final client = HttpClient()
+        ..badCertificateCallback = (certificate, _, _) =>
+            base64Url
+                .encode(sha256.convert(certificate.der).bytes)
+                .replaceAll('=', '') ==
+            pin;
+      return WebSocket.connect(
+        '${relay.advertisedUrl}/s/${relay.sessionCode}/device',
+        customClient: client,
+      );
+    }
+
+    final device = await dial(relay.certificatePin);
+    addTearDown(device.close);
+    await expectLater(dial('x' * 43), throwsA(isA<Exception>()));
+  });
+
+  test(
+    'a second host is refused, not allowed to evict the first',
+    () async {
+      final relay = (await LocalRelay.start(
+        'rhr-test-2345-6789',
+        advertisedAddress: InternetAddress.loopbackIPv4,
+      ))!;
+      addTearDown(relay.close);
+      final first = await WebSocket.connect(
+        '${relay.loopbackUrl}/s/${relay.sessionCode}/host',
+      );
+      addTearDown(first.close);
+      await expectLater(
+        WebSocket.connect('${relay.loopbackUrl}/s/${relay.sessionCode}/host'),
+        throwsA(isA<WebSocketException>()),
+      );
+      expect(first.closeCode, isNull);
+    },
+  );
+
   test(
     'embedded relay pipes device and host frames in both directions',
     () async {
@@ -238,16 +285,19 @@ void main() {
       expect(relay, isNotNull);
       final runningRelay = relay!;
 
-      final sockets = <IOWebSocketChannel>[];
+      // A reconnecting phone replaces its predecessor; a host is never
+      // replaced (a second one is refused), so only the device churns.
+      final host = IOWebSocketChannel.connect(
+        '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/host',
+      );
+      await host.ready;
+      final sockets = <IOWebSocketChannel>[host];
       for (var i = 0; i < 4; i++) {
         final device = IOWebSocketChannel.connect(
           '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/device',
         );
-        final host = IOWebSocketChannel.connect(
-          '${runningRelay.loopbackUrl}/s/${runningRelay.sessionCode}/host',
-        );
-        sockets.addAll([device, host]);
-        await Future.wait([device.ready, host.ready]);
+        sockets.add(device);
+        await device.ready;
         await Future<void>.delayed(const Duration(milliseconds: 10));
         expect(runningRelay.activeSubscriptionCount, 2);
       }

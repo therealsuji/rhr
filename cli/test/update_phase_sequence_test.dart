@@ -19,6 +19,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:rhr_bridge/session_code.dart';
 import 'package:test/test.dart';
 
 String _findRepo() {
@@ -92,7 +93,7 @@ List<String> _phases(List<String> deviceLines) => [
 void main() {
   test('a declined update leaves no phase behind on the phone', () async {
     final port = await _freePort();
-    final code = 'phases-${DateTime.now().millisecondsSinceEpoch}';
+    final code = mintRhrSessionCode();
     final relayLines = <String>[];
     final cliLines = <String>[];
     final deviceLines = <String>[];

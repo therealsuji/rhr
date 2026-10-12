@@ -635,13 +635,15 @@ bool usbRangeDigestMatches(String expected, String output) {
 // `adb exec-in` can return after stdin closes but before Android's `dd` has
 // finished the write, so an immediate hash can observe an incomplete range.
 // `shell -T` keeps stdin raw (no PTY) and waits for the remote command to exit.
+// adb joins these words into one device shell command line, so the path is
+// quoted: an asset named `x;cmd;.bin` must not run `cmd` on the phone.
 List<String> usbRangeWriteAdbArguments(String remotePath, int rangeIndex) => [
   'shell',
   '-T',
   'run-as',
   _playerPackage,
   'dd',
-  'of=$remotePath',
+  'of=${_shellQuote(remotePath)}',
   'bs=$_usbRangeBytes',
   'seek=$rangeIndex',
   'conv=notrunc',

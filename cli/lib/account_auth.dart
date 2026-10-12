@@ -14,6 +14,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:rhr_bridge/relay_defaults.dart';
+import 'package:rhr_bridge/session_code.dart';
+
+import 'private_file.dart';
+
 /// WorkOS AuthKit, which implements the device grant as a first-class endpoint.
 const _authorizeDeviceUrl =
     'https://api.workos.com/user_management/authorize/device';
@@ -274,13 +279,26 @@ bool _expiresSoon(String jwt) {
   }
 }
 
-/// Asks the account service where to meet a device this account may use.
+/// The account service: the deployment the CLI was built against. The bearer
+/// token only ever goes here, never to a relay passed with `--relay` or named
+/// in `.rhr.yaml`, which may belong to someone else.
+String accountService() => const String.fromEnvironment(
+  'RHR_RELAY',
+  defaultValue: defaultPublicRelay,
+).replaceFirst('wss://', 'https://').replaceFirst('ws://', 'http://');
+
+/// Permission from the account service to dial one device once.
+typedef DeviceGrant = ({String rendezvous, String ticket});
+
+/// Asks the account service for a device this account may use.
 ///
-/// The answer is a session name, not a secret: it says where to wait, and
-/// membership is what decides who may. A device this account was never
-/// invited to returns null rather than a name, and the caller must not fall
-/// back to an unauthenticated session on somebody else's phone.
-Future<String?> rendezvousForDevice({
+/// The rendezvous says where the phone waits; the ticket is what the relay
+/// requires before it lets this developer in, and it lives for minutes, so
+/// every dial asks again (see [rendezvousTicket]). That also means a device
+/// removed from the account stops answering within one ticket's lifetime.
+/// A device this account was never invited to returns null, and the caller
+/// must not fall back to an unauthenticated session on somebody's phone.
+Future<DeviceGrant?> requestDeviceGrant({
   required String service,
   required String installationId,
   required AccountSession session,
@@ -298,14 +316,33 @@ Future<String?> rendezvousForDevice({
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
     if (response.statusCode != 200) return null;
-    final json = jsonDecode(body) as Map<String, Object?>;
-    final rendezvous = json['rendezvous'];
-    return rendezvous is String ? rendezvous : null;
+    final json = jsonDecode(body);
+    if (json is! Map<String, Object?>) return null;
+    return switch (json) {
+      {'rendezvous': final String rendezvous, 'ticket': final String ticket} =>
+        (rendezvous: rendezvous, ticket: ticket),
+      _ => null,
+    };
   } on Exception {
     return null;
   } finally {
     if (client == null) http.close();
   }
+}
+
+/// A fresh ticket for dialing [rendezvous], or null when this developer is
+/// signed out or the device has left their account.
+Future<String?> rendezvousTicket(String rendezvous) async {
+  final installationId = rhrRendezvousInstallation(rendezvous);
+  if (installationId == null) return null;
+  final session = await currentAccountSession();
+  if (session == null) return null;
+  final grant = await requestDeviceGrant(
+    service: accountService(),
+    installationId: installationId,
+    session: session,
+  );
+  return grant?.rendezvous == rendezvous ? grant?.ticket : null;
 }
 
 /// The device this project last connected to.
@@ -346,14 +383,8 @@ File accountSessionFile() {
 /// The token authorises this user's devices, so it deserves the same care
 /// as an SSH key: on a shared machine the default umask would otherwise leave
 /// it world-readable.
-Future<void> saveAccountSession(AccountSession session) async {
-  final file = accountSessionFile();
-  await file.parent.create(recursive: true);
-  await file.writeAsString(jsonEncode(session.toJson()));
-  if (!Platform.isWindows) {
-    await Process.run('chmod', ['600', file.path]);
-  }
-}
+Future<void> saveAccountSession(AccountSession session) async =>
+    writePrivateFile(accountSessionFile(), jsonEncode(session.toJson()));
 
 Future<AccountSession?> loadAccountSession() async {
   final file = accountSessionFile();

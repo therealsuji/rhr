@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:rhr_bridge/session_code.dart';
 import 'package:test/test.dart';
 
 String _findRepo() {
@@ -72,7 +73,7 @@ void main() {
     'default direct transport uses a relay that rejects binary payloads',
     () async {
       final port = await _freePort();
-      final code = 'direct-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final relayLines = <String>[];
       final cliLines = <String>[];
       final deviceLines = <String>[];
@@ -166,7 +167,7 @@ void main() {
     '--no-direct keeps the relay-only transport working',
     () async {
       final port = await _freePort();
-      final code = 'relay-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final relayLines = <String>[];
       final cliLines = <String>[];
       final deviceLines = <String>[];
@@ -250,7 +251,7 @@ void main() {
     'reconnecting forever',
     () async {
       final port = await _freePort();
-      final code = 'refuse-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final relayLines = <String>[];
       final cliLines = <String>[];
       final deviceLines = <String>[];

@@ -1,27 +1,49 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
+import 'package:pointycastle/export.dart' show ECPrivateKey, ECPublicKey;
+import 'package:webrtc_dart/webrtc_dart.dart'
+    show CertificateInfo, generateSelfSignedCertificate;
 
 /// A single-session relay embedded in `rhr run` for same-LAN transfers.
 ///
 /// It deliberately mirrors the public relay's interface, so every byte above
 /// this seam uses the same tunnel implementation regardless of transport.
+///
+/// The phone reaches it over TLS with a certificate minted for this run. No CA
+/// can vouch for a laptop's LAN address, so the connection link carries the
+/// certificate's SHA-256 ([certificatePin]) and the phone accepts nothing
+/// else. In plaintext, anyone on the same Wi-Fi could read the session code
+/// off the wire and take the phone's VM service. This process dials its own
+/// end over loopback, where nothing crosses a network.
 final class LocalRelay {
-  LocalRelay._(this._server, this.sessionCode, this.lanAddress);
+  LocalRelay._(
+    this._lanServer,
+    this._loopbackServer,
+    this.sessionCode,
+    this.lanAddress,
+    this.certificatePin,
+  );
 
-  final HttpServer _server;
+  final HttpServer _lanServer;
+  final HttpServer _loopbackServer;
   final String sessionCode;
   final InternetAddress lanAddress;
+
+  /// SHA-256 of the LAN certificate, base64url without padding.
+  final String certificatePin;
 
   WebSocket? _device;
   WebSocket? _host;
   String? _lastDeviceInfo;
   final _subscriptions = <WebSocket, StreamSubscription<Object?>>{};
 
-  int get port => _server.port;
   int get activeSubscriptionCount => _subscriptions.length;
-  String get loopbackUrl => 'ws://127.0.0.1:$port';
-  String get advertisedUrl => 'ws://${lanAddress.address}:$port';
+  String get loopbackUrl => 'ws://127.0.0.1:${_loopbackServer.port}';
+  String get advertisedUrl => 'wss://${lanAddress.address}:${_lanServer.port}';
 
   static Future<LocalRelay?> start(
     String sessionCode, {
@@ -29,14 +51,76 @@ final class LocalRelay {
   }) async {
     final address = advertisedAddress ?? await _preferredLanAddress();
     if (address == null) return null;
-    final server = await HttpServer.bind(InternetAddress.anyIPv4, 0);
-    final relay = LocalRelay._(server, sessionCode, address);
-    relay._serve();
+    final (:context, :pin) = await _mintCertificate();
+    // Bound to the advertised address only, not every interface: a VPN or a
+    // public interface has no business reaching a session meant for the
+    // phone on this LAN.
+    final lan = await HttpServer.bindSecure(address, 0, context);
+    final loopback = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final relay = LocalRelay._(lan, loopback, sessionCode, address, pin);
+    relay._serve(lan);
+    relay._serve(loopback);
     return relay;
   }
 
-  void _serve() {
-    _server.listen((request) async {
+  /// A self-signed P-256 certificate for this run, and its pin.
+  static Future<({SecurityContext context, String pin})>
+  _mintCertificate() async {
+    final now = DateTime.now().toUtc();
+    final pair = await generateSelfSignedCertificate(
+      info: CertificateInfo(
+        commonName: 'rhr local relay',
+        // A phone whose clock runs behind must not see a certificate from
+        // the future. The pin, not the dates, is what the phone trusts.
+        notBefore: now.subtract(const Duration(days: 1)),
+        notAfter: now.add(const Duration(days: 7)),
+      ),
+    );
+    final context = SecurityContext()
+      ..useCertificateChainBytes(
+        utf8.encode(_pem('CERTIFICATE', pair.certificate)),
+      )
+      ..usePrivateKeyBytes(
+        utf8.encode(
+          _pem('EC PRIVATE KEY', _sec1(pair.privateKey, pair.publicKey)),
+        ),
+      );
+    final pin = base64Url
+        .encode(sha256.convert(pair.certificate).bytes)
+        .replaceAll('=', '');
+    return (context: context, pin: pin);
+  }
+
+  static String _pem(String label, List<int> der) {
+    final body = base64.encode(der);
+    final lines = [
+      for (var i = 0; i < body.length; i += 64)
+        body.substring(i, (i + 64).clamp(0, body.length)),
+    ];
+    return '-----BEGIN $label-----\n${lines.join('\n')}\n-----END $label-----\n';
+  }
+
+  /// The P-256 key as SEC 1 `ECPrivateKey` DER (RFC 5915), the form
+  /// `EC PRIVATE KEY` PEM carries. Every field has a fixed size for this
+  /// curve, so the encoding is spelled out rather than built.
+  static Uint8List _sec1(ECPrivateKey privateKey, ECPublicKey publicKey) {
+    final d = privateKey.d!.toRadixString(16).padLeft(64, '0');
+    final scalar = [
+      for (var i = 0; i < 64; i += 2)
+        int.parse(d.substring(i, i + 2), radix: 16),
+    ];
+    final point = publicKey.Q!.getEncoded(false); // 0x04 || X || Y
+    return Uint8List.fromList([
+      0x30, 0x77, // SEQUENCE
+      0x02, 0x01, 0x01, // version 1
+      0x04, 0x20, ...scalar, // privateKey
+      0xa0, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+      0xa1, 0x44, 0x03, 0x42, 0x00, ...point, // publicKey
+    ]);
+  }
+
+  void _serve(HttpServer server) {
+    server.listen((request) async {
       if (request.uri.path == '/healthz') {
         request.response
           ..statusCode = HttpStatus.ok
@@ -57,6 +141,15 @@ final class LocalRelay {
       // OkHttp rejects Dart's permessage-deflate response because it does not
       // offer that extension. Tunnel frames are already binary chunks, so
       // WebSocket compression would add CPU cost without helping transfers.
+      // One host per phone, like the public relay: a second host end
+      // is refused rather than allowed to evict the first.
+      if (segments[2] == 'host' && _host != null) {
+        request.response
+          ..statusCode = HttpStatus.conflict
+          ..write('busy: another host is connected to this device');
+        await request.response.close();
+        return;
+      }
       final socket = await WebSocketTransformer.upgrade(
         request,
         compression: CompressionOptions.compressionOff,
@@ -101,7 +194,6 @@ final class LocalRelay {
   }
 
   void _attachHost(WebSocket socket) {
-    _host?.close(4001, 'replaced by new connection');
     _host = socket;
     _subscriptions[socket] = socket.listen(
       (message) => _safeAdd(_device, message),
@@ -142,7 +234,8 @@ final class LocalRelay {
     _subscriptions.clear();
     await _device?.close(1001, 'local relay stopped');
     await _host?.close(1001, 'local relay stopped');
-    await _server.close(force: true);
+    await _lanServer.close(force: true);
+    await _loopbackServer.close(force: true);
   }
 
   static Future<InternetAddress?> _preferredLanAddress() async {

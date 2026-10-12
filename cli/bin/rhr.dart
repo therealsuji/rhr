@@ -34,7 +34,9 @@ import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/native_fingerprint.dart';
 import 'package:rhr_cli/player_builder.dart';
+import 'package:rhr_cli/peer_message.dart';
 import 'package:rhr_cli/player_update.dart';
+import 'package:rhr_cli/private_file.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/account_auth.dart';
 import 'package:rhr_cli/agent_apk.dart';
@@ -118,7 +120,7 @@ player build options:
 
 attach options:
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
-  --code <session>      session code, 16+ chars (or `code:` in .rhr.yaml)
+  --code <session>      session code, rhr-xxxx-xxxx-xxxx (or `code:` in .rhr.yaml)
   --device <id>         a phone on your account (see `rhr devices`)
   --project <dir>       Flutter project dir (default: current dir)
   --sync-assets         also push build/flutter_assets — required for the
@@ -584,6 +586,7 @@ Future<void> main(List<String> args) async {
   // default, so a bare `rhr attach --code` should meet it there.
   final cfg = _loadConfig(project);
   relay ??= cfg['relay'] ?? defaultPublicRelay;
+  _requireAllowedRelay(relay);
   code ??= cfg['code'];
   if (direct && cfg['direct']?.toLowerCase() == 'false') direct = false;
 
@@ -598,6 +601,7 @@ Future<void> main(List<String> args) async {
     stderr.write(_usage);
     exit(64);
   }
+  _requireValidSessionCode(code);
 
   // Build the asset bundle BEFORE touching the relay: the build can take a
   // minute, and an idle dev WebSocket has been observed getting dropped
@@ -679,6 +683,9 @@ Future<void> main(List<String> args) async {
       // another device or wait deliberately.
       stderr.writeln('[rhr] $busy');
       exit(_deviceBusyExitCode);
+    } on DeviceAccessException catch (refused) {
+      stderr.writeln('[rhr] $refused');
+      exit(1);
     } on Exception catch (e) {
       stderr.writeln('[rhr] session error: $e');
     }
@@ -835,7 +842,31 @@ Map<String, String> _loadConfig(String project) {
     }
     if (key == 'relay' || key == 'code' || key == 'direct') out[key] = value;
   }
+  if (out.containsKey('code') && _isTrackedByGit(project, f.path)) {
+    // A session code is a bearer credential for the phone's VM service. In a
+    // committed file it reaches everyone with read access to the repository,
+    // for as long as the history exists.
+    stderr.writeln(
+      '[rhr] warning: .rhr.yaml pins a session code and is tracked by git. '
+      'Anyone who can read the repository can attach to that phone. Remove '
+      '`code:` and let rhr remember the code in .dart_tool/rhr instead.',
+    );
+  }
   return out;
+}
+
+bool _isTrackedByGit(String project, String path) {
+  try {
+    return Process.runSync('git', [
+          'ls-files',
+          '--error-unmatch',
+          '--',
+          path,
+        ], workingDirectory: project).exitCode ==
+        0;
+  } on ProcessException {
+    return false; // no git, nothing committed
+  }
 }
 
 /// One relay session: tunnel + optional flutter attach + optional asset sync.
@@ -870,6 +901,10 @@ Future<int?> _runSession({
     // so say who has it and stop — the caller must not treat this as a
     // transient relay failure.
     stderr.writeln('[rhr] $e');
+    rethrow;
+  } on DeviceAccessException {
+    // Ends the session loop: no number of retries makes a device that left
+    // the account answer.
     rethrow;
   } catch (e) {
     stderr.writeln('[rhr] could not connect to any relay for code "$code": $e');
@@ -1076,7 +1111,8 @@ Future<int?> _runSession({
   transport.stream.listen(
     (msg) {
       if (msg is String) {
-        final m = jsonDecode(msg) as Map<String, dynamic>;
+        final m = decodePeerMessage(msg);
+        if (m == null) return;
         if (m['t'] == 'info') {
           devFsDelta = m['devfsDelta'] == 1;
           if (m['playerCertificate'] case final String certificate) {
@@ -1167,7 +1203,13 @@ Future<int?> _runSession({
             assetStoreId = announcedAssetStoreId is String
                 ? announcedAssetStoreId
                 : '';
-            vmReady.complete(Uri.parse(connectorVm));
+            final vm = Uri.tryParse(connectorVm);
+            if (vm == null) {
+              stderr.writeln('[rhr] the phone announced an unusable VM URI');
+              unawaited(leave(78));
+              return;
+            }
+            vmReady.complete(vm);
             return;
           }
           final raw = m['compatibility'];
@@ -1256,15 +1298,39 @@ Future<int?> _runSession({
             unawaited(leave(78));
             return;
           }
-          vmReady.complete(Uri.parse(vmValue));
+          final vm = Uri.tryParse(vmValue);
+          if (vm == null) {
+            stderr.writeln('[rhr] the phone announced an unusable VM URI');
+            unawaited(leave(78));
+            return;
+          }
+          vmReady.complete(vm);
         }
         return;
       }
-      final f = decodeFrame(msg as List<int>);
+      final ({int op, int channel, Uint8List payload}) f;
+      try {
+        f = decodeFrame(msg as List<int>);
+        if (f.op == opAck) decodeAckCount(f.payload);
+      } on FormatException catch (error) {
+        // A frame the protocol cannot produce: the peer is broken or hostile.
+        // Drop the session rather than let it crash the CLI.
+        stderr.writeln('[rhr] malformed frame from the phone: $error');
+        if (!wsDied.isCompleted) wsDied.complete();
+        return;
+      }
       switch (f.op) {
         case opData:
           final answer = devFsAnswers[f.channel];
           if (answer != null) {
+            // An answer is a short HTTP status from the phone's DevFS. One
+            // that keeps growing is not an answer; refuse to buffer it.
+            if (answer.bytes.length + f.payload.length > _maxDevFsAnswer) {
+              throw FormatException(
+                'DevFS answer on channel ${f.channel} exceeds '
+                '$_maxDevFsAnswer bytes',
+              );
+            }
             answer.bytes.add(f.payload);
           } else {
             sockets[f.channel]?.add(f.payload);
@@ -1939,9 +2005,13 @@ Future<int?> _runSession({
   // connector one that never syncs assets. Gating the pid file on syncAssets
   // meant `rhr attach` refused those with "no flutter attach is running to do
   // it" while one was running perfectly well.
-  final effectivePidFile =
-      pidFile ??
-      '${Directory.systemTemp.path}/rhr_attach_${DateTime.now().millisecondsSinceEpoch}.pid';
+  //
+  // Its contents decide which process gets signalled, so it lives in this
+  // user's private state directory. A predictable name in a shared /tmp let
+  // another local user plant a pid of their choosing.
+  final stateDirectory = Directory('$project/.dart_tool/rhr');
+  ensurePrivateDirectory(stateDirectory);
+  final effectivePidFile = pidFile ?? '${stateDirectory.path}/attach.pid';
   final stalePid = File(effectivePidFile);
   if (stalePid.existsSync()) stalePid.deleteSync();
   attachPidFile = effectivePidFile;
@@ -2514,18 +2584,16 @@ Future<int> _runAttachProductFlow({
   final sessionCode =
       code ?? config['code'] ?? savedCode ?? mintRhrSessionCode();
   _requireValidSessionCode(sessionCode);
-  savedSession.parent.createSync(recursive: true);
-  savedSession.writeAsStringSync(
+  writePrivateFile(
+    savedSession,
     jsonEncode({
       'code': sessionCode,
       'relay': relay ?? config['relay'],
       'created': DateTime.now().toUtc().toIso8601String(),
     }),
-    flush: true,
   );
-  if (!Platform.isWindows)
-    await Process.run('chmod', ['600', savedSession.path]);
   final configuredRelay = relay ?? config['relay'];
+  if (configuredRelay != null) _requireAllowedRelay(configuredRelay);
   preferDirect ??= config['direct']?.toLowerCase() != 'false';
   final localRelay = await LocalRelay.start(sessionCode);
   final deviceRelays = relayCandidates(
@@ -2536,15 +2604,21 @@ Future<int> _runAttachProductFlow({
     local: localRelay?.loopbackUrl,
     configured: configuredRelay,
   );
+  final deepLink = sessionConnectionLink(
+    sessionCode,
+    deviceRelays,
+    pin: localRelay?.certificatePin,
+  );
+  final link = sessionConnectionWebLink(deepLink).toString();
+  // The QR carries the deep link itself, so a scan and a tapped link go
+  // through the same parser and the same relay checks on the phone.
   final qrPayload = configuredRelay == null && localRelay == null
       ? sessionCode
-      : jsonEncode({'code': sessionCode, 'relays': deviceRelays});
+      : deepLink.toString();
   final qr = renderTerminalQr(qrPayload);
-  final deepLink = sessionConnectionLink(sessionCode, deviceRelays);
-  final link = sessionConnectionWebLink(deepLink).toString();
   final connectionFile = File('$project/.dart_tool/rhr/connection.json');
-  await connectionFile.parent.create(recursive: true);
-  await connectionFile.writeAsString(
+  writePrivateFile(
+    connectionFile,
     jsonEncode({
       'code': sessionCode,
       'url': link,
@@ -2553,9 +2627,6 @@ Future<int> _runAttachProductFlow({
       'qrPayload': qrPayload,
     }),
   );
-  if (!Platform.isWindows) {
-    await Process.run('chmod', ['600', connectionFile.path]);
-  }
   stderr.write(
     '\nTap to connect: $link\nSession code: $sessionCode\n'
     'Connection JSON: ${connectionFile.absolute.path}\n\n'
@@ -2640,6 +2711,9 @@ Future<int> _runAttachProductFlow({
         // another device or wait deliberately.
         stderr.writeln('[rhr] $busy');
         return _deviceBusyExitCode;
+      } on DeviceAccessException catch (refused) {
+        stderr.writeln('[rhr] $refused');
+        return 1;
       } on Exception catch (error) {
         stderr.writeln('[rhr] session error: $error');
       }
@@ -2683,12 +2757,12 @@ Future<String?> _resolveDevice({
     stderr.writeln('[rhr] not signed in — run `rhr login`');
     exit(1);
   }
-  final rendezvous = await rendezvousForDevice(
-    service: _accountService(),
+  final grant = await requestDeviceGrant(
+    service: accountService(),
     installationId: wanted,
     session: session,
   );
-  if (rendezvous == null) {
+  if (grant == null) {
     if (device == null) {
       // The remembered phone has left the account. Say so and carry on
       // rather than failing a command the user did not aim at it.
@@ -2702,15 +2776,9 @@ Future<String?> _resolveDevice({
     exit(1);
   }
   await rememberDevice(project, wanted);
-  return rendezvous;
+  // Only the name: the relay race asks for a fresh ticket on every dial.
+  return grant.rendezvous;
 }
-
-/// The account service, derived from the relay: they are the same deployment,
-/// and a user who pointed at a private relay means that one.
-String _accountService() => const String.fromEnvironment(
-  'RHR_RELAY',
-  defaultValue: defaultPublicRelay,
-).replaceFirst('wss://', 'https://').replaceFirst('ws://', 'http://');
 
 /// `rhr devices`: list the phones on this account, or remove one.
 Future<int> _devices(List<String> args) async {
@@ -2726,7 +2794,7 @@ Future<int> _devices(List<String> args) async {
 
   final http = HttpClient();
   try {
-    final base = _accountService();
+    final base = accountService();
     if (removing != null) {
       final request = await http.deleteUrl(
         Uri.parse(
@@ -2790,13 +2858,10 @@ Future<int> _invite() async {
     stderr.writeln('[rhr] not signed in — run `rhr login`');
     return 1;
   }
-  final relay = _accountService();
+  final relay = accountService();
   final http = HttpClient();
   try {
-    final uri = Uri.parse(
-      '$relay/account/invite?email=${Uri.encodeQueryComponent(session.email)}',
-    );
-    final request = await http.postUrl(uri);
+    final request = await http.postUrl(Uri.parse('$relay/account/invite'));
     request.headers.add('Authorization', 'Bearer ${session.accessToken}');
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
@@ -2805,17 +2870,21 @@ Future<int> _invite() async {
       return 1;
     }
     final json = jsonDecode(body) as Map<String, Object?>;
-    // The payload names the service as well as the token: the phone redeems
-    // over HTTPS with the account service, never through the relay socket.
+    // The phone redeems over HTTPS with the account service its build names,
+    // never through the relay socket, and asks the service whose account
+    // this is rather than trusting the QR. `service` only lets a phone built
+    // for another deployment say so instead of failing obscurely.
     final payload = jsonEncode({
-      'v': 1,
+      'v': 2,
       'join': json['token'],
       'service': relay,
-      'account': session.email,
     });
+    final account = json['account'] is String && json['account'] != ''
+        ? json['account']! as String
+        : session.email;
     final qr = renderTerminalQr(payload);
     stdout.writeln('\n${qr.text}');
-    stdout.writeln('  Scan with the rhr player to join ${session.email}');
+    stdout.writeln('  Scan with the rhr player to join $account');
     stdout.writeln('  Single-use, expires in 5 minutes.\n');
     return 0;
   } finally {
@@ -3049,8 +3118,29 @@ void _logWebRtc() {
 
 /// The phone rejects a malformed code without saying so, which leaves both
 /// ends waiting on a session that can never form. Refuse it here instead.
+/// The most a DevFS upload answer may hold. Answers are HTTP status lines
+/// with a short body.
+const _maxDevFsAnswer = 64 * 1024;
+
+/// Ends the process unless [relay] is `wss`, or plain `ws` on loopback. A
+/// plaintext relay anywhere else sends the session code, and with it the
+/// phone's VM service, to whoever can see the traffic.
+void _requireAllowedRelay(String relay) {
+  final uri = Uri.tryParse(relay);
+  if (uri != null && isAllowedRelay(uri)) return;
+  stderr.writeln(
+    '[rhr] "$relay" is not a usable relay. Use wss://, or ws:// only on '
+    'this machine (127.0.0.1). Put a private relay behind TLS.',
+  );
+  exit(64);
+}
+
+/// Ends the process unless [code] is a minted session code or an account
+/// rendezvous. A hand-picked code is guessable, and one carrying `/` or `?`
+/// would rewrite the relay path it is spliced into.
 void _requireValidSessionCode(String code) {
   if (isValidRhrSessionCode(code)) return;
+  if (rhrRendezvousInstallation(code) != null) return;
   stderr.writeln(
     '[rhr] "$code" is not a session code. Codes look like rhr-7kqp-3mzx-t9fa: '
     'three groups of four from a-z and 2-9, without i, l, o, 0 or 1. '

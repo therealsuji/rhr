@@ -124,11 +124,13 @@ Future<({bool ok, String message})> installLauncher() async {
   if (existing.existsSync() && existing.readAsStringSync() == script) {
     return (ok: true, message: '$launcherPath is up to date ($tools)');
   }
-  // One fixed place, so a repeated setup does not leave copies behind and
-  // the command it prints stays the same.
-  final staged = File(
-    '${Directory.systemTemp.path}/rhr-launcher-${Platform.environment['USER'] ?? 'user'}',
-  )..writeAsStringSync(script);
+  // Staged in a fresh directory only this user can enter (mkdtemp, 0700).
+  // A fixed name in a shared /tmp let another local user plant the file and
+  // rewrite it while sudo waited for a password, and root then installed
+  // their script as the launcher every user runs.
+  final stagingDirectory = Directory.systemTemp.createTempSync('rhr-launcher-');
+  final staged = File('${stagingDirectory.path}/rhr')
+    ..writeAsStringSync(script);
   // The folder can be missing on a fresh machine (Apple Silicon Macs keep
   // Homebrew elsewhere).
   final args = [
@@ -151,7 +153,7 @@ Future<({bool ok, String message})> installLauncher() async {
       installed = await sudo.exitCode == 0;
     }
     if (installed) {
-      staged.deleteSync();
+      stagingDirectory.deleteSync(recursive: true);
       return (ok: true, message: 'installed $launcherPath ($tools)');
     }
     return (

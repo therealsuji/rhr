@@ -26,6 +26,7 @@ import 'package:rhr_bridge/tunnel.dart';
 import 'package:rhr_cli/asset_sync.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
+import 'package:rhr_cli/peer_message.dart';
 import 'package:rhr_cli/relay_config.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:rhr_cli/terminal_qr.dart';
@@ -214,7 +215,8 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
   transport.stream.listen(
     (msg) {
       if (msg is String) {
-        final m = jsonDecode(msg) as Map<String, dynamic>;
+        final m = decodePeerMessage(msg);
+        if (m == null) return;
         if (m['t'] == 'info') {
           final announcedAssetStoreId = m['assetStoreId'];
           if (announcedAssetStoreId is! String ||
@@ -230,7 +232,7 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
             guestReady.complete();
           }
           final rawCompatibility = m['compatibility'];
-          if (rawCompatibility is! Map<String, dynamic>) {
+          if (rawCompatibility is! Map<String, Object?>) {
             stderr.writeln(
               '[rhr] COMPATIBILITY_BLOCKED: the installed player does not '
               'report its Flutter runtime identity. Rebuild and reinstall the '
@@ -260,7 +262,11 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
             );
             exit(78);
           }
-          final announcedVm = Uri.parse(vmValue);
+          final announcedVm = Uri.tryParse(vmValue);
+          if (announcedVm == null) {
+            stderr.writeln('[rhr] the phone announced an unusable VM URI');
+            exit(78);
+          }
           if (!vmReady.isCompleted) {
             activeVm = announcedVm;
             vmReady.complete(announcedVm);
@@ -277,7 +283,17 @@ Future<bool> _serve(String relay, String code, bool preferDirect) async {
         }
         return;
       }
-      final f = decodeFrame(msg as List<int>);
+      final ({int op, int channel, Uint8List payload}) f;
+      try {
+        f = decodeFrame(msg as List<int>);
+        if (f.op == opAck) decodeAckCount(f.payload);
+      } on FormatException catch (error) {
+        // A frame the protocol cannot produce: the peer is broken or hostile.
+        // Drop the session rather than let it crash the CLI.
+        stderr.writeln('[rhr] malformed frame from the phone: $error');
+        if (!wsDied.isCompleted) wsDied.complete();
+        return;
+      }
       switch (f.op) {
         case opData:
           sockets[f.channel]?.add(f.payload);

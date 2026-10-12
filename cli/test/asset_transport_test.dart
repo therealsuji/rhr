@@ -256,7 +256,7 @@ OFFLINE offline transport_id:6
         'run-as',
         'dev.rhr.rhr_player',
         'dd',
-        'of=/data/player/assets/kernel_blob.bin',
+        "of='/data/player/assets/kernel_blob.bin'",
         'bs=4194304',
         'seek=3',
         'conv=notrunc',

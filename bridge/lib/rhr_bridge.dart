@@ -213,7 +213,16 @@ class RhrBridge {
         }
 
         void handleFrame(Object raw) {
-          final f = decodeFrame(raw as List<int>);
+          final ({int op, int channel, Uint8List payload}) f;
+          try {
+            f = decodeFrame(raw as List<int>);
+            if (f.op == opAck) decodeAckCount(f.payload);
+          } on FormatException catch (error) {
+            // A frame the protocol cannot produce. Dropping the session is
+            // the developer's problem; crashing the app over it is not.
+            failDirect('malformed tunnel frame: $error');
+            return;
+          }
           switch (f.op) {
             case opOpen when f.payload.isNotEmpty:
               // Device control and native logs live in the Android player;
@@ -235,7 +244,17 @@ class RhrBridge {
               if (sock != null) {
                 sock.add(f.payload);
               } else {
-                _pending[f.channel]?.addAll(f.payload);
+                final pending = _pending[f.channel];
+                // An honest developer stays inside one flow-control window
+                // until the VM socket opens; one that does not gets the
+                // channel closed rather than this process's memory.
+                if (pending != null &&
+                    pending.length + f.payload.length > windowBytes) {
+                  _pending.remove(f.channel);
+                  unawaited(sendFrame(encodeFrame(opClose, f.channel)));
+                  return;
+                }
+                pending?.addAll(f.payload);
               }
               // Ack on receipt: buffered bytes are bounded by the window.
               unawaited(sendFrame(encodeAck(f.channel, f.payload.length)));

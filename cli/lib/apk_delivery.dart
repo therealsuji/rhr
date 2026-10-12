@@ -8,13 +8,13 @@
 // it on the phone without a cable.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:rhr_bridge/session_code.dart';
 import 'package:rhr_bridge/tunnel.dart';
 
 import 'direct_session_transport.dart';
+import 'peer_message.dart';
 import 'player_update.dart';
 import 'relay_race.dart';
 
@@ -63,7 +63,8 @@ Future<void> deliverViaRelay({
           hello.complete();
           return;
         }
-        sender?.handleMessage(jsonDecode(msg) as Map<String, dynamic>);
+        final message = decodePeerMessage(msg);
+        if (message != null) sender?.handleMessage(message);
       } else {
         final f = decodeFrame(msg as List<int>);
         if (f.op == opAck && PlayerUpdateSender.isUpdateAck(f.channel)) {

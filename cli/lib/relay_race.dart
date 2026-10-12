@@ -6,6 +6,11 @@ import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
 
+import 'package:rhr_bridge/session_code.dart';
+
+import 'account_auth.dart';
+import 'private_file.dart';
+
 abstract interface class RelayControlTransport {
   Stream<String> get controlStream;
   Future<String> get selectedRelay;
@@ -48,6 +53,19 @@ final class DeviceBusyException implements Exception {
   String toString() => message;
 }
 
+/// Thrown when the account service will not let this user reach a
+/// device's rendezvous: signed out, or the device left the account.
+///
+/// Retrying cannot fix it, so the caller ends rather than looping.
+final class DeviceAccessException implements Exception {
+  const DeviceAccessException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Connects the host end to several relay candidates and selects the first one
 /// that produces a device `info` message.
 ///
@@ -73,6 +91,9 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
 
   /// Header naming the claim being resumed, and carrying the granted one back.
   static const _claimHeader = 'x-rhr-claim';
+
+  /// Header carrying the account service's ticket for a rendezvous.
+  static const _ticketHeader = 'x-rhr-ticket';
 
   /// Claims this process holds, by relay and session code.
   ///
@@ -126,13 +147,33 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     required List<String> relays,
     required String code,
     File? claimFile,
+    Future<String?> Function(String rendezvous) ticketFor = rendezvousTicket,
   }) async {
+    // A rendezvous is a public name; the relay admits a developer to it only
+    // with a ticket, and tickets are short-lived, so each dial asks afresh.
+    String? ticket;
+    if (rhrRendezvousInstallation(code) != null) {
+      ticket = await ticketFor(code);
+      if (ticket == null) {
+        throw const DeviceAccessException(
+          'this device is not on your account, or you are signed out. '
+          'Run `rhr devices` to check.',
+        );
+      }
+    }
     final race = RelayRace._(code, claimFile);
     final uniqueRelays = relays.toSet();
     final refusals = <String>[];
     await Future.wait(
       uniqueRelays.map(
-        (relay) => race._connectCandidate(relay, code, refusals),
+        (relay) => race._connectCandidate(
+          relay,
+          code,
+          refusals,
+          // Only the account service can check a ticket, so no other relay
+          // in the race is handed one to replay.
+          ticket: _isAccountService(relay) ? ticket : null,
+        ),
       ),
     );
     if (refusals.isNotEmpty) {
@@ -154,11 +195,20 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     return race;
   }
 
+  static bool _isAccountService(String relay) {
+    final service = Uri.parse(accountService());
+    final candidate = Uri.tryParse(relay);
+    return candidate != null &&
+        candidate.host == service.host &&
+        candidate.port == service.port;
+  }
+
   Future<void> _connectCandidate(
     String relay,
     String code,
-    List<String> refusals,
-  ) async {
+    List<String> refusals, {
+    String? ticket,
+  }) async {
     var claim = _claims[(relay, code)];
     final file = _claimFile;
     if (claim == null && file != null && file.existsSync()) {
@@ -181,7 +231,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     try {
       socket = await WebSocket.connect(
         '$relay/s/$code/host',
-        headers: claim == null ? null : {_claimHeader: claim},
+        headers: {_claimHeader: ?claim, _ticketHeader: ?ticket},
       ).timeout(const Duration(seconds: 8));
     } catch (e) {
       // The relay refuses a claim someone else holds with 409; anything else
@@ -240,16 +290,10 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         _claims[(candidate.relay, _code)] = granted;
         final file = _claimFile;
         if (file != null) {
-          file.parent.createSync(recursive: true);
-          file.writeAsStringSync(
-            jsonEncode({
-              'code': _code,
-              'relay': candidate.relay,
-              'id': granted,
-            }),
-            flush: true,
+          writePrivateFile(
+            file,
+            jsonEncode({'code': _code, 'relay': candidate.relay, 'id': granted}),
           );
-          if (!Platform.isWindows) Process.runSync('chmod', ['600', file.path]);
         }
       }
       return;

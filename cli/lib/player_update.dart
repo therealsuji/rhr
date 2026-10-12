@@ -230,11 +230,22 @@ final class PlayerUpdateSender {
         if (target.isNotEmpty) 'target': target,
       }),
     );
-    await _awaitState(
-      {'ready'},
+    final answer = await _awaitState(
+      {'ready', 'awaiting_approval'},
       timeout: const Duration(seconds: 15),
       onTimeout: 'the player did not acknowledge the update',
     );
+    if (answer == 'awaiting_approval') {
+      // The phone asks the tester before it accepts an app it did not ask
+      // for, and gives them a minute to answer; this waits a little longer
+      // so the phone's own verdict arrives first.
+      stderr.writeln('[rhr] waiting for the tester to allow the install');
+      await _awaitState(
+        {'ready'},
+        timeout: const Duration(seconds: 75),
+        onTimeout: 'the tester did not answer the install request',
+      );
+    }
 
     // The payload always goes gzipped: an APK keeps its native libraries
     // STORED so Android can mmap them, which leaves roughly a third of the

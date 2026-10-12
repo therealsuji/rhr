@@ -147,9 +147,16 @@ final class ProjectCompatibilityProfile {
   ];
 
   CompatibilityReport differencesFrom(Map<String, dynamic> player) {
-    final report = flutter.differencesFrom(
-      FlutterCompatibility.fromJson(player),
-    );
+    final FlutterCompatibility reported;
+    try {
+      reported = FlutterCompatibility.fromJson(player);
+    } on FormatException catch (error) {
+      // An incomplete report blocks the session; it must not end the process.
+      return CompatibilityReport([
+        'the player sent ${error.message}',
+      ], const []);
+    }
+    final report = flutter.differencesFrom(reported);
     final blockers = [...report.blockers, ...nativeDifferencesFrom(player)];
     return CompatibilityReport(List.unmodifiable(blockers), report.warnings);
   }

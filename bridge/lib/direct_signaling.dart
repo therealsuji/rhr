@@ -5,7 +5,14 @@ import 'dart:convert';
 ///
 /// The relay does not interpret these messages; it only forwards them. Keeping
 /// the wire format here makes the signaling contract shared by the Dart bridge
-/// and the CLI without giving the relay access to tunnel payloads.
+/// and the CLI.
+///
+/// Each side's DTLS certificate fingerprint rides in its SDP, and the handshake
+/// is refused unless the peer's certificate matches, so nobody who can merely
+/// reach the phone's or laptop's UDP ports can join the channel. The relay is
+/// a different matter: it carries the SDP, so a relay that rewrites it can
+/// stand in the middle. A relay that only forwards sees no tunnel payloads.
+/// SECURITY.md states this trust in the relay.
 sealed class DirectSignal {
   const DirectSignal();
 

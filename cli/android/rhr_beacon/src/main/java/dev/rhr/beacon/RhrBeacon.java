@@ -68,8 +68,17 @@ public final class RhrBeacon extends ContentProvider {
         final String vm = latest;
         final Context context = getContext();
         if (context == null) return null;
-        if ("announce".equals(method) && vm != null) {
-            new Thread(() -> announce(context.getApplicationContext(), vm), "rhr-beacon").start();
+        // Any app on the phone can call this provider, so at most one retry
+        // thread runs at a time; repeated calls cannot pile threads up.
+        if ("announce".equals(method) && vm != null
+                && ANNOUNCING.compareAndSet(false, true)) {
+            new Thread(() -> {
+                try {
+                    announce(context.getApplicationContext(), vm);
+                } finally {
+                    ANNOUNCING.set(false);
+                }
+            }, "rhr-beacon").start();
         }
         if ("logs".equals(method)) return logs(context);
         return null;
@@ -177,6 +186,9 @@ public final class RhrBeacon extends ContentProvider {
         }
         return false;
     }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean ANNOUNCING =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private static void watch(Context context) {
         try {

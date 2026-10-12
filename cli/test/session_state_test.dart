@@ -9,6 +9,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:rhr_bridge/session_code.dart';
 import 'package:test/test.dart';
 
 String _findRepo() {
@@ -99,7 +100,7 @@ void main() {
   test(
     'host-first pairing: device arrives, tunnel opens',
     () async {
-      final code = 'state-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final cliLines = <String>[];
       final cli = await _spawn(
         [
@@ -154,7 +155,7 @@ void main() {
   test(
     'no peer: cli waits honestly instead of failing or hanging silently',
     () async {
-      final code = 'nope-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final cliLines = <String>[];
       final cli = await _spawn(
         [
@@ -195,7 +196,7 @@ void main() {
   test(
     'relay drop mid-session: CLI recovery loop re-pairs',
     () async {
-      final code = 'drop-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final cliLines = <String>[];
       final cli = await _spawn(
         [
@@ -265,7 +266,7 @@ void main() {
   test(
     'device death: relay drops the host so the CLI recovery loop wakes',
     () async {
-      final code = 'devdeath-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final cliLines = <String>[];
       final cli = await _spawn(
         [
@@ -335,7 +336,7 @@ void main() {
       // identity — gating on one would compare the host's Flutter against the
       // WRONG app's Flutter version and offer a player update that could not
       // possibly fix it. This test pins that the CLI accepts such a hello.
-      final code = 'conn-${DateTime.now().millisecondsSinceEpoch}';
+      final code = mintRhrSessionCode();
       final cliLines = <String>[];
       final cli = await _spawn(
         [
