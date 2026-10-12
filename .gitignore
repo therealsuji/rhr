@@ -1,7 +1,9 @@
 # Dart / Flutter
 .dart_tool/
 .packages
-pubspec.lock
+# Apps (cli, relay, player) commit pubspec.lock; libraries don't.
+/bridge/pubspec.lock
+/third_party/**/pubspec.lock
 build/
 player/release/
 .flutter-plugins
