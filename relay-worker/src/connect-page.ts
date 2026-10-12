@@ -19,10 +19,15 @@ function readLink() {
     const relays = link.searchParams.getAll('relay');
     if (link.protocol !== 'rhr:' || link.hostname !== 'connect' || link.pathname !== '' || link.port || link.username || link.password || link.hash ||
         !/^rhr-[23456789abcdefghjkmnpqrstuvwxyz]{4}-[23456789abcdefghjkmnpqrstuvwxyz]{4}-[23456789abcdefghjkmnpqrstuvwxyz]{4}$/.test(code || '') ||
-        link.searchParams.getAll('code').length !== 1 || !relays.length) throw Error();
+        link.searchParams.getAll('code').length !== 1 || !relays.length ||
+        link.searchParams.getAll('pin').length > 1 ||
+        (link.searchParams.has('pin') && !/^[A-Za-z0-9_-]{43}$/.test(link.searchParams.get('pin')))) throw Error();
     for (const value of relays) {
       const relay = new URL(value);
-      if (!['ws:', 'wss:'].includes(relay.protocol) || !relay.hostname || relay.username || relay.password || relay.hash) throw Error();
+      // Same rule as the player (bridge/lib/session_link.dart): plain ws only
+      // on loopback, where the session code never crosses a network.
+      const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(relay.hostname);
+      if (!(relay.protocol === 'wss:' || (relay.protocol === 'ws:' && loopback)) || !relay.hostname || relay.username || relay.password || relay.hash) throw Error();
     }
     document.getElementById('open').href = link.href;
     document.getElementById('code').textContent = code;

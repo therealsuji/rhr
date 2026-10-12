@@ -22,6 +22,10 @@
 //   GET /s/<code>/host    — host CLI end
 //   GET /healthz
 //
+// <code> is either a typed session code (its own credential) or a device's
+// account rendezvous, `dev-<installationId>`, which needs a ticket from the
+// host and the installation secret from the phone.
+//
 // The relay never parses tunnel frames. The one exception: the most recent
 // TEXT frame from the device (the bridge's "info" hello carrying the VM
 // service URI) is cached and replayed to a host that connects later, so
@@ -37,6 +41,7 @@
 // tears down its own successor.
 
 import {
+	type AccountsEnv,
 	accountForToken,
 	accountsForInstallation,
 	cleanLabel,
@@ -45,14 +50,22 @@ import {
 	endMembership,
 	hasMembership,
 	installationIsGenuine,
+	installationOf,
+	inviteAccount,
+	mintTicket,
 	redeemInvite,
+	refreshAccountEmail,
 	rendezvousFor,
+	ticketOpens,
 } from "./accounts";
 import { connectionPage } from "./connect-page";
 
-export interface Env {
+export interface Env extends AccountsEnv {
 	SESSIONS: DurableObjectNamespace;
-	ACCOUNTS: D1Database;
+	/** Session socket opens, per client address. */
+	CONNECT_LIMIT: RateLimit;
+	/** Account and device HTTP calls, per client address. */
+	ACCOUNT_LIMIT: RateLimit;
 }
 
 // This deployment's own WorkOS environment. The /login redirect forwards only
@@ -62,13 +75,22 @@ const AUTHKIT_HOST = "bright-dandelion-45.authkit.app";
 type Role = "device" | "host";
 
 // The tunnel grants VM-service access (arbitrary code execution in the app),
-// so the session code is a bearer token. Codes must be unguessable, and a
-// cached device info older than this is assumed stale (device WS died without
-// a close event, e.g. eviction).
-const MIN_CODE_LENGTH = 16;
+// so the session code is a bearer token. Only the shape the CLI mints is
+// accepted: anything shorter or hand-picked is guessable. Mirrors
+// bridge/lib/session_code.dart.
+const SESSION_CODE =
+	/^rhr-[2-9a-hjkmnp-z]{4}-[2-9a-hjkmnp-z]{4}-[2-9a-hjkmnp-z]{4}$/;
+
+/** Header carrying a host's rendezvous ticket from /account/connect. */
+const TICKET_HEADER = "x-rhr-ticket";
+
+/** Header carrying a phone's installation secret, on its rendezvous only. */
+const SECRET_HEADER = "x-rhr-installation-secret";
 
 /** The single relay object's name. Every session shares it. */
 const RELAY_OBJECT = "relay";
+// A cached device info older than this is assumed stale (the device socket
+// died without a close event, e.g. eviction).
 const INFO_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_CONTROL_MESSAGE_BYTES = 64 * 1024;
 const textEncoder = new TextEncoder();
@@ -328,9 +350,12 @@ export class RelaySession implements DurableObject {
 			meta.msgs++;
 			meta.bytes += messageBytes;
 		}
+		// The message's type, read from its `t` field. A substring match
+		// would let any payload that merely mentions "pause" pause the phone.
+		const type = messageType(message);
 		// Pause and resume, which only the phone may set: it is the one that
 		// knows whether the user is holding it.
-		if (role === "device" && message.includes('"pause"')) {
+		if (role === "device" && type === "pause") {
 			await this.ctx.storage.put(pausedKey(code), true);
 			await this.ctx.storage.delete(claimKey(code));
 			// 1001 (going away) rather than a custom code: the runtime accepts it
@@ -340,14 +365,14 @@ export class RelaySession implements DurableObject {
 			console.log("[rhr] device paused on the phone");
 			return;
 		}
-		if (role === "device" && message.includes('"resume"')) {
+		if (role === "device" && type === "resume") {
 			await this.ctx.storage.delete(pausedKey(code));
 			console.log("[rhr] device resumed on the phone");
 			return;
 		}
 		// A host leaving on purpose hands the device back now rather than making
 		// the next session wait out a grace period meant for crashes.
-		if (role === "host" && message.includes('"release"')) {
+		if (role === "host" && type === "release") {
 			const held = await this.ctx.storage.get<Claim>(claimKey(code));
 			if (held && held.generation === meta?.generation) {
 				await this.ctx.storage.delete(claimKey(code));
@@ -358,7 +383,7 @@ export class RelaySession implements DurableObject {
 		// Cache ONLY the device's info announcement for late-host replay. Pings
 		// and other control text must NOT overwrite it (they used to, clobbering
 		// the cached VM URI with "{"t":"ping"}").
-		if (role === "device" && message.includes('"info"')) {
+		if (role === "device" && type === "info") {
 			await this.ctx.storage.put({
 				[infoKey(code)]: message,
 				[infoAtKey(code)]: Date.now(),
@@ -399,9 +424,62 @@ export class RelaySession implements DurableObject {
 	private async onSocketGone(ws: WebSocket) {
 		if (this.roleOf(ws) === "host") {
 			await this.onHostGone(ws);
-			return;
+		} else {
+			await this.onDeviceGone(ws);
 		}
-		await this.onDeviceGone(ws);
+		await this.forgetIfIdle(this.sessionOf(ws).code, ws);
+	}
+
+	/**
+	 * Drops a session's bookkeeping once neither end is connected.
+	 *
+	 * One object holds every session, and anyone can open a socket under a
+	 * fresh code, so per-code keys that outlive their sockets would grow
+	 * storage without bound. Generations only order sockets that are alive,
+	 * so they can restart from zero. A claim in its grace period is left to
+	 * the alarm, and a pause stays until the phone resumes.
+	 */
+	private async forgetIfIdle(code: string, closing: WebSocket) {
+		const live = [
+			...this.ctx.getWebSockets(socketTag(code, "host")),
+			...this.ctx.getWebSockets(socketTag(code, "device")),
+		].filter((socket) => socket !== closing);
+		if (live.length > 0) return;
+		await this.ctx.storage.delete([
+			generationKey(code, "host"),
+			generationKey(code, "device"),
+			infoKey(code),
+			infoAtKey(code),
+			infoGenKey(code),
+		]);
+		if (await this.ctx.storage.get<Claim>(claimKey(code))) {
+			await this.scheduleSweep();
+		}
+	}
+
+	/** Wakes the object after the longest possible grace period. */
+	private async scheduleSweep() {
+		if ((await this.ctx.storage.getAlarm()) === null) {
+			await this.ctx.storage.setAlarm(Date.now() + CLAIM_GRACE_MS + 1000);
+		}
+	}
+
+	/** Deletes every claim whose grace period has run out. */
+	async alarm() {
+		const now = Date.now();
+		const claims = await this.ctx.storage.list<Claim>({ prefix: "claim:" });
+		let pending = false;
+		for (const [key, claim] of claims) {
+			const code = key.slice("claim:".length);
+			const held = this.ctx.getWebSockets(socketTag(code, "host")).length > 0;
+			if (held) continue;
+			if (claim.expiresAt <= now) {
+				await this.ctx.storage.delete(key);
+			} else {
+				pending = true;
+			}
+		}
+		if (pending) await this.scheduleSweep();
 	}
 
 	/**
@@ -413,6 +491,7 @@ export class RelaySession implements DurableObject {
 	 * against every other terminal.
 	 */
 	private async onHostGone(ws: WebSocket) {
+		await this.scheduleSweep();
 		const { code } = this.sessionOf(ws);
 		const generation = this.metaOf(ws)?.generation ?? 0;
 		const held = await this.ctx.storage.get<Claim>(claimKey(code));
@@ -500,6 +579,68 @@ export class RelaySession implements DurableObject {
 	}
 }
 
+/** A control message's `t` field, or null when it has none. */
+function messageType(message: string): string | null {
+	try {
+		const parsed: unknown = JSON.parse(message);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		const type = (parsed as { t?: unknown }).t;
+		return typeof type === "string" ? type : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether a socket may open as [role] on [code].
+ *
+ * A typed code is its own credential. A rendezvous is a public name, so both
+ * ends prove themselves: the host with a ticket from /account/connect,
+ * which is issued only to a member, and the phone with its installation
+ * secret, so nobody else can sit on its rendezvous and receive what a
+ * host sends it.
+ */
+async function admits(
+	env: Env,
+	request: Request,
+	code: string,
+	role: Role,
+): Promise<Response | null> {
+	if (SESSION_CODE.test(code)) return null;
+	const installationId = installationOf(code);
+	if (installationId === null) {
+		return new Response("not a session code", { status: 400 });
+	}
+	const admitted =
+		role === "host"
+			? await ticketOpens(env, request.headers.get(TICKET_HEADER), code)
+			: await installationIsGenuine(
+					env,
+					installationId,
+					request.headers.get(SECRET_HEADER),
+				);
+	return admitted
+		? null
+		: new Response(
+				role === "host"
+					? "this device is not on your account"
+					: "this device could not prove itself",
+				{ status: 401 },
+			);
+}
+
+/** False once [address] has spent its budget on [limiter]. */
+async function withinLimit(limiter: RateLimit, request: Request) {
+	const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+	return (await limiter.limit({ key: address })).success;
+}
+
+const tooManyRequests = () =>
+	new Response("too many requests", {
+		status: 429,
+		headers: { "retry-after": "60" },
+	});
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
@@ -550,17 +691,17 @@ export default {
 			seg[0] === "s" &&
 			(seg[2] === "device" || seg[2] === "host")
 		) {
+			const role: Role = seg[2];
 			// Native clients (CLI, bridge) send no Origin header; a browser
 			// always does. Rejecting it blocks cross-site WebSocket hijacking.
 			if (request.headers.get("Origin") !== null) {
 				return new Response("browser clients not allowed", { status: 403 });
 			}
-			if (seg[1].length < MIN_CODE_LENGTH) {
-				return new Response(
-					`session code must be at least ${MIN_CODE_LENGTH} chars`,
-					{ status: 400 },
-				);
+			if (!(await withinLimit(env.CONNECT_LIMIT, request))) {
+				return tooManyRequests();
 			}
+			const refusal = await admits(env, request, seg[1], role);
+			if (refusal) return refusal;
 			// One object for every session, not one per code. A Durable Object
 			// exists here only to hold idle sockets and introduce two peers;
 			// spending an object per session buys nothing and multiplies them
@@ -576,22 +717,41 @@ export default {
 		// Account routes. Ordinary HTTP, deliberately apart from the session
 		// socket above: that one is native-clients-only, these are reached by a
 		// phone redeeming an invite and a CLI holding the user's token.
+		if (
+			(seg[0] === "account" || seg[0] === "device") &&
+			!(await withinLimit(env.ACCOUNT_LIMIT, request))
+		) {
+			return tooManyRequests();
+		}
 		if (seg.length === 2 && seg[0] === "account" && seg[1] === "invite") {
 			if (request.method !== "POST") {
 				return new Response("method not allowed", { status: 405 });
 			}
-			const account = await accountForToken(
+			const signedIn = await accountForToken(
 				env,
 				request.headers.get("Authorization"),
-				new URL(request.url).searchParams.get("email") ?? undefined,
 			);
-			if (!account) return new Response("sign in first", { status: 401 });
+			if (!signedIn) return new Response("sign in first", { status: 401 });
+			// The address is what the phone shows on its consent screen, so it
+			// is refreshed from WorkOS before an invite carries it.
+			const account = await refreshAccountEmail(env, signedIn);
 			const invite = await createInvite(env, account.id);
 			return Response.json({
 				token: invite.token,
 				expiresAt: invite.expiresAt,
 				account: account.email,
 			});
+		}
+
+		// Whose account an invite joins, for the phone's consent screen. The
+		// invite token is a 128-bit bearer value, so answering anyone who
+		// holds it reveals nothing they could not learn by redeeming it.
+		if (seg.length === 2 && seg[0] === "device" && seg[1] === "invite") {
+			const token = url.searchParams.get("token");
+			const account = token ? await inviteAccount(env, token) : null;
+			return account === null
+				? Response.json({ error: "this invite is not valid" }, { status: 404 })
+				: Response.json({ account });
 		}
 
 		if (seg.length === 2 && seg[0] === "device" && seg[1] === "join") {
@@ -608,6 +768,9 @@ export default {
 				return new Response("invite, installationId and secret are required", {
 					status: 400,
 				});
+			}
+			if (rendezvousFor(body.installationId) === null) {
+				return new Response("not an installation id", { status: 400 });
 			}
 			const result = await redeemInvite(
 				env,
@@ -630,9 +793,10 @@ export default {
 		//
 		// Membership is checked here, before the CLI is told anything: an
 		// account that has not been invited learns only that it cannot use this
-		// device, not whether it exists or who has it. The rendezvous name is
-		// derived rather than stored, so both ends compute the same one without
-		// a lookup.
+		// device, not whether it exists or who has it. The answer carries a
+		// short-lived ticket the relay requires at the socket; the CLI asks
+		// again on every dial, so a removed membership stops working within
+		// one ticket lifetime.
 		if (seg.length === 2 && seg[0] === "account" && seg[1] === "connect") {
 			const installationId = url.searchParams.get("installationId");
 			if (!installationId) {
@@ -645,12 +809,21 @@ export default {
 			// Failing closed: an unverifiable token must never fall through to
 			// an unauthenticated session on somebody's phone.
 			if (!account) return new Response("sign in first", { status: 401 });
-			if (!(await hasMembership(env, account.id, installationId))) {
+			const rendezvous = rendezvousFor(installationId);
+			if (
+				rendezvous === null ||
+				!(await hasMembership(env, account.id, installationId))
+			) {
 				return new Response("this device is not on your account", {
 					status: 403,
 				});
 			}
-			return Response.json({ rendezvous: rendezvousFor(installationId) });
+			const { ticket, expiresAt } = await mintTicket(
+				env,
+				rendezvous,
+				account.id,
+			);
+			return Response.json({ rendezvous, ticket, expiresAt });
 		}
 
 		// The devices on the signed-in account, and removing one.

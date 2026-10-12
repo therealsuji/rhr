@@ -9,10 +9,14 @@
 // request carrying an Origin header because only native clients belong on it,
 // while these are ordinary HTTP endpoints.
 
-import { verifyAccessToken } from "./verify_token";
+import { decodeBase64Url, verifyAccessToken } from "./verify_token";
 
 export interface AccountsEnv {
 	ACCOUNTS: D1Database;
+	/** Signs rendezvous tickets. A Worker secret, never sent to a client. */
+	TICKET_KEY: string;
+	/** Reads a developer's verified email from WorkOS. A Worker secret. */
+	WORKOS_API_KEY: string;
 }
 
 /** The client whose tokens this relay accepts. A token signed for a different
@@ -46,21 +50,28 @@ export const cleanLabel = (raw: string | undefined): string => {
 	return cleaned || "phone";
 };
 
-const token = (bytes: number) => {
-	const raw = crypto.getRandomValues(new Uint8Array(bytes));
-	return btoa(String.fromCharCode(...raw))
+const base64Url = (bytes: Uint8Array) =>
+	btoa(String.fromCharCode(...bytes))
 		.replaceAll("+", "-")
 		.replaceAll("/", "_")
 		.replaceAll("=", "");
-};
+
+const token = (bytes: number) =>
+	base64Url(crypto.getRandomValues(new Uint8Array(bytes)));
+
+export interface Account {
+	id: string;
+	email: string;
+	/** The WorkOS user, from the token's signed `sub`. */
+	authUserId: string;
+}
 
 /** Resolves a WorkOS access token to the account it belongs to, creating the
  *  account on first sight. Returns null when the token is not valid. */
 export async function accountForToken(
 	env: AccountsEnv,
 	authorization: string | null,
-	claimedEmail?: string,
-): Promise<{ id: string; email: string } | null> {
+): Promise<Account | null> {
 	const bearer = authorization?.replace(/^Bearer /, "");
 	if (!bearer) return null;
 
@@ -71,36 +82,66 @@ export async function accountForToken(
 	const claims = await verifyAccessToken(bearer, CLIENT_ID);
 	if (!claims) return null;
 	const userId = claims.sub;
-	// WorkOS access tokens carry no email claim, so the CLI passes what
-	// sign-in told it. It names the account on the phone's consent screen —
-	// "join Suji's account?" — and is never an authorisation input; `sub`,
-	// which is signed, is what identifies the account.
-	const email = claims.email ?? claimedEmail ?? "";
 
 	const existing = await env.ACCOUNTS.prepare(
 		"SELECT id, email FROM accounts WHERE auth_user_id = ?",
 	)
 		.bind(userId)
 		.first<{ id: string; email: string }>();
-	if (existing) {
-		// An account created before the CLI sent an email has none stored, and
-		// a phone would then be asked to join a nameless account.
-		if (!existing.email && email) {
-			await env.ACCOUNTS.prepare("UPDATE accounts SET email = ? WHERE id = ?")
-				.bind(email, existing.id)
-				.run();
-			return { id: existing.id, email };
-		}
-		return existing;
-	}
+	if (existing) return { ...existing, authUserId: userId };
 
 	const id = `acct_${token(12)}`;
+	const email = (await verifiedEmail(env, userId)) ?? "";
 	await env.ACCOUNTS.prepare(
 		"INSERT INTO accounts (id, auth_user_id, email, created_at) VALUES (?, ?, ?, ?)",
 	)
 		.bind(id, userId, email, Date.now())
 		.run();
-	return { id, email };
+	return { id, email, authUserId: userId };
+}
+
+/**
+ * The developer's email as WorkOS knows it, or null when WorkOS cannot say.
+ *
+ * WorkOS access tokens carry no email claim, and the address names the
+ * account on the phone's consent screen ("join Suji's account?"). Taking it
+ * from the CLI let a developer call themselves anyone, so it comes from
+ * WorkOS, keyed by the signed `sub`.
+ */
+async function verifiedEmail(
+	env: AccountsEnv,
+	userId: string,
+): Promise<string | null> {
+	const response = await fetch(
+		`https://api.workos.com/user_management/users/${encodeURIComponent(userId)}`,
+		{ headers: { Authorization: `Bearer ${env.WORKOS_API_KEY}` } },
+	).catch(() => null);
+	if (!response?.ok) return null;
+	const user = (await response.json().catch(() => null)) as {
+		email?: unknown;
+		email_verified?: unknown;
+	} | null;
+	return user?.email_verified === true && typeof user.email === "string"
+		? user.email
+		: null;
+}
+
+/**
+ * Refreshes an account's email from WorkOS, keeping the stored one when
+ * WorkOS cannot answer. Called before an invite shows the address to a
+ * tester, so accounts named by the CLI's own claim in older releases are
+ * corrected the next time they invite anyone.
+ */
+export async function refreshAccountEmail(
+	env: AccountsEnv,
+	account: Account,
+): Promise<Account> {
+	const email = await verifiedEmail(env, account.authUserId);
+	if (email === null || email === account.email) return account;
+	await env.ACCOUNTS.prepare("UPDATE accounts SET email = ? WHERE id = ?")
+		.bind(email, account.id)
+		.run();
+	return { ...account, email };
 }
 
 /** Mints an invite for the user to show as a QR. */
@@ -116,6 +157,26 @@ export async function createInvite(
 		.bind(value, accountId, expiresAt)
 		.run();
 	return { token: value, expiresAt };
+}
+
+/**
+ * Whose account an unexpired invite joins, or null.
+ *
+ * The phone asks before it shows the consent screen, so the address the
+ * tester reads comes from here rather than from a QR anyone can print.
+ */
+export async function inviteAccount(
+	env: AccountsEnv,
+	inviteToken: string,
+): Promise<string | null> {
+	const row = await env.ACCOUNTS.prepare(
+		"SELECT a.email, i.expires_at FROM invites i " +
+			"JOIN accounts a ON a.id = i.account_id " +
+			"WHERE i.token = ? AND i.redeemed_by IS NULL",
+	)
+		.bind(inviteToken)
+		.first<{ email: string; expires_at: number }>();
+	return row && Date.now() <= row.expires_at ? row.email : null;
 }
 
 /** Hex SHA-256, so a leaked database does not hand over device credentials. */
@@ -135,7 +196,8 @@ async function hashSecret(secret: string): Promise<string> {
  * The installation id is public — it appears in device listings and logs —
  * so it identifies a phone but authenticates nothing. Without this, anyone
  * who read an id could see which accounts that phone had joined, and remove
- * it from them. The secret never leaves the phone except as this proof.
+ * it from them. The phone sends the secret only to the account service baked
+ * into its build, never to a relay or to a service an invite names.
  *
  * Comparison is constant-time-ish by construction: both sides are fixed-length
  * hex of a hash, so an early exit leaks nothing about the secret itself.
@@ -155,19 +217,114 @@ export async function installationIsGenuine(
 	return row.secret_hash === (await hashSecret(secret));
 }
 
+/** Installation ids are 16 random bytes, base64url without padding. */
+const INSTALLATION_ID = /^[A-Za-z0-9_-]{22}$/;
+
+const RENDEZVOUS_PREFIX = "dev-";
+
 /**
  * The session name a phone waits on when it is reached through an account.
  *
  * Derived from the installation id rather than stored, so both ends can
- * compute it without a lookup, and it is stable for the life of the
- * installation. It is not a secret: it names where to meet, and membership is
- * what decides who may. Prefixed and padded to clear the relay's 16-character
- * minimum, which exists because a session code is a bearer token — this is
- * not one, but the route enforces the same floor.
+ * compute it without a lookup. It is not a secret and grants nothing: the
+ * relay admits a developer to it only with a ticket from [mintTicket], and
+ * the phone only with its installation secret.
  */
-export function rendezvousFor(installationId: string): string {
-	const safe = installationId.replace(/[^A-Za-z0-9_-]/g, "");
-	return `dev-${safe}`.padEnd(16, "0");
+export function rendezvousFor(installationId: string): string | null {
+	return INSTALLATION_ID.test(installationId)
+		? `${RENDEZVOUS_PREFIX}${installationId}`
+		: null;
+}
+
+/** The installation a rendezvous names, or null when it is not one. */
+export function installationOf(code: string): string | null {
+	if (!code.startsWith(RENDEZVOUS_PREFIX)) return null;
+	const id = code.slice(RENDEZVOUS_PREFIX.length);
+	return INSTALLATION_ID.test(id) ? id : null;
+}
+
+/**
+ * How long a ticket admits its holder. The CLI asks for a fresh one on every
+ * dial, so this only has to outlast one connect, and a ticket that leaks out
+ * of a log is dead almost at once.
+ */
+const TICKET_TTL_MS = 2 * 60 * 1000;
+
+interface TicketClaims {
+	/** The rendezvous this ticket opens. */
+	r: string;
+	/** The account it was issued to. */
+	a: string;
+	/** Expiry, epoch milliseconds. */
+	e: number;
+}
+
+const ticketKey = (secret: string) =>
+	crypto.subtle.importKey(
+		"raw",
+		new TextEncoder().encode(secret),
+		{ name: "HMAC", hash: "SHA-256" },
+		false,
+		["sign", "verify"],
+	);
+
+/**
+ * Signs permission for one account to meet one device.
+ *
+ * Membership is checked when the ticket is issued, and the ticket is what the
+ * relay checks at the socket. Without it the rendezvous name, which travels
+ * in device listings and session hellos, was all anyone needed to reach the
+ * phone, and removing a membership revoked nothing.
+ */
+export async function mintTicket(
+	env: AccountsEnv,
+	rendezvous: string,
+	accountId: string,
+): Promise<{ ticket: string; expiresAt: number }> {
+	const expiresAt = Date.now() + TICKET_TTL_MS;
+	const claims: TicketClaims = { r: rendezvous, a: accountId, e: expiresAt };
+	const payload = base64Url(new TextEncoder().encode(JSON.stringify(claims)));
+	const signature = await crypto.subtle.sign(
+		"HMAC",
+		await ticketKey(env.TICKET_KEY),
+		new TextEncoder().encode(payload),
+	);
+	return {
+		ticket: `${payload}.${base64Url(new Uint8Array(signature))}`,
+		expiresAt,
+	};
+}
+
+/** Whether [ticket] was signed here, is unexpired, and opens [rendezvous]. */
+export async function ticketOpens(
+	env: AccountsEnv,
+	ticket: string | null,
+	rendezvous: string,
+): Promise<boolean> {
+	const [payload, signaturePart, ...rest] = (ticket ?? "").split(".");
+	if (!payload || !signaturePart || rest.length > 0) return false;
+	const signature = decodeBase64Url(signaturePart);
+	if (!signature) return false;
+	const valid = await crypto.subtle.verify(
+		"HMAC",
+		await ticketKey(env.TICKET_KEY),
+		signature as BufferSource,
+		new TextEncoder().encode(payload) as BufferSource,
+	);
+	if (!valid) return false;
+	const bytes = decodeBase64Url(payload);
+	if (!bytes) return false;
+	let claims: Partial<TicketClaims>;
+	try {
+		claims = JSON.parse(new TextDecoder().decode(bytes));
+	} catch {
+		return false;
+	}
+	return (
+		claims.r === rendezvous &&
+		typeof claims.e === "number" &&
+		Date.now() < claims.e
+	);
 }
 
 /** Whether this account may use this installation. */
@@ -292,6 +449,22 @@ export async function redeemInvite(
 		.first<{ email: string }>();
 	if (!account) return { ok: false, reason: "this account no longer exists" };
 
+	// An installation that already exists has registered its secret, and
+	// only the phone holding it may join it to anything more. Without this,
+	// anyone who read an installation id could redeem their own invite with
+	// it and enrol someone else's phone into their account.
+	const registered = await env.ACCOUNTS.prepare(
+		"SELECT 1 AS ok FROM installations WHERE id = ?",
+	)
+		.bind(installationId)
+		.first<{ ok: number }>();
+	if (
+		registered &&
+		!(await installationIsGenuine(env, installationId, secret))
+	) {
+		return { ok: false, reason: "this phone could not prove itself" };
+	}
+
 	const already = invite.redeemed_by === installationId;
 	const now = Date.now();
 
@@ -312,8 +485,8 @@ export async function redeemInvite(
 
 	await env.ACCOUNTS.batch([
 		// The first join is where a phone registers what it will prove itself
-		// with later. An installation that already exists keeps its secret: a
-		// second join must not let a stranger overwrite it.
+		// with later. An installation that already exists keeps its secret,
+		// which the check above has just proved.
 		env.ACCOUNTS.prepare(
 			"INSERT OR IGNORE INTO installations (id, secret_hash, created_at) " +
 				"VALUES (?, ?, ?)",

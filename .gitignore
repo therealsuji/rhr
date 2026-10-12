@@ -34,3 +34,6 @@ notes/
 
 # opencode-goal-plugin persisted state (may contain goal text/checkpoints)
 .opencode/goals/
+
+# wrangler dev secrets
+.dev.vars

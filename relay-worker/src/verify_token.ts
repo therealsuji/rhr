@@ -62,7 +62,9 @@ export async function verifyAccessToken(
 	// A valid signature on a token meant for somebody else, or one issued long
 	// ago, is still not authorisation to act here.
 	const now = Math.floor(Date.now() / 1000);
-	if (typeof claims.exp === "number" && claims.exp < now) return null;
+	// Required, not merely honoured when present: a token that never expires
+	// would authenticate whoever copied it for good.
+	if (typeof claims.exp !== "number" || claims.exp < now) return null;
 	if (typeof claims.nbf === "number" && claims.nbf > now) return null;
 	if (claims.iss !== `https://api.workos.com/user_management/${clientId}`) {
 		return null;
@@ -133,7 +135,7 @@ function decodeJson(part: string): Record<string, unknown> | null {
 	}
 }
 
-function decodeBase64Url(value: string): Uint8Array | null {
+export function decodeBase64Url(value: string): Uint8Array | null {
 	try {
 		const padded = value.replaceAll("-", "+").replaceAll("_", "/");
 		const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
