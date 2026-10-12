@@ -18,6 +18,29 @@ phone, or after the user stopped it is a vulnerability.
 the user's phone and can be written by anyone whose app or page is on
 screen. Treat it as untrusted input to the agent.
 
+## What protects a session
+
+- **Session codes** are minted from a CSPRNG (about 59 bits) and are the only
+  credential for a typed session. Relays refuse any other shape.
+- **Account devices** wait on a public rendezvous name. The relay admits a
+  host to it only with a ticket that the account service issues to
+  members and that expires within minutes, and admits the phone only with
+  its installation secret.
+- **The direct WebRTC path** checks each peer's DTLS certificate against the
+  fingerprint in its SDP and authenticates every ICE check, so an attacker
+  who can only reach the UDP ports cannot join it.
+- **The relay is trusted.** It sees the session code and carries the SDP, so
+  a malicious relay can reach the VM service or stand in the middle of the
+  direct path. Run a private relay, behind TLS, when that trust is not
+  acceptable.
+- **The host's LAN relay** (`rhr run` on a private network) speaks TLS
+  with a certificate minted per run; the session link carries its SHA-256 and
+  the phone accepts nothing else.
+- **A link never connects on its own.** The player names the relay and asks
+  first.
+- **Running rhr in a project trusts that project.** rhr runs the project's
+  Flutter SDK (`.fvm`), Gradle build and plugins, as `flutter run` does.
+
 ## Reporting a vulnerability
 
 Please do not open a public issue with a live session code, VM Service URL,
