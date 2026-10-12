@@ -1,123 +1,58 @@
-/// Provides protection against replay attacks by remembering received packets
-/// in a sliding window bitmap
+/// DTLS replay detection (RFC 6347 Section 4.1.2.6): a sliding window over
+/// the record sequence numbers of one epoch.
 ///
-/// The window bitmap looks as follows:
-/// ```
-///  v- upper end (ceiling)         lower end --v
-/// [111011...window_n]...[11111101...window_0]
-/// ```
+/// Bit `i` of the bitmap records whether sequence number `latest - i` was
+/// received. Anything newer than the latest is accepted and slides the window
+/// forward, however far it jumps: losing a burst of records must not wedge
+/// the connection. Anything older than the window is rejected.
 class AntiReplayWindow {
-  static const int width = 64; // Window size in bits
-  static const int intSize = 32; // Dart uses 32-bit integers for bitwise ops
+  /// Window size in records.
+  static const int width = 64;
 
-  late List<int> _window;
-  late int _ceiling; // Upper end of window / highest received seq_num
+  /// Highest sequence number received, or null before the first.
+  int? _latest;
 
-  AntiReplayWindow() {
-    reset();
-  }
+  /// Received flags for `_latest - 0` .. `_latest - 63`.
+  int _bitmap = 0;
 
-  /// Initializes the anti-replay window to its default state
+  /// Forgets everything received, as for a new epoch.
   void reset() {
-    _window = List.filled(width ~/ intSize, 0);
-    _ceiling = width - 1;
+    _latest = null;
+    _bitmap = 0;
   }
 
-  /// Checks if the packet with the given sequence number may be received
-  /// or has to be discarded
-  ///
-  /// Returns true if the packet should be accepted, false otherwise
+  /// Whether a record with [seqNum] may be processed: it is newer than any
+  /// seen, or inside the window and not seen yet.
   bool mayReceive(int seqNum) {
-    if (seqNum > _ceiling + width) {
-      // Skipped too many packets - reject to prevent DoS
-      return false;
-    } else if (seqNum > _ceiling) {
-      // Always accept new packets beyond the window
-      return true;
-    } else if (seqNum >= _ceiling - width + 1 && seqNum <= _ceiling) {
-      // Packet falls within the window - check if already received
-      return !hasReceived(seqNum);
-    } else {
-      // Too old - reject
-      return false;
-    }
+    final latest = _latest;
+    if (latest == null || seqNum > latest) return true;
+    final age = latest - seqNum;
+    return age < width && (_bitmap >> age) & 1 == 0;
   }
 
-  /// Checks if the packet with the given sequence number is marked as received
-  bool hasReceived(int seqNum) {
-    final lowerBound = _ceiling - width + 1;
+  /// Whether [seqNum] is inside the window and was received.
+  bool hasReceived(int seqNum) => !mayReceive(seqNum) && _isInWindow(seqNum);
 
-    // Check if sequence number is within window bounds
-    if (seqNum < lowerBound || seqNum > _ceiling) {
-      return false;
-    }
-
-    final bitIndex = seqNum - lowerBound;
-    final windowIndex = bitIndex ~/ intSize;
-    final windowBit = bitIndex % intSize;
-
-    // Bounds check for window array
-    if (windowIndex < 0 || windowIndex >= _window.length) {
-      return false;
-    }
-
-    final flag = 1 << windowBit;
-
-    return (_window[windowIndex] & flag) == flag;
-  }
-
-  /// Marks the packet with the given sequence number as received
+  /// Marks [seqNum] received. Call only once the record authenticated, or a
+  /// forged record could burn a genuine one's sequence number.
   void markAsReceived(int seqNum) {
-    if (seqNum > _ceiling) {
-      // Shift the window to accommodate new ceiling
-      var amount = seqNum - _ceiling;
-
-      // First shift whole blocks (32-bit chunks)
-      while (amount > intSize) {
-        for (var i = 1; i < _window.length; i++) {
-          _window[i - 1] = _window[i];
-        }
-        _window[_window.length - 1] = 0;
-        amount -= intSize;
-      }
-
-      // Now shift bitwise (to the right)
-      var overflow = 0;
-      for (var i = 0; i < _window.length; i++) {
-        // Calculate overflow from current block
-        overflow = (_window[i] << (intSize - amount)) & 0xFFFFFFFF;
-
-        // Shift current block right
-        _window[i] = (_window[i] >>> amount) & 0xFFFFFFFF;
-
-        // Add overflow from previous block
-        if (i > 0) {
-          _window[i - 1] = (_window[i - 1] | overflow) & 0xFFFFFFFF;
-        }
-      }
-
-      // Update ceiling
-      _ceiling = seqNum;
+    final latest = _latest;
+    if (latest == null || seqNum > latest) {
+      final shift = latest == null ? width : seqNum - latest;
+      // Dart ints are 64-bit: bits shifted past the window fall away.
+      _bitmap = (shift >= width ? 0 : _bitmap << shift) | 1;
+      _latest = seqNum;
+    } else if (_isInWindow(seqNum)) {
+      _bitmap |= 1 << (latest - seqNum);
     }
-
-    // Mark the bit as received
-    final lowerBound = _ceiling - width + 1;
-    final bitIndex = seqNum - lowerBound;
-    final windowIndex = bitIndex ~/ intSize;
-    final windowBit = bitIndex % intSize;
-    final flag = 1 << windowBit;
-
-    _window[windowIndex] = (_window[windowIndex] | flag) & 0xFFFFFFFF;
   }
 
-  /// Get current ceiling (highest received sequence number)
-  int get ceiling => _ceiling;
-
-  /// Get window state for debugging
-  List<int> get window => List.unmodifiable(_window);
+  bool _isInWindow(int seqNum) {
+    final latest = _latest;
+    return latest != null && seqNum <= latest && latest - seqNum < width;
+  }
 
   @override
-  String toString() {
-    return 'AntiReplayWindow(ceiling=$_ceiling, window=$_window)';
-  }
+  String toString() =>
+      'AntiReplayWindow(latest=$_latest, bitmap=0x${_bitmap.toRadixString(16)})';
 }

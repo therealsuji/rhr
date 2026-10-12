@@ -7,6 +7,8 @@ import 'package:webrtc_dart/src/rtc_peer_connection.dart';
 import 'package:webrtc_dart/src/rtp/header_extension.dart';
 import 'package:webrtc_dart/src/sdp/rtx_sdp.dart';
 import 'package:webrtc_dart/src/sdp/sdp.dart';
+import 'package:webrtc_dart/src/transport/dtls_transport.dart'
+    show RtcDtlsFingerprint;
 
 /// Generate a UUID-like string for msid attributes
 String _generateUuid() {
@@ -18,6 +20,22 @@ String _generateUuid() {
   final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
       '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+}
+
+/// The remote DTLS certificate fingerprints for [media] (RFC 8122 Section
+/// 5): its own a=fingerprint lines, or the session-level ones when it has
+/// none. Lines that are not `<hash-func> <fingerprint>` are skipped.
+List<RtcDtlsFingerprint> remoteDtlsFingerprints(SdpMessage sdp, SdpMedia media) {
+  List<RtcDtlsFingerprint> parse(List<SdpAttribute> attributes) => [
+        for (final attribute in attributes)
+          if (attribute.key == 'fingerprint')
+            if (attribute.value?.trim().split(RegExp(r'\s+'))
+                case [final algorithm, final value])
+              RtcDtlsFingerprint(
+                  algorithm: algorithm.toLowerCase(), value: value),
+      ];
+  final mediaLevel = parse(media.attributes);
+  return mediaLevel.isNotEmpty ? mediaLevel : parse(sdp.attributes);
 }
 
 /// SDPManager handles SDP building, parsing, and description state management.

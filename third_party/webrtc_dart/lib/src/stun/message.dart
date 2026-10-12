@@ -236,7 +236,12 @@ StunMessage? parseStunMessage(Uint8List data, {Uint8List? integrityKey}) {
     final padLen = paddingLength(attrLen);
 
     final attrTypeEnum = StunAttributeType.fromValue(attrType);
-    if (attrTypeEnum != null) {
+    // RFC 5389 Section 15.4: MESSAGE-INTEGRITY covers only what precedes it,
+    // so everything after it except FINGERPRINT is ignored.
+    final afterIntegrity =
+        attributes.containsKey(StunAttributeType.messageIntegrity) &&
+            attrTypeEnum != StunAttributeType.fingerprint;
+    if (attrTypeEnum != null && !afterIntegrity) {
       final def = attributeDefinitions[attrTypeEnum];
       if (def != null) {
         try {
@@ -324,11 +329,12 @@ int computeCrc32(Uint8List data) {
   return ~crc & 0xFFFFFFFF;
 }
 
-/// Compare two byte arrays
+/// Compare two byte arrays in constant time (they are HMACs)
 bool _bytesEqual(Uint8List a, Uint8List b) {
   if (a.length != b.length) return false;
+  var diff = 0;
   for (var i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) return false;
+    diff |= a[i] ^ b[i];
   }
-  return true;
+  return diff == 0;
 }

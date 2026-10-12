@@ -73,7 +73,9 @@ class ServerFlight4 extends Flight {
   final DtlsContext dtlsContext;
   final CipherContext cipherContext;
   final DtlsRecordLayer recordLayer;
-  final List<CipherSuite> cipherSuites;
+
+  /// The cipher suite chosen from the client's offer.
+  final CipherSuite cipherSuite;
   final Uint8List? certificate;
   final dynamic privateKey;
   final bool requireClientCert;
@@ -83,7 +85,7 @@ class ServerFlight4 extends Flight {
     required this.dtlsContext,
     required this.cipherContext,
     required this.recordLayer,
-    required this.cipherSuites,
+    required this.cipherSuite,
     this.certificate,
     this.privateKey,
     this.requireClientCert = false,
@@ -114,15 +116,14 @@ class ServerFlight4 extends Flight {
       extensions.add(UseSrtpExtension(profiles: [srtpProfile!]));
     }
 
-    final selectedCipher = _selectCipherSuite();
     final serverHello = ServerHello.create(
       sessionId: dtlsContext.sessionId ?? Uint8List(32),
-      cipherSuite: selectedCipher,
+      cipherSuite: cipherSuite,
       extensions: extensions,
     );
     dtlsContext.serverHello = serverHello;
     dtlsContext.localRandom = serverHello.random.bytes;
-    cipherContext.cipherSuite = selectedCipher;
+    cipherContext.cipherSuite = cipherSuite;
 
     final serverHelloBody = serverHello.serialize();
     final serverHelloMsg = wrapHandshakeMessage(
@@ -184,8 +185,6 @@ class ServerFlight4 extends Flight {
 
     // 4. CertificateRequest (if requiring client authentication)
     // RFC 5246 Section 7.4.4 - sent between ServerKeyExchange and ServerHelloDone
-    // Note: Browsers typically don't send client certificates in WebRTC.
-    // This is here for completeness to match werift (flight4.ts).
     if (requireClientCert) {
       final certRequest = CertificateRequest.createDefault();
       final certReqBody = certRequest.serialize();
@@ -218,22 +217,6 @@ class ServerFlight4 extends Flight {
     // Process client's Certificate, ClientKeyExchange, CertificateVerify,
     // ChangeCipherSpec, and Finished messages
     return true;
-  }
-
-  /// Select cipher suite from client's offered suites
-  CipherSuite _selectCipherSuite() {
-    if (dtlsContext.clientHello == null) {
-      return cipherSuites.first;
-    }
-
-    // Find first match
-    for (final offered in dtlsContext.clientHello!.cipherSuites) {
-      if (cipherSuites.contains(offered)) {
-        return offered;
-      }
-    }
-
-    return cipherSuites.first;
   }
 }
 

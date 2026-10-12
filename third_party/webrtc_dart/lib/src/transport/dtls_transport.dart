@@ -7,6 +7,8 @@ import 'package:webrtc_dart/src/dtls/cipher/const.dart';
 import 'package:webrtc_dart/src/dtls/client.dart';
 import 'package:webrtc_dart/src/dtls/context/cipher_context.dart';
 import 'package:webrtc_dart/src/dtls/context/transport.dart' as dtls_ctx;
+import 'package:webrtc_dart/src/dtls/dtls_transport.dart'
+    show CertificateFingerprint;
 import 'package:webrtc_dart/src/dtls/server.dart';
 import 'package:webrtc_dart/src/dtls/socket.dart';
 import 'package:webrtc_dart/src/srtp/rtcp_packet.dart';
@@ -239,27 +241,36 @@ class RtcDtlsTransport {
     );
   }
 
-  /// Set remote DTLS parameters
+  /// Set remote DTLS parameters: the a=fingerprint values from the remote
+  /// description, which the peer's certificate must match.
   void setRemoteParams(RtcDtlsParameters params) {
     _remoteParameters = params;
   }
 
   /// Start DTLS handshake
   ///
-  /// [requireRemoteFingerprints] - If true (default), throws if remote fingerprints
-  /// are not set. If false, allows handshake to proceed without fingerprint validation
-  /// (fingerprints will be validated during handshake via certificate).
+  /// The peer is authenticated by its certificate matching one of the remote
+  /// fingerprints ([setRemoteParams]); without them there is nothing to check
+  /// it against, so the handshake does not start. A peer whose certificate
+  /// does not match fails the handshake.
   ///
   /// Throws if:
   /// - State is not "new"
-  /// - Remote fingerprints are missing (when requireRemoteFingerprints is true)
-  Future<void> start({bool requireRemoteFingerprints = true}) async {
+  /// - Remote fingerprints are missing
+  Future<void> start() async {
     if (_state != RtcDtlsState.new_) {
       throw StateError('DTLS state must be new, got $_state');
     }
 
-    if (requireRemoteFingerprints &&
-        (_remoteParameters?.fingerprints.isEmpty ?? true)) {
+    final remoteFingerprints = [
+      for (final fingerprint in _remoteParameters?.fingerprints ?? const [])
+        CertificateFingerprint(
+          algorithm: fingerprint.algorithm,
+          value: fingerprint.value,
+        ),
+    ];
+    if (remoteFingerprints.isEmpty) {
+      _setState(RtcDtlsState.failed);
       throw StateError('Remote DTLS fingerprints not set');
     }
 
@@ -280,21 +291,31 @@ class RtcDtlsTransport {
     _setState(RtcDtlsState.connecting);
 
     try {
-      await _createDtlsSocket();
+      await _createDtlsSocket(remoteFingerprints);
       await _performHandshake();
     } catch (e) {
       _log.warning('$_debugPrefix DTLS handshake failed: $e');
-      _setState(RtcDtlsState.failed);
+      if (_state != RtcDtlsState.closed) {
+        _setState(RtcDtlsState.failed);
+        // The handshake is over: stop reading records from a peer that did
+        // not authenticate.
+        await _dtlsStateSubscription?.cancel();
+        _dtlsStateSubscription = null;
+        await dtls?.close();
+      }
       rethrow;
     }
   }
 
   /// Create DTLS socket based on role
-  Future<void> _createDtlsSocket() async {
+  Future<void> _createDtlsSocket(
+      List<CertificateFingerprint> remoteFingerprints) async {
     if (_effectiveRole == RtcDtlsRole.client) {
-      CipherContext? clientCipherContext;
+      final clientCipherContext = CipherContext(
+        isClient: true,
+        remoteFingerprints: remoteFingerprints,
+      );
       if (localCertificate != null) {
-        clientCipherContext = CipherContext(isClient: true);
         clientCipherContext.localCertificate = localCertificate!.certificate;
         clientCipherContext.localSigningKey = localCertificate!.privateKey;
         clientCipherContext.localFingerprint =
@@ -315,6 +336,10 @@ class RtcDtlsTransport {
 
       dtls = DtlsServer(
         transport: _dtlsAdapter,
+        cipherContext: CipherContext(
+          isClient: false,
+          remoteFingerprints: remoteFingerprints,
+        ),
         cipherSuites: [CipherSuite.tlsEcdheEcdsaWithAes128GcmSha256],
         supportedCurves: [NamedCurve.x25519, NamedCurve.secp256r1],
         certificate: localCertificate!.certificate,

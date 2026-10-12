@@ -21,9 +21,6 @@ class KeyDerivation {
     if (preMasterSecret == null) {
       throw StateError('Pre-master secret not computed');
     }
-    _log.fine(
-        'Pre-master secret (first 16): ${preMasterSecret.sublist(0, preMasterSecret.length > 16 ? 16 : preMasterSecret.length).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-
     // Determine which random is which based on endpoint role
     // Master secret always uses client_random + server_random (in that order)
     final clientRandom = cipherContext.isClient
@@ -87,8 +84,6 @@ class KeyDerivation {
         'clientRandom (first 8): ${clientRandom.sublist(0, 8).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
     _log.fine(
         'serverRandom (first 8): ${serverRandom.sublist(0, 8).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'masterSecret (first 16): ${masterSecret.sublist(0, 16).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
 
     final keys = prfEncryptionKeys(
       masterSecret,
@@ -98,15 +93,6 @@ class KeyDerivation {
       ivLen,
       0, // Nonce length (not used for AEAD)
     );
-
-    _log.fine(
-        'clientWriteKey: ${keys.clientWriteKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'serverWriteKey: ${keys.serverWriteKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'clientNonce: ${keys.clientNonce.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'serverNonce: ${keys.serverNonce.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
 
     return keys;
   }
@@ -152,8 +138,6 @@ class KeyDerivation {
     final handshakeHash = digest.process(handshakeMessages);
     _log.fine(
         'handshake_hash FULL: ${handshakeHash.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    _log.fine(
-        'masterSecret FULL: ${masterSecret.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
 
     // Dump full concatenated buffer
     _log.fine(
@@ -166,12 +150,9 @@ class KeyDerivation {
           '${i.toString().padLeft(4, '0')}: ${handshakeMessages.sublist(i, end).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
     }
 
-    final verifyData = isClient
+    return isClient
         ? prfVerifyDataClient(masterSecret, handshakeMessages)
         : prfVerifyDataServer(masterSecret, handshakeMessages);
-    _log.fine(
-        'verify_data: ${verifyData.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-    return verifyData;
   }
 
   /// Verify the verify_data in a Finished message
@@ -186,13 +167,12 @@ class KeyDerivation {
       return false;
     }
 
+    // Constant time: verify_data is a MAC
+    var diff = 0;
     for (var i = 0; i < expectedVerifyData.length; i++) {
-      if (receivedVerifyData[i] != expectedVerifyData[i]) {
-        return false;
-      }
+      diff |= receivedVerifyData[i] ^ expectedVerifyData[i];
     }
-
-    return true;
+    return diff == 0;
   }
 
   /// Get key length for cipher suite

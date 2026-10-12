@@ -111,8 +111,12 @@ class SctpAssociation {
   /// Number of inbound streams
   final int inboundStreams;
 
-  /// Advertised receive window
+  /// Advertised receive window: [_receiveWindow] less the bytes held for
+  /// reassembly.
   int advertisedRwnd;
+
+  /// The receive window we started with, and the most reassembly will hold.
+  final int _receiveWindow;
 
   /// Outbound queue - chunks waiting to be sent
   List<_SentChunk> _outboundQueue = [];
@@ -130,9 +134,6 @@ class SctpAssociation {
   /// Callback when buffered amount changes for a stream
   /// Called with (streamId, newBufferedAmount)
   void Function(int streamId, int bufferedAmount)? onBufferedAmountChange;
-
-  /// Receive buffer (by TSN)
-  final Map<int, SctpDataChunk> _receiveBuffer = {};
 
   /// Outbound stream sequence numbers (per stream ID)
   final Map<int, int> _outboundStreamSeq = {};
@@ -260,7 +261,8 @@ class SctpAssociation {
     this.inboundStreams = SctpConstants.defaultInboundStreams,
     this.advertisedRwnd = SctpConstants.defaultAdvertisedRwnd,
     Random? random,
-  })  : _random = random ?? Random.secure(),
+  })  : _receiveWindow = advertisedRwnd,
+        _random = random ?? Random.secure(),
         _localVerificationTag = _generateVerificationTag(random),
         _localInitialTsn = _generateInitialTsn(random),
         // Initialize _localTsn to same value, will be set properly in the line after
@@ -841,22 +843,48 @@ class SctpAssociation {
   /// Handle DATA chunk
   /// Reference: werift-webrtc/packages/sctp/src/sctp.ts receiveDataChunk
   Future<void> _handleData(SctpDataChunk chunk) async {
-    if (_state != SctpAssociationState.established) {
+    final lastReceivedTsn = _lastReceivedTsn;
+    if (_state != SctpAssociationState.established || lastReceivedTsn == null) {
+      return;
+    }
+
+    // RFC 4960 Section 6.2: DATA without user data is a protocol violation.
+    if (chunk.userData.isEmpty) {
+      _log.fine(' DATA chunk ${chunk.tsn} without user data, aborting');
+      await abort(cause: _errorCause(_causeNoUserData, _uint32(chunk.tsn)));
       return;
     }
 
     _sackNeeded = true;
+    _scheduleSack();
 
-    // Mark received and check for duplicates
-    final isDuplicate = _markReceived(chunk.tsn);
-    if (isDuplicate) {
-      _scheduleSack();
+    if (_isReceived(chunk.tsn)) {
+      _sackDuplicates.add(chunk.tsn);
       return;
     }
 
-    // Store in receive buffer (for SACK generation)
-    _receiveBuffer[chunk.tsn] = chunk;
-    _scheduleSack();
+    // Every chunk carries at least one byte, so a conforming sender's TSNs
+    // stay within our window's worth of the cumulative TSN, and a SACK's
+    // 16-bit gap offsets cannot report one further ahead anyway. Such a TSN
+    // is dropped rather than tracked; the sender retransmits it.
+    final maxTsnAhead = min(_receiveWindow, 0xFFFF);
+    if (uint32Gt(chunk.tsn, (lastReceivedTsn + maxTsnAhead) & 0xFFFFFFFF)) {
+      _log.fine(' DATA chunk ${chunk.tsn} beyond the receive window, dropped');
+      return;
+    }
+
+    // Reassembly holds what cannot be delivered yet, and what it holds is
+    // what we advertised as used. Overflowing it means the peer ignored our
+    // window or sent a message larger than the window can ever hold, which
+    // could never complete: either way, buffering more is unbounded.
+    if (_receiveWindow - advertisedRwnd + chunk.userData.length >
+        _receiveWindow) {
+      _log.warning('[SCTP] Peer overran the receive window, aborting');
+      await abort(cause: _errorCause(_causeProtocolViolation));
+      return;
+    }
+
+    _markReceived(chunk.tsn);
 
     // Add chunk to inbound stream for reassembly
     final inboundStream = _getInboundStream(chunk.streamId);
@@ -924,26 +952,22 @@ class SctpAssociation {
       _sentQueue = [];
     }
 
-    // Handle gap ack blocks
+    // Handle gap ack blocks, as ranges: each covers up to 65535 TSNs, so
+    // expanding them one TSN at a time is work the peer controls.
     var loss = false;
-    if (chunk.gapAckBlocks.isNotEmpty) {
-      final seen = <int>{};
-      int? highestSeenTsn;
-
-      for (final gap in chunk.gapAckBlocks) {
-        for (var pos = gap.start; pos <= gap.end; pos++) {
-          highestSeenTsn =
-              (chunk.cumulativeTsnAck + pos) % SctpConstants.tsnModulo;
-          seen.add(highestSeenTsn);
-        }
-      }
+    final gaps = _mergeGapAckBlocks(chunk.gapAckBlocks);
+    if (gaps.isNotEmpty) {
+      bool seen(int tsn) =>
+          _inGaps(gaps, (tsn - chunk.cumulativeTsnAck) & 0xFFFFFFFF);
+      final highestSeenTsn =
+          (chunk.cumulativeTsnAck + gaps.last.end) % SctpConstants.tsnModulo;
 
       var highestNewlyAcked = chunk.cumulativeTsnAck;
       for (final sChunk in _sentQueue) {
-        if (highestSeenTsn != null && uint32Gt(sChunk.tsn, highestSeenTsn)) {
+        if (uint32Gt(sChunk.tsn, highestSeenTsn)) {
           break;
         }
-        if (seen.contains(sChunk.tsn) && !sChunk.acked) {
+        if (seen(sChunk.tsn) && !sChunk.acked) {
           doneBytes += sChunk.bookSize;
           sChunk.acked = true;
           _flightSizeDecrease(sChunk);
@@ -956,7 +980,7 @@ class SctpAssociation {
         if (uint32Gt(sChunk.tsn, highestNewlyAcked)) {
           break;
         }
-        if (!seen.contains(sChunk.tsn)) {
+        if (!seen(sChunk.tsn)) {
           sChunk.misses++;
           if (sChunk.misses == 3) {
             sChunk.misses = 0;
@@ -1284,36 +1308,80 @@ class SctpAssociation {
     await _sendChunk(initAckChunk);
   }
 
-  /// Mark TSN as received, returns true if duplicate
-  bool _markReceived(int tsn) {
-    if (_lastReceivedTsn != null &&
-        (uint32Gte(_lastReceivedTsn!, tsn) || _sackMisOrdered.contains(tsn))) {
-      _sackDuplicates.add(tsn);
-      return true;
-    }
+  /// Whether [tsn] was already received: at or below the cumulative TSN, or
+  /// one of the misordered TSNs above it.
+  bool _isReceived(int tsn) =>
+      uint32Gte(_lastReceivedTsn!, tsn) || _sackMisOrdered.contains(tsn);
 
+  /// Records [tsn] as received and advances the cumulative TSN through any
+  /// misordered TSNs it makes contiguous. Everything left in the misordered
+  /// set stays above the cumulative TSN.
+  void _markReceived(int tsn) {
     _sackMisOrdered.add(tsn);
+    while (_sackMisOrdered.remove(_tsnPlusOne(_lastReceivedTsn!))) {
+      _lastReceivedTsn = _tsnPlusOne(_lastReceivedTsn!);
+    }
+    _remoteCumulativeTsn = _lastReceivedTsn!; // Keep in sync for SACK
+    _sackDuplicates.removeWhere((x) => !uint32Gt(x, _lastReceivedTsn!));
+  }
 
-    // Advance cumulative TSN through contiguous sequence
-    for (final t in _sackMisOrdered.toList()..sort()) {
-      if (_lastReceivedTsn != null && t == _tsnPlusOne(_lastReceivedTsn!)) {
-        _lastReceivedTsn = t;
-        _remoteCumulativeTsn = t; // Keep in sync for SACK
+  /// [blocks] sorted by start, overlapping and adjacent ones merged, and
+  /// inverted ones dropped.
+  static List<({int start, int end})> _mergeGapAckBlocks(
+      List<GapAckBlock> blocks) {
+    final sorted = blocks.where((b) => b.start <= b.end).toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    final merged = <({int start, int end})>[];
+    for (final block in sorted) {
+      if (merged.isNotEmpty && block.start <= merged.last.end + 1) {
+        merged.last = (
+          start: merged.last.start,
+          end: max(merged.last.end, block.end),
+        );
       } else {
-        break;
+        merged.add((start: block.start, end: block.end));
       }
     }
+    return merged;
+  }
 
-    // Prune obsolete entries
-    if (_lastReceivedTsn != null) {
-      _sackDuplicates =
-          _sackDuplicates.where((x) => uint32Gt(x, _lastReceivedTsn!)).toList();
-      _sackMisOrdered =
-          _sackMisOrdered.where((x) => uint32Gt(x, _lastReceivedTsn!)).toSet();
+  /// Whether [offset] lies in one of the merged [gaps] (binary search).
+  static bool _inGaps(List<({int start, int end})> gaps, int offset) {
+    var low = 0;
+    var high = gaps.length - 1;
+    while (low <= high) {
+      final mid = (low + high) >> 1;
+      if (offset < gaps[mid].start) {
+        high = mid - 1;
+      } else if (offset > gaps[mid].end) {
+        low = mid + 1;
+      } else {
+        return true;
+      }
     }
-
     return false;
   }
+
+  /// Most gap ack blocks a SACK we send reports.
+  static const _maxGapAckBlocks = 32;
+
+  /// Error cause codes (RFC 4960 Section 3.3.10).
+  static const _causeNoUserData = 9;
+  static const _causeProtocolViolation = 13;
+
+  /// An error cause TLV for an ABORT chunk.
+  static Uint8List _errorCause(int code, [Uint8List? info]) {
+    final length = 4 + (info?.length ?? 0);
+    final cause = Uint8List((length + 3) & ~3);
+    ByteData.sublistView(cause)
+      ..setUint16(0, code)
+      ..setUint16(2, length);
+    if (info != null) cause.setRange(4, length, info);
+    return cause;
+  }
+
+  static Uint8List _uint32(int value) =>
+      Uint8List(4)..buffer.asByteData().setUint32(0, value);
 
   /// Schedule SACK to be sent
   ///
@@ -1335,14 +1403,18 @@ class SctpAssociation {
     if (!_sackNeeded) return;
     _sackNeeded = false;
 
-    // Build gap ack blocks from misordered set
+    // Build gap ack blocks from misordered set, the lowest
+    // [_maxGapAckBlocks] of them: enough for the sender's fast retransmit,
+    // and a SACK that always fits in a packet.
     final gapBlocks = <GapAckBlock>[];
     if (_sackMisOrdered.isNotEmpty && _lastReceivedTsn != null) {
-      final sorted = _sackMisOrdered.toList()..sort();
+      // Sorted by offset from the cumulative TSN, which survives wraparound.
+      final offsets = [
+        for (final tsn in _sackMisOrdered) (tsn - _lastReceivedTsn!) & 0xFFFFFFFF
+      ]..sort();
       int? start;
       int? end;
-      for (final tsn in sorted) {
-        final offset = (tsn - _lastReceivedTsn!) & 0xFFFFFFFF;
+      for (final offset in offsets) {
         if (start == null) {
           start = offset;
           end = offset;
@@ -1350,11 +1422,12 @@ class SctpAssociation {
           end = offset;
         } else {
           gapBlocks.add(GapAckBlock(start: start, end: end));
+          if (gapBlocks.length == _maxGapAckBlocks) break;
           start = offset;
           end = offset;
         }
       }
-      if (start != null && end != null) {
+      if (start != null && end != null && gapBlocks.length < _maxGapAckBlocks) {
         gapBlocks.add(GapAckBlock(start: start, end: end));
       }
     }
@@ -1560,7 +1633,6 @@ class SctpAssociation {
     _sackTimer?.cancel();
     _outboundQueue.clear();
     _sentQueue.clear();
-    _receiveBuffer.clear();
     _outboundStreamSeq.clear();
     _sackMisOrdered.clear();
     _sackDuplicates.clear();

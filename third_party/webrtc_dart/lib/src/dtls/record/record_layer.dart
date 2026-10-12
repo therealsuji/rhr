@@ -4,6 +4,7 @@ import 'package:webrtc_dart/src/common/logging.dart';
 import 'package:webrtc_dart/src/dtls/context/cipher_context.dart';
 import 'package:webrtc_dart/src/dtls/context/dtls_context.dart';
 import 'package:webrtc_dart/src/dtls/handshake/message/alert.dart';
+import 'package:webrtc_dart/src/dtls/record/anti_replay_window.dart';
 import 'package:webrtc_dart/src/dtls/record/const.dart';
 import 'package:webrtc_dart/src/dtls/record/header.dart';
 import 'package:webrtc_dart/src/dtls/record/record.dart';
@@ -20,6 +21,15 @@ class DtlsRecordLayer {
     required this.dtlsContext,
     required this.cipherContext,
   });
+
+  /// Most future-epoch records held until the ChangeCipherSpec that makes
+  /// them readable. A handshake needs a handful; the cap stops anyone who can
+  /// reach the socket from growing the buffer.
+  static const maxFutureEpochRecords = 32;
+
+  /// Replay detection for encrypted records, and the epoch it tracks.
+  final _replayWindow = AntiReplayWindow();
+  int? _replayEpoch;
 
   /// Create a record with the given content
   DtlsRecord createRecord({
@@ -104,9 +114,13 @@ class DtlsRecordLayer {
 
   /// Decrypt a record
   Future<Uint8List> decryptRecord(DtlsRecord record) async {
-    // If cipher not active yet OR record is from epoch 0, return plaintext
-    if (!cipherContext.isDecryptionReady || record.epoch == 0) {
+    // Epoch 0 is plaintext; every later epoch is encrypted, never passed
+    // through unauthenticated.
+    if (record.epoch == 0) {
       return record.fragment;
+    }
+    if (!cipherContext.isDecryptionReady) {
+      throw StateError('No keys for epoch ${record.epoch}');
     }
 
     // Get the appropriate cipher
@@ -137,6 +151,28 @@ class DtlsRecordLayer {
     }
   }
 
+  /// Decrypts a current-epoch [record], or returns null for a replay.
+  ///
+  /// Encrypted records pass through the replay window (RFC 6347 Section
+  /// 4.1.2.6); a sequence number counts as seen only once the record
+  /// authenticates. Epoch 0 is plaintext and the handshake handles its own
+  /// retransmissions.
+  Future<Uint8List?> _openRecord(DtlsRecord record) async {
+    if (record.epoch == 0) return decryptRecord(record);
+    if (_replayEpoch != record.epoch) {
+      _replayWindow.reset();
+      _replayEpoch = record.epoch;
+    }
+    if (!_replayWindow.mayReceive(record.sequenceNumber)) {
+      _log.fine(
+          'Dropping replayed record epoch=${record.epoch} seq=${record.sequenceNumber}');
+      return null;
+    }
+    final plaintext = await decryptRecord(record);
+    _replayWindow.markAsReceived(record.sequenceNumber);
+    return plaintext;
+  }
+
   /// Process received records
   Future<List<ProcessedRecord>> processRecords(Uint8List data) async {
     final records = DtlsRecord.parseMultiple(data);
@@ -159,8 +195,8 @@ class DtlsRecordLayer {
           continue;
         }
 
-        // Decrypt if needed
-        final plaintext = await decryptRecord(record);
+        final plaintext = await _openRecord(record);
+        if (plaintext == null) continue;
 
         processed.add(ProcessedRecord(
           contentType: record.contentType,
@@ -192,9 +228,11 @@ class DtlsRecordLayer {
         // Check epoch
         if (record.epoch > dtlsContext.readEpoch) {
           // Future epoch - buffer the raw record for later processing
-          _log.fine(
-              'Buffering future-epoch record with epoch ${record.epoch} (readEpoch=${dtlsContext.readEpoch}), type=${record.contentType}');
-          futureEpochBuffer.add(record.serialize());
+          if (futureEpochBuffer.length < maxFutureEpochRecords) {
+            _log.fine(
+                'Buffering future-epoch record with epoch ${record.epoch} (readEpoch=${dtlsContext.readEpoch}), type=${record.contentType}');
+            futureEpochBuffer.add(record.serialize());
+          }
           continue;
         }
 
@@ -205,8 +243,8 @@ class DtlsRecordLayer {
           continue;
         }
 
-        // Decrypt if needed
-        final plaintext = await decryptRecord(record);
+        final plaintext = await _openRecord(record);
+        if (plaintext == null) continue;
 
         processed.add(ProcessedRecord(
           contentType: record.contentType,

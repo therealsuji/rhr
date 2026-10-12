@@ -885,6 +885,10 @@ class RTCPeerConnection {
         if (media.type == 'audio' || media.type == 'video') {
           final transport = await _findOrCreateMediaTransport(mid, i);
 
+          // The certificate this line's DTLS peer must present
+          transport.setRemoteFingerprints(
+              remoteDtlsFingerprints(sdpMessage, media));
+
           // Set ICE params for this transport
           if (iceUfrag != null && icePwd != null) {
             _log.fine(
@@ -929,6 +933,10 @@ class RTCPeerConnection {
       } else {
         // Bundled - use primary transport for first media line
         if (i == 0) {
+          // The certificate the DTLS peer must present
+          _transport?.setRemoteFingerprints(
+              remoteDtlsFingerprints(sdpMessage, media));
+
           if (iceUfrag != null && icePwd != null) {
             // Detect remote ICE restart - only on offers (remote initiated)
             // When we receive an answer with new credentials, it's a response to

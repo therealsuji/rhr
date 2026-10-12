@@ -4,6 +4,8 @@ import 'package:pointycastle/export.dart' as pc;
 import 'package:webrtc_dart/src/dtls/cipher/const.dart';
 import 'package:webrtc_dart/src/dtls/cipher/prf.dart';
 import 'package:webrtc_dart/src/dtls/cipher/suites/aead.dart';
+import 'package:webrtc_dart/src/dtls/dtls_transport.dart'
+    show CertificateFingerprint;
 import 'package:webrtc_dart/src/dtls/handshake/const.dart';
 
 /// Cipher state for DTLS connection
@@ -39,8 +41,9 @@ class CipherContext {
   /// Local certificate fingerprint (for SDP)
   String? localFingerprint;
 
-  /// Remote certificate fingerprint (for SDP)
-  String? remoteFingerprint;
+  /// The remote's a=fingerprint values from SDP. The handshake fails unless
+  /// the certificate the peer presents matches one of them.
+  List<CertificateFingerprint> remoteFingerprints;
 
   /// Encryption keys derived from master secret
   EncryptionKeys? encryptionKeys;
@@ -65,7 +68,7 @@ class CipherContext {
     this.remoteCertificate,
     this.localSigningKey,
     this.localFingerprint,
-    this.remoteFingerprint,
+    this.remoteFingerprints = const [],
     this.encryptionKeys,
     this.localCipher,
     this.remoteCipher,
@@ -126,7 +129,7 @@ class CipherContext {
     remoteCertificate = null;
     localSigningKey = null;
     localFingerprint = null;
-    remoteFingerprint = null;
+    remoteFingerprints = const [];
     encryptionKeys = null;
     localCipher = null;
     remoteCipher = null;

@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:webrtc_dart/src/common/logging.dart';
+import 'package:webrtc_dart/src/dtls/certificate/peer_certificate.dart';
 import 'package:webrtc_dart/src/dtls/cipher/const.dart';
 import 'package:webrtc_dart/src/dtls/cipher/ecdh.dart';
 import 'package:webrtc_dart/src/dtls/cipher/key_derivation.dart';
@@ -10,7 +11,10 @@ import 'package:webrtc_dart/src/dtls/context/srtp_context.dart';
 import 'package:webrtc_dart/src/dtls/flight/flight.dart';
 import 'package:webrtc_dart/src/dtls/flight/server_flights.dart';
 import 'package:webrtc_dart/src/dtls/handshake/const.dart';
+import 'package:webrtc_dart/src/dtls/handshake/extensions/elliptic_curves.dart';
 import 'package:webrtc_dart/src/dtls/handshake/extensions/use_srtp.dart';
+import 'package:webrtc_dart/src/dtls/handshake/message/certificate.dart';
+import 'package:webrtc_dart/src/dtls/handshake/message/certificate_verify.dart';
 import 'package:webrtc_dart/src/dtls/handshake/message/client_hello.dart';
 import 'package:webrtc_dart/src/dtls/handshake/message/client_key_exchange.dart';
 import 'package:webrtc_dart/src/dtls/handshake/message/finished.dart';
@@ -23,7 +27,9 @@ enum ServerHandshakeState {
   initial,
   waitingForClientHello,
   waitingForClientHelloWithCookie,
+  waitingForClientCertificate,
   waitingForClientKeyExchange,
+  waitingForCertificateVerify,
   waitingForClientFinished,
   completed,
   failed,
@@ -79,10 +85,11 @@ class ServerHandshakeCoordinator {
         return 0;
       case ServerHandshakeState.waitingForClientHelloWithCookie:
         return 2; // Sent HelloVerifyRequest, waiting for ClientHello with cookie
+      case ServerHandshakeState.waitingForClientCertificate:
       case ServerHandshakeState.waitingForClientKeyExchange:
-        return 4; // Sent flight 4, waiting for client flight 5
+      case ServerHandshakeState.waitingForCertificateVerify:
       case ServerHandshakeState.waitingForClientFinished:
-        return 4; // Still waiting for client flight 5
+        return 4; // Sent flight 4, waiting for (the rest of) client flight 5
       case ServerHandshakeState.completed:
         return 6;
       case ServerHandshakeState.failed:
@@ -191,7 +198,9 @@ class ServerHandshakeCoordinator {
 
       // Handle retransmission: if we're in a later state, this is a retransmit
       // We should re-send the last flight (RFC 6347 Section 4.2.4)
-      if (_state == ServerHandshakeState.waitingForClientKeyExchange ||
+      if (_state == ServerHandshakeState.waitingForClientCertificate ||
+          _state == ServerHandshakeState.waitingForClientKeyExchange ||
+          _state == ServerHandshakeState.waitingForCertificateVerify ||
           _state == ServerHandshakeState.waitingForClientFinished) {
         _log.fine(
             'Retransmitted ClientHello detected in state $_state, re-sending last flight');
@@ -216,6 +225,15 @@ class ServerHandshakeCoordinator {
 
       _log.fine('Cookie verified, generating key pair');
 
+      // Pick what both sides support before committing to anything
+      final cipherSuite = clientHello.cipherSuites
+          .where(cipherSuites.contains)
+          .firstOrNull;
+      if (cipherSuite == null) {
+        _fail('No cipher suite in common with the client');
+      }
+      final curve = _selectCurve(clientHello);
+
       // Add to handshake messages (use fullMessage if available, includes header)
       dtlsContext.addHandshakeMessage(fullMessage ?? data);
 
@@ -223,18 +241,21 @@ class ServerHandshakeCoordinator {
       flightManager.moveToNextFlight();
 
       // Generate our ECDH key pair
-      await _generateKeyPair();
+      await _generateKeyPair(curve);
 
       _log.fine('Key pair generated, creating Flight 4');
 
-      // Send Flight 4 (ServerHello + Certificate + ServerKeyExchange + ServerHelloDone)
+      // Send Flight 4 (ServerHello + Certificate + ServerKeyExchange +
+      // CertificateRequest + ServerHelloDone). WebRTC authenticates both
+      // ends (RFC 8827 Section 6.5), so the client's certificate is required.
       final flight4 = ServerFlight4(
         dtlsContext: dtlsContext,
         cipherContext: cipherContext,
         recordLayer: recordLayer,
-        cipherSuites: cipherSuites,
+        cipherSuite: cipherSuite,
         certificate: certificate,
         privateKey: privateKey,
+        requireClientCert: true,
         srtpProfile: srtpContext.profile,
       );
 
@@ -242,26 +263,45 @@ class ServerHandshakeCoordinator {
       _log.fine('Flight 4 has ${messages.length} messages');
       flightManager.addFlight(flight4, messages);
 
-      _state = ServerHandshakeState.waitingForClientKeyExchange;
+      _state = ServerHandshakeState.waitingForClientCertificate;
     }
   }
 
-  /// Process Certificate from client (if client authentication is used)
-  /// Note: Client certificate authentication is optional in WebRTC and rarely used.
-  /// werift supports this via CertificateRequest (packages/dtls/src/flight/server/flight4.ts)
-  /// but most browser implementations don't send client certificates.
+  /// Process Certificate from client
+  ///
+  /// Required: it must match an a=fingerprint from the remote SDP, the same
+  /// check the client makes of ours.
   Future<void> _processCertificate(Uint8List data,
       {Uint8List? fullMessage}) async {
-    // Parse and store client certificate (matching werift behavior)
-    // In practice, browsers don't send certificates unless CertificateRequest was sent
+    if (_state != ServerHandshakeState.waitingForClientCertificate) {
+      // A retransmission or a reordered message; it is not part of the
+      // transcript here.
+      _log.fine('Ignoring client Certificate in state $_state');
+      return;
+    }
+
+    final certificate = Certificate.parse(data).entityCertificate;
+    if (certificate == null) {
+      _fail('Client sent no certificate');
+    }
+    if (!certificateMatchesFingerprints(
+        certificate, cipherContext.remoteFingerprints)) {
+      _fail('Client certificate does not match the remote SDP fingerprint');
+    }
+    cipherContext.remoteCertificate = certificate;
+
     dtlsContext.addHandshakeMessage(fullMessage ?? data);
+    _state = ServerHandshakeState.waitingForClientKeyExchange;
   }
 
   /// Process ClientKeyExchange from client
   Future<void> _processClientKeyExchange(Uint8List data,
       {Uint8List? fullMessage}) async {
     if (_state != ServerHandshakeState.waitingForClientKeyExchange) {
-      throw StateError('Unexpected ClientKeyExchange in state $_state');
+      // Before the client's Certificate it would skip authentication; after
+      // it, it is a retransmission. Neither belongs in the transcript.
+      _log.fine('Ignoring ClientKeyExchange in state $_state');
+      return;
     }
 
     // Parse ClientKeyExchange
@@ -311,25 +351,48 @@ class ServerHandshakeCoordinator {
       }
     }
 
-    _state = ServerHandshakeState.waitingForClientFinished;
+    _state = ServerHandshakeState.waitingForCertificateVerify;
   }
 
-  /// Process CertificateVerify from client (if client authentication is used)
-  /// werift implements this in packages/dtls/src/handshake/message/client/certificateVerify.ts
-  /// The message contains a signature over the handshake transcript.
-  /// Only received if server sent CertificateRequest and client has a certificate.
+  /// Process CertificateVerify from client
+  ///
+  /// Its signature over the transcript so far, by the key in the client's
+  /// certificate, proves the client holds that certificate (RFC 5246
+  /// Section 7.4.8). Without it a client could present anyone's.
   Future<void> _processCertificateVerify(Uint8List data,
       {Uint8List? fullMessage}) async {
-    // Parse CertificateVerify: algorithm (uint16) + signature (length-prefixed)
-    // In practice, browsers don't send this unless we request client authentication
+    if (_state != ServerHandshakeState.waitingForCertificateVerify) {
+      _log.fine('Ignoring CertificateVerify in state $_state');
+      return;
+    }
+
+    final certificateVerify = CertificateVerify.parse(data);
+    if (!verifyCertificateSignature(
+      certificate: cipherContext.remoteCertificate!,
+      scheme: certificateVerify.signatureScheme,
+      message: dtlsContext.getAllHandshakeMessages(),
+      signature: certificateVerify.signature,
+    )) {
+      _fail('CertificateVerify signature does not verify');
+    }
+
     dtlsContext.addHandshakeMessage(fullMessage ?? data);
+    _state = ServerHandshakeState.waitingForClientFinished;
   }
 
   /// Process Finished from client
   Future<void> _processFinished(Uint8List data,
       {Uint8List? fullMessage}) async {
+    if (_state == ServerHandshakeState.completed) {
+      // The client did not get our flight 6 and resent its flight 5: send
+      // flight 6 again (RFC 6347 Section 4.2.4).
+      _log.fine('Retransmitted Finished, re-sending flight 6');
+      flightManager.currentFlight?.markNotSent();
+      return;
+    }
     if (_state != ServerHandshakeState.waitingForClientFinished) {
-      throw StateError('Unexpected Finished in state $_state');
+      _log.fine('Ignoring Finished in state $_state');
+      return;
     }
 
     // Parse Finished message
@@ -363,13 +426,25 @@ class ServerHandshakeCoordinator {
     _state = ServerHandshakeState.completed;
   }
 
-  /// Generate ECDH key pair for key exchange
-  Future<void> _generateKeyPair() async {
-    // Select a curve to use (prefer X25519, fall back to P-256)
-    final curve = supportedCurves.contains(NamedCurve.x25519)
-        ? NamedCurve.x25519
-        : NamedCurve.secp256r1;
+  /// The ECDHE curve: the first of ours, in preference order, that the
+  /// client offers in supported_groups. A client that sends no
+  /// supported_groups accepts any curve (RFC 8422 Section 4).
+  NamedCurve _selectCurve(ClientHello clientHello) {
+    final offered = clientHello.extensions
+        .whereType<EllipticCurvesExtension>()
+        .firstOrNull
+        ?.curves;
+    final curve = supportedCurves
+        .where((curve) => offered == null || offered.contains(curve))
+        .firstOrNull;
+    if (curve == null) {
+      _fail('No elliptic curve in common with the client');
+    }
+    return curve;
+  }
 
+  /// Generate ECDH key pair for key exchange
+  Future<void> _generateKeyPair(NamedCurve curve) async {
     cipherContext.namedCurve = curve;
 
     // Generate key pair
@@ -395,4 +470,15 @@ class ServerHandshakeCoordinator {
 
   /// Check if handshake failed
   bool get isFailed => _state == ServerHandshakeState.failed;
+
+  /// Whether a ChangeCipherSpec from the client belongs here: only after its
+  /// CertificateVerify, once the keys exist, right before its Finished.
+  bool get expectsChangeCipherSpec =>
+      _state == ServerHandshakeState.waitingForClientFinished;
+
+  /// Fails the handshake.
+  Never _fail(String reason) {
+    _state = ServerHandshakeState.failed;
+    throw StateError('DTLS handshake failed: $reason');
+  }
 }

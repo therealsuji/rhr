@@ -120,13 +120,11 @@ class DtlsServer extends DtlsSocket {
     // Ensure sequential processing by chaining with previous processing
     _processingLock = (_processingLock ?? Future.value()).then((_) async {
       try {
-        // Parse DTLS records
-        final records = await _recordLayer.processRecords(data);
-
-        // If no records processed, might be future epoch - buffer it
-        if (records.isEmpty) {
-          _futureEpochBuffer.add(data);
-        }
+        // Parse DTLS records; future-epoch ones wait for the CCS
+        final records = await _recordLayer.processRecordsWithFutureEpoch(
+          data,
+          _futureEpochBuffer,
+        );
 
         for (final processed in records) {
           switch (processed.contentType) {
@@ -135,8 +133,15 @@ class DtlsServer extends DtlsSocket {
               break;
 
             case ContentType.changeCipherSpec:
-              // CCS received - increment read epoch for decryption
-              _log.fine('Received ChangeCipherSpec');
+              // A plaintext CCS moves reads to the next epoch, so it counts
+              // only where the handshake expects it, and only once.
+              if (!_handshakeCoordinator.expectsChangeCipherSpec ||
+                  dtlsContext.readEpoch != 0) {
+                _log.fine(
+                    'Ignoring ChangeCipherSpec in state ${_handshakeCoordinator.state}');
+                break;
+              }
+              _log.fine('Received ChangeCipherSpec, reading epoch 1');
               dtlsContext.readEpoch++;
 
               // Reprocess buffered future-epoch records
@@ -397,23 +402,6 @@ class DtlsServer extends DtlsSocket {
           'Local key: ${srtpContext.localMasterKey?.length} bytes, salt: ${srtpContext.localMasterSalt?.length} bytes');
       _log.fine(
           'Remote key: ${srtpContext.remoteMasterKey?.length} bytes, salt: ${srtpContext.remoteMasterSalt?.length} bytes');
-      // Debug: print actual keys
-      final localKeyHex = srtpContext.localMasterKey
-          ?.map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join(' ');
-      final localSaltHex = srtpContext.localMasterSalt
-          ?.map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join(' ');
-      final remoteKeyHex = srtpContext.remoteMasterKey
-          ?.map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join(' ');
-      final remoteSaltHex = srtpContext.remoteMasterSalt
-          ?.map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join(' ');
-      _log.fine('localMasterKey: $localKeyHex');
-      _log.fine('localMasterSalt: $localSaltHex');
-      _log.fine('remoteMasterKey: $remoteKeyHex');
-      _log.fine('remoteMasterSalt: $remoteSaltHex');
     } else {
       _log.fine('No SRTP profile negotiated, skipping key export');
     }

@@ -75,34 +75,19 @@ Uint8List _bigIntToBytes(BigInt value, int length) {
 }
 
 /// Compute pre-master secret from ECDH key exchange
+///
+/// [remotePublicKeyBytes] is the peer's key as it arrived on the wire, so it
+/// is validated: the right length and encoding for [curve], a P-256 point on
+/// the curve, and an X25519 key that does not force an all-zero secret.
+/// Nothing here is logged; every value is key material.
 Future<Uint8List> computePreMasterSecret(
   KeyPair localKeyPair,
   Uint8List remotePublicKeyBytes,
   NamedCurve curve,
 ) async {
   _log.fine('computePreMasterSecret: curve=$curve');
-  _log.fine(
-      'remotePublicKey (${remotePublicKeyBytes.length} bytes): ${remotePublicKeyBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
 
-  // Extract and print local private key
-  final localKeyPairData = await localKeyPair.extract();
-  if (localKeyPairData is SimpleKeyPairData) {
-    final privateBytes = Uint8List.fromList(localKeyPairData.bytes);
-    _log.fine(
-        'localPrivateKey (${privateBytes.length} bytes): ${privateBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-  }
-
-  // Extract and print local public key
-  final localPublicKey = await localKeyPair.extractPublicKey();
-  if (localPublicKey is SimplePublicKey) {
-    _log.fine(
-        'localPublicKey (${localPublicKey.bytes.length} bytes): ${localPublicKey.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-  }
-
-  final remotePublicKey = SimplePublicKey(
-    remotePublicKeyBytes.toList(),
-    type: _getKeyPairType(curve),
-  );
+  final remotePublicKey = parsePublicKey(remotePublicKeyBytes, curve);
 
   final sharedSecret = await _computeSharedSecret(
     localKeyPair,
@@ -110,21 +95,13 @@ Future<Uint8List> computePreMasterSecret(
     curve,
   );
 
-  // Extract bytes from SecretKey
   final bytes = await sharedSecret.extractBytes();
-  _log.fine(
-      'sharedSecret (${bytes.length} bytes): ${bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-  return Uint8List.fromList(bytes);
-}
-
-/// Get KeyPairType for the curve
-KeyPairType _getKeyPairType(NamedCurve curve) {
-  switch (curve) {
-    case NamedCurve.x25519:
-      return KeyPairType.x25519;
-    case NamedCurve.secp256r1:
-      return KeyPairType.p256;
+  // RFC 7748 Section 6.1: a low-order X25519 point yields all zeros, a
+  // secret the peer knows without our key.
+  if (bytes.every((b) => b == 0)) {
+    throw ArgumentError('ECDH produced an all-zero shared secret');
   }
+  return Uint8List.fromList(bytes);
 }
 
 /// Compute shared secret using ECDH
@@ -169,6 +146,12 @@ Future<SecretKey> _computeP256SharedSecret(
   final qx = _bytesToBigInt(remoteBytes.sublist(0, 32));
   final qy = _bytesToBigInt(remoteBytes.sublist(32, 64));
 
+  // An off-curve point would make the agreement leak our private key
+  // (invalid-curve attack), so it is refused before any arithmetic.
+  if (!isOnP256(qx, qy)) {
+    throw ArgumentError('P-256 public key is not a point on the curve');
+  }
+
   // Reconstruct pointycastle public key
   final q = domainParams.curve.createPoint(qx, qy);
   final pcPublicKey = pc.ECPublicKey(q, domainParams);
@@ -182,6 +165,26 @@ Future<SecretKey> _computeP256SharedSecret(
   final sharedBytes = _bigIntToBytes(sharedSecret, 32);
 
   return SecretKey(sharedBytes.toList());
+}
+
+/// P-256 field prime and curve coefficient b (SEC 2 Section 2.4.2); a = -3.
+final _p256P = BigInt.parse(
+    'ffffffff00000001000000000000000000000000ffffffffffffffffffffffff',
+    radix: 16);
+final _p256B = BigInt.parse(
+    '5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b',
+    radix: 16);
+
+/// Whether affine ([x], [y]) is a point on P-256: both coordinates in the
+/// field and y^2 = x^3 - 3x + b (mod p). The point at infinity has no affine
+/// form, and the cofactor is 1, so an on-curve point is a valid public key.
+bool isOnP256(BigInt x, BigInt y) {
+  if (x.isNegative || y.isNegative || x >= _p256P || y >= _p256P) {
+    return false;
+  }
+  final left = (y * y) % _p256P;
+  final right = (x * x * x - BigInt.from(3) * x + _p256B) % _p256P;
+  return left == right;
 }
 
 /// Convert byte array to BigInt

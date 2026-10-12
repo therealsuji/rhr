@@ -149,10 +149,16 @@ class DtlsClient extends DtlsSocket {
               break;
 
             case ContentType.changeCipherSpec:
-              // CCS received - increment read epoch for decryption
-              _log.fine(
-                'Received ChangeCipherSpec, incrementing readEpoch from ${dtlsContext.readEpoch} to ${dtlsContext.readEpoch + 1}',
-              );
+              // A plaintext CCS moves reads to the next epoch, so it counts
+              // only where the handshake expects it, and only once.
+              if (!_handshakeCoordinator.expectsChangeCipherSpec ||
+                  dtlsContext.readEpoch != 0) {
+                _log.fine(
+                  'Ignoring ChangeCipherSpec in state ${_handshakeCoordinator.state}',
+                );
+                break;
+              }
+              _log.fine('Received ChangeCipherSpec, reading epoch 1');
               dtlsContext.readEpoch++;
               ccsReceived = true;
               break;

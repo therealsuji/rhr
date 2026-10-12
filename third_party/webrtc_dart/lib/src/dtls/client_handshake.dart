@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
-import 'package:pointycastle/export.dart';
 import 'package:webrtc_dart/src/common/logging.dart';
+import 'package:webrtc_dart/src/dtls/certificate/peer_certificate.dart';
 import 'package:webrtc_dart/src/dtls/cipher/const.dart';
 import 'package:webrtc_dart/src/dtls/cipher/ecdh.dart';
 import 'package:webrtc_dart/src/dtls/cipher/key_derivation.dart';
@@ -46,7 +46,6 @@ class ClientHandshakeCoordinator {
   final List<NamedCurve> supportedCurves;
 
   ClientHandshakeState _state = ClientHandshakeState.initial;
-  Certificate? _serverCertificate;
   bool _certificateRequested = false;
 
   ClientHandshakeCoordinator({
@@ -217,6 +216,9 @@ class ClientHandshakeCoordinator {
 
     // Parse ServerHello
     final serverHello = ServerHello.parse(data);
+    if (!cipherSuites.contains(serverHello.cipherSuite)) {
+      _fail('Server chose ${serverHello.cipherSuite}, which we did not offer');
+    }
     dtlsContext.serverHello = serverHello;
     dtlsContext.remoteRandom = serverHello.random.bytes;
 
@@ -246,31 +248,28 @@ class ClientHandshakeCoordinator {
   }
 
   /// Process Certificate from server
+  ///
+  /// The server's certificate is required, and must match an a=fingerprint
+  /// from the remote SDP: that is what authenticates the peer in WebRTC,
+  /// whose certificates are self-signed (RFC 8827 Section 6.5).
   Future<void> _processCertificate(Uint8List data,
       {Uint8List? fullMessage}) async {
-    // Ignore retransmissions from previous flights
-    if (_state == ClientHandshakeState.waitingForServerFinished ||
-        _state == ClientHandshakeState.completed) {
-      _log.fine('Ignoring retransmitted Certificate in state $_state');
+    if (_state != ClientHandshakeState.waitingForCertificate) {
+      // A retransmission, or a message ahead of the ServerHello it follows.
+      // Neither belongs in the transcript; the server resends its flight.
+      _log.fine('Ignoring Certificate in state $_state');
       return;
     }
 
-    if (_state != ClientHandshakeState.waitingForCertificate) {
-      // Certificate is optional, might go straight to ServerKeyExchange
-      if (_state == ClientHandshakeState.waitingForServerHello) {
-        _state = ClientHandshakeState.waitingForCertificate;
-      }
+    final certificate = Certificate.parse(data).entityCertificate;
+    if (certificate == null) {
+      _fail('Server sent no certificate');
     }
-
-    // Parse Certificate message
-    _serverCertificate = Certificate.parse(data);
-    _log.fine(
-        'Received certificate with ${_serverCertificate!.certificates.length} certificate(s)');
-
-    // Note: Certificate chain validation is not performed here (matching werift:
-    // packages/dtls/src/flight/client/flight5.ts - just stores remoteCertificate).
-    // In WebRTC, certificates are self-signed and security comes from fingerprint
-    // verification via SDP, not traditional PKI chain validation.
+    if (!certificateMatchesFingerprints(
+        certificate, cipherContext.remoteFingerprints)) {
+      _fail('Server certificate does not match the remote SDP fingerprint');
+    }
+    cipherContext.remoteCertificate = certificate;
 
     dtlsContext.addHandshakeMessage(fullMessage ?? data);
 
@@ -278,52 +277,37 @@ class ClientHandshakeCoordinator {
   }
 
   /// Process ServerKeyExchange from server
+  ///
+  /// Its signature, by the key in the certificate just checked, is what
+  /// proves the server holds that certificate and chose these ECDHE params.
   Future<void> _processServerKeyExchange(Uint8List data,
       {Uint8List? fullMessage}) async {
-    // Ignore retransmissions from previous flights
-    if (_state == ClientHandshakeState.waitingForServerFinished ||
-        _state == ClientHandshakeState.completed) {
-      _log.fine('Ignoring retransmitted ServerKeyExchange in state $_state');
-      return;
-    }
-
-    // Can arrive after Certificate or directly after ServerHello (if no certificate)
-    if (_state != ClientHandshakeState.waitingForServerKeyExchange &&
-        _state != ClientHandshakeState.waitingForCertificate &&
-        _state != ClientHandshakeState.waitingForServerHello) {
-      // DTLS retransmission - silently ignore duplicate messages from previous flights
-      _log.fine('Ignoring retransmitted ServerKeyExchange in state $_state');
+    if (_state != ClientHandshakeState.waitingForServerKeyExchange) {
+      _log.fine('Ignoring ServerKeyExchange in state $_state');
       return;
     }
 
     // Parse ServerKeyExchange
     final ske = ServerKeyExchange.parse(data);
+    if (!supportedCurves.contains(ske.curve)) {
+      _fail('Server chose ${ske.curve}, which we did not offer');
+    }
+    final scheme = ske.signatureScheme;
+    if (scheme == null ||
+        !verifyCertificateSignature(
+          certificate: cipherContext.remoteCertificate!,
+          scheme: scheme,
+          message: _serverKeyExchangeSignedData(ske),
+          signature: ske.signature,
+        )) {
+      _fail('ServerKeyExchange signature does not verify');
+    }
 
     // Store server's public key
     cipherContext.remotePublicKey = ske.publicKey;
     cipherContext.namedCurve = ske.curve;
-    cipherContext.signatureScheme = ske.signatureScheme;
+    cipherContext.signatureScheme = scheme;
     _log.fine('Selected curve: ${ske.curve}');
-    _log.fine('Server public key: ${ske.publicKey.length} bytes');
-
-    // Verify signature if we have a certificate
-    if (_serverCertificate != null &&
-        dtlsContext.localRandom != null &&
-        dtlsContext.remoteRandom != null) {
-      final isValid = _verifyServerKeyExchangeSignature(
-        ske: ske,
-        clientRandom: dtlsContext.localRandom!,
-        serverRandom: dtlsContext.remoteRandom!,
-        certificate: _serverCertificate!,
-      );
-      if (!isValid) {
-        _log.warning('ServerKeyExchange signature verification failed');
-        // In a production system, you would fail the handshake here
-        // throw StateError('ServerKeyExchange signature verification failed');
-      } else {
-        _log.fine('ServerKeyExchange signature verified');
-      }
-    }
 
     // Add to handshake messages
     dtlsContext.addHandshakeMessage(fullMessage ?? data);
@@ -334,16 +318,11 @@ class ClientHandshakeCoordinator {
   /// Process CertificateRequest from server
   Future<void> _processCertificateRequest(Uint8List data,
       {Uint8List? fullMessage}) async {
-    // Ignore retransmissions from previous flights
-    if (_state == ClientHandshakeState.waitingForServerFinished ||
-        _state == ClientHandshakeState.completed) {
-      _log.fine('Ignoring retransmitted CertificateRequest in state $_state');
+    // CertificateRequest comes between ServerKeyExchange and ServerHelloDone
+    if (_state != ClientHandshakeState.waitingForServerHelloDone ||
+        _certificateRequested) {
+      _log.fine('Ignoring CertificateRequest in state $_state');
       return;
-    }
-
-    // CertificateRequest can arrive after ServerKeyExchange
-    if (_state != ClientHandshakeState.waitingForServerHelloDone) {
-      _log.fine('CertificateRequest received unexpectedly in state $_state');
     }
 
     _log.fine('Server requested client certificate');
@@ -358,19 +337,8 @@ class ClientHandshakeCoordinator {
   /// Process ServerHelloDone from server
   Future<void> _processServerHelloDone(Uint8List data,
       {Uint8List? fullMessage}) async {
-    // Ignore retransmissions from previous flights
-    if (_state == ClientHandshakeState.waitingForServerFinished ||
-        _state == ClientHandshakeState.completed) {
-      _log.fine('Ignoring retransmitted ServerHelloDone in state $_state');
-      return;
-    }
-
-    // Can arrive after ServerKeyExchange, or after ServerHello if no cert/key exchange
-    if (_state != ClientHandshakeState.waitingForServerHelloDone &&
-        _state != ClientHandshakeState.waitingForServerKeyExchange &&
-        _state != ClientHandshakeState.waitingForCertificate) {
-      // DTLS retransmission - silently ignore duplicate messages from previous flights
-      _log.fine('Ignoring retransmitted ServerHelloDone in state $_state');
+    if (_state != ClientHandshakeState.waitingForServerHelloDone) {
+      _log.fine('Ignoring ServerHelloDone in state $_state');
       return;
     }
 
@@ -472,145 +440,30 @@ class ClientHandshakeCoordinator {
   /// Check if server requested client certificate
   bool get certificateRequested => _certificateRequested;
 
-  /// Verify ServerKeyExchange signature
-  bool _verifyServerKeyExchangeSignature({
-    required ServerKeyExchange ske,
-    required Uint8List clientRandom,
-    required Uint8List serverRandom,
-    required Certificate certificate,
-  }) {
-    try {
-      // Build the data that was signed
-      final paramsLength = 1 + 2 + 1 + ske.publicKey.length;
-      final dataToVerify =
-          Uint8List(clientRandom.length + serverRandom.length + paramsLength);
-      var offset = 0;
+  /// Whether a ChangeCipherSpec from the server belongs here: only once our
+  /// flight 5 is out and its keys exist, right before the server's Finished.
+  bool get expectsChangeCipherSpec =>
+      _state == ClientHandshakeState.waitingForServerFinished;
 
-      // Client random
-      dataToVerify.setRange(offset, offset + clientRandom.length, clientRandom);
-      offset += clientRandom.length;
-
-      // Server random
-      dataToVerify.setRange(offset, offset + serverRandom.length, serverRandom);
-      offset += serverRandom.length;
-
-      // Server params
-      dataToVerify[offset++] = 3; // ECCurveType: named_curve
-      dataToVerify[offset++] = (ske.curve.value >> 8) & 0xFF;
-      dataToVerify[offset++] = ske.curve.value & 0xFF;
-      dataToVerify[offset++] = ske.publicKey.length;
-      dataToVerify.setRange(
-          offset, offset + ske.publicKey.length, ske.publicKey);
-
-      // Hash the data
-      final digest = Digest('SHA-256');
-      final hash = digest.process(dataToVerify);
-
-      // Extract public key from certificate
-      // This is a simplified implementation - in production, you'd use a proper ASN.1 parser
-      final publicKey =
-          _extractPublicKeyFromCertificate(certificate.entityCertificate!);
-      if (publicKey == null) {
-        _log.fine('Could not extract public key from certificate');
-        return false;
-      }
-
-      // Verify the signature
-      final signer = ECDSASigner(null, HMac(digest, 64));
-      signer.init(false, PublicKeyParameter<ECPublicKey>(publicKey));
-
-      // Parse DER signature
-      final ecSignature = _parseDerSignature(ske.signature);
-      if (ecSignature == null) {
-        _log.fine('Could not parse DER signature');
-        return false;
-      }
-
-      return signer.verifySignature(hash, ecSignature);
-    } catch (e) {
-      _log.warning('Signature verification error: $e');
-      return false;
-    }
+  /// Fails the handshake.
+  Never _fail(String reason) {
+    _state = ClientHandshakeState.failed;
+    throw StateError('DTLS handshake failed: $reason');
   }
 
-  /// Extract ECDSA public key from X.509 certificate (simplified)
-  /// This is a basic implementation that works with the certificates we generate
-  ECPublicKey? _extractPublicKeyFromCertificate(Uint8List certData) {
-    try {
-      // This is a simplified parser - in production, use a proper ASN.1/X.509 library
-      // We look for the BIT STRING containing the public key (uncompressed point)
-      // The public key is in the Subject Public Key Info section
-
-      // Search for the EC public key OID (1.2.840.10045.2.1) followed by curve OID
-      // Then find the BIT STRING with the public key
-      for (var i = 0; i < certData.length - 70; i++) {
-        // Look for BIT STRING tag (0x03) followed by length and 0x00 (no unused bits)
-        if (certData[i] == 0x03 && certData[i + 2] == 0x00) {
-          final bitStringLength = certData[i + 1];
-          if (bitStringLength >= 65 && bitStringLength <= 67) {
-            // Likely our public key (04 + 32 bytes X + 32 bytes Y = 65 bytes)
-            final keyData =
-                certData.sublist(i + 3, i + 3 + bitStringLength - 1);
-            if (keyData.isNotEmpty && keyData[0] == 0x04) {
-              // Uncompressed point format
-              final curve = ECCurve_secp256r1();
-              final point = curve.curve.decodePoint(keyData);
-              if (point != null) {
-                return ECPublicKey(point, curve);
-              }
-            }
-          }
-        }
-      }
-      return null;
-    } catch (e) {
-      _log.warning('Error extracting public key: $e');
-      return null;
-    }
-  }
-
-  /// Parse DER-encoded ECDSA signature
-  /// SEQUENCE { INTEGER r, INTEGER s }
-  ECSignature? _parseDerSignature(Uint8List signature) {
-    try {
-      if (signature.length < 8) return null;
-
-      var offset = 0;
-      // SEQUENCE tag
-      if (signature[offset++] != 0x30) return null;
-
-      // Sequence length
-      final seqLength = signature[offset++];
-      if (signature.length < 2 + seqLength) return null;
-
-      // INTEGER r
-      if (signature[offset++] != 0x02) return null;
-      final rLength = signature[offset++];
-      final rBytes = signature.sublist(offset, offset + rLength);
-      offset += rLength;
-
-      // INTEGER s
-      if (signature[offset++] != 0x02) return null;
-      final sLength = signature[offset++];
-      final sBytes = signature.sublist(offset, offset + sLength);
-
-      // Convert bytes to BigInt
-      final r = _bytesToBigInt(rBytes);
-      final s = _bytesToBigInt(sBytes);
-
-      return ECSignature(r, s);
-    } catch (e) {
-      _log.warning('Error parsing DER signature: $e');
-      return null;
-    }
-  }
-
-  /// Convert bytes to BigInt
-  BigInt _bytesToBigInt(Uint8List bytes) {
-    var result = BigInt.zero;
-    for (var byte in bytes) {
-      result = (result << 8) | BigInt.from(byte);
-    }
-    return result;
+  /// What the ServerKeyExchange signature covers (RFC 4492 Section 5.4):
+  /// client_random + server_random + ServerECDHParams.
+  Uint8List _serverKeyExchangeSignedData(ServerKeyExchange ske) {
+    final clientRandom = dtlsContext.localRandom!;
+    final serverRandom = dtlsContext.remoteRandom!;
+    return Uint8List.fromList([
+      ...clientRandom,
+      ...serverRandom,
+      3, // ECCurveType: named_curve
+      (ske.curve.value >> 8) & 0xFF,
+      ske.curve.value & 0xFF,
+      ske.publicKey.length,
+      ...ske.publicKey,
+    ]);
   }
 }

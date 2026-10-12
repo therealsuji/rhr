@@ -238,8 +238,7 @@ class MediaTransport {
     _dtlsStarted = true;
 
     try {
-      // Start DTLS handshake (don't require remote fingerprints for backwards compat)
-      await _dtlsTransport.start(requireRemoteFingerprints: false);
+      await _dtlsTransport.start();
     } catch (e) {
       // Reported through the state stream, not thrown: the only caller is an
       // ICE state listener nothing awaits, so a rethrow escapes to the zone
@@ -247,6 +246,13 @@ class MediaTransport {
       _logMedia.fine('[$debugLabel] DTLS handshake failed: $e');
       if (_state != TransportState.closed) _setState(TransportState.failed);
     }
+  }
+
+  /// The remote description's a=fingerprint values; the DTLS handshake fails
+  /// unless the peer's certificate matches one of them.
+  void setRemoteFingerprints(List<rtc.RtcDtlsFingerprint> fingerprints) {
+    _dtlsTransport.setRemoteParams(
+        rtc.RtcDtlsParameters(fingerprints: fingerprints));
   }
 
   /// Start SRTP decryption (for backwards compat - now handled internally by RtcDtlsTransport)
@@ -636,8 +642,7 @@ class IntegratedTransport {
     _dtlsStarted = true;
 
     try {
-      // Start DTLS handshake (don't require remote fingerprints for backwards compat)
-      await _dtlsTransport.start(requireRemoteFingerprints: false);
+      await _dtlsTransport.start();
     } catch (e) {
       // Reported through the state stream, not thrown: the only caller is an
       // ICE state listener nothing awaits, so a rethrow escapes to the zone
@@ -824,6 +829,13 @@ class IntegratedTransport {
     } else {
       throw StateError('Transport not connected');
     }
+  }
+
+  /// The remote description's a=fingerprint values; the DTLS handshake fails
+  /// unless the peer's certificate matches one of them.
+  void setRemoteFingerprints(List<rtc.RtcDtlsFingerprint> fingerprints) {
+    _dtlsTransport.setRemoteParams(
+        rtc.RtcDtlsParameters(fingerprints: fingerprints));
   }
 
   /// Start SRTP decryption (for backwards compat - now handled internally by RtcDtlsTransport)

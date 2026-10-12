@@ -55,14 +55,20 @@ enum IceRole {
   controlled;
 }
 
-/// Generate random string for ICE credentials
-String randomString(int length) {
-  final bytes = randomBytes(length);
-  return bytes
-      .map((b) => b.toRadixString(16).padLeft(2, '0'))
-      .join()
-      .substring(0, length);
-}
+/// The ice-char alphabet (RFC 8445 Section 5.3): 64 characters, 6 bits each.
+const _iceChars =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/// A random string of [length] ice-chars from a CSPRNG, for ICE credentials.
+String randomString(int length) => String.fromCharCodes(
+    randomBytes(length).map((b) => _iceChars.codeUnitAt(b & 0x3F)));
+
+/// ufrag length: 48 bits, comfortably above RFC 8445's 24-bit minimum.
+const _iceUfragLength = 8;
+
+/// ice-pwd length: 144 bits. The password is what authenticates every
+/// connectivity check, so it must not be guessable (RFC 8445 needs >= 128).
+const _icePwdLength = 24;
 
 /// ICE connection options
 class IceOptions {
@@ -277,8 +283,8 @@ class IceConnectionImpl implements IceConnection {
   // Map of candidate foundation to socket
   final Map<String, RawDatagramSocket> _sockets = {};
 
-  // Map of STUN transaction ID to completer (for connectivity checks)
-  final Map<String, Completer<StunMessage>> _pendingStunTransactions = {};
+  // Map of STUN transaction ID to the request awaiting its response
+  final Map<String, _PendingTransaction> _pendingStunTransactions = {};
 
   // TURN client for relay candidates
   TurnClient? _turnClient;
@@ -324,8 +330,8 @@ class IceConnectionImpl implements IceConnection {
     this.debugLabel = '',
   })  : _iceControlling = iceControlling,
         _options = options,
-        _localUsername = randomString(4),
-        _localPassword = randomString(22) {
+        _localUsername = randomString(_iceUfragLength),
+        _localPassword = randomString(_icePwdLength) {
     _generation = 0;
     // Generate random 64-bit tie-breaker for ICE role conflict resolution
     final bytes = randomBytes(8);
@@ -431,7 +437,7 @@ class IceConnectionImpl implements IceConnection {
     _remoteUsername = usernameFragment;
     _remotePassword = password;
     _log.fine(
-        '[ICE] setRemoteParams: iceLite=$iceLite, ufrag=$usernameFragment, pwd=${password.substring(0, 8)}...');
+        '[ICE] setRemoteParams: iceLite=$iceLite, ufrag=$usernameFragment');
   }
 
   @override
@@ -633,10 +639,10 @@ class IceConnectionImpl implements IceConnection {
           messageClass: StunClass.request,
         );
 
-        // Register pending transaction
+        // Register pending transaction. A STUN server's response carries no
+        // MESSAGE-INTEGRITY: there are no credentials to key it with.
         final tid = request.transactionIdHex;
-        final completer = Completer<StunMessage>();
-        _pendingStunTransactions[tid] = completer;
+        final completer = _expectResponse(tid, password: null);
 
         // Send binding request directly via socket
         _log.fine(
@@ -884,9 +890,8 @@ class IceConnectionImpl implements IceConnection {
             data, connection.remoteAddress, connection.remotePort);
       } else {
         // Non-STUN data received over TCP (e.g., DTLS)
-        if (!_dataController.isClosed) {
-          _dataController.add(data);
-        }
+        _deliverFromPeer(
+            data, connection.remoteAddress.address, connection.remotePort);
       }
     });
 
@@ -968,9 +973,7 @@ class IceConnectionImpl implements IceConnection {
     }
 
     // Non-STUN data - deliver to application layer
-    _log.fine(
-        '[ICE] Delivering ${data.length} bytes of TURN-relayed data to application');
-    _dataController.add(data);
+    _deliverFromPeer(data, host, port);
   }
 
   @override
@@ -1153,11 +1156,25 @@ class IceConnectionImpl implements IceConnection {
       return;
     }
 
-    // Non-STUN data - deliver to application layer
-    // This would be DTLS data in a real WebRTC connection
-    _log.fine(
-        '[ICE] Delivering ${data.length} bytes of non-STUN data (firstByte=0x${firstByte.toRadixString(16).padLeft(2, '0')}) to application');
-    _dataController.add(data);
+    // Non-STUN data (DTLS, SRTP) - deliver to application layer
+    _deliverFromPeer(data, address.address, port);
+  }
+
+  /// Delivers non-STUN [data] from [host]:[port] to the application, but only
+  /// from the remote end of a pair a check has proven (RFC 8445 Section
+  /// 7.2.5.3.2, the valid list). Anyone else's DTLS or SRTP is dropped before
+  /// it reaches the handshake.
+  void _deliverFromPeer(Uint8List data, String host, int port) {
+    final fromValidPair = _checkList.any((pair) =>
+        pair.state == CandidatePairState.succeeded &&
+        pair.remoteCandidate.host == host &&
+        pair.remoteCandidate.port == port);
+    if (!fromValidPair) {
+      _log.fine(
+          '[ICE] Dropping ${data.length} bytes from $host:$port: not a valid pair');
+      return;
+    }
+    if (!_dataController.isClosed) _dataController.add(data);
   }
 
   /// Handle incoming STUN message
@@ -1180,22 +1197,73 @@ class IceConnectionImpl implements IceConnection {
       // Check if this is a response to a pending transaction
       if (message.messageClass == StunClass.successResponse ||
           message.messageClass == StunClass.errorResponse) {
-        final tid = message.transactionIdHex;
-        final completer = _pendingStunTransactions.remove(tid);
-        if (completer != null && !completer.isCompleted) {
-          _log.fine(' STUN response matched pending transaction');
-          completer.complete(message);
-        } else {
-          _log.fine(' STUN response for unknown transaction: $tid');
-        }
+        _completeTransaction(data, message);
       } else if (message.messageClass == StunClass.request) {
         // Handle incoming STUN requests (binding requests from remote peer)
+        if (!_isAuthenticRequest(data, message)) {
+          _log.fine(
+              '[ICE] Dropping unauthenticated STUN request from ${address.address}:$port');
+          return;
+        }
         _log.fine(' Processing incoming STUN binding request');
         _handleStunRequest(message, address, port, receivingSocket: receivingSocket);
       }
     } catch (e) {
       _log.fine(' Error handling STUN message: $e');
     }
+  }
+
+  /// Hands a STUN response to the request awaiting it. A response to a
+  /// connectivity or consent check must carry a MESSAGE-INTEGRITY keyed with
+  /// the remote password (RFC 8445 Section 7.2.5.2); one that does not is
+  /// dropped and leaves the request pending, so a forged response can neither
+  /// prove a pair nor cancel the genuine answer.
+  void _completeTransaction(Uint8List data, StunMessage response) {
+    final tid = response.transactionIdHex;
+    final pending = _pendingStunTransactions[tid];
+    if (pending == null || pending.completer.isCompleted) {
+      _log.fine(' STUN response for unknown transaction: $tid');
+      return;
+    }
+    final password = pending.password;
+    if (password != null && !_hasValidIntegrity(data, password)) {
+      _log.fine(' Dropping STUN response with bad MESSAGE-INTEGRITY: $tid');
+      return;
+    }
+    _pendingStunTransactions.remove(tid);
+    _log.fine(' STUN response matched pending transaction');
+    pending.completer.complete(response);
+  }
+
+  /// Registers a request so [_completeTransaction] can answer it, and returns
+  /// the completer its response arrives on.
+  Completer<StunMessage> _expectResponse(String tid, {required String? password}) {
+    final pending = _PendingTransaction(password);
+    _pendingStunTransactions[tid] = pending;
+    return pending.completer;
+  }
+
+  /// Whether [request] may be a connectivity check from our peer (RFC 8445
+  /// Section 7.3, RFC 5389 Section 10.1.2): its USERNAME starts with our
+  /// ufrag and its MESSAGE-INTEGRITY verifies under our password. Both are
+  /// known before the remote's credentials are, so this holds for early
+  /// checks too; [_handleStunRequest] checks the remote half of USERNAME
+  /// before the request may touch a pair.
+  bool _isAuthenticRequest(Uint8List data, StunMessage request) {
+    final username = request.getAttribute(StunAttributeType.username);
+    return username is String &&
+        username.startsWith('$_localUsername:') &&
+        _localPassword.isNotEmpty &&
+        _hasValidIntegrity(data, _localPassword);
+  }
+
+  /// Whether [data] carries a MESSAGE-INTEGRITY that verifies under [password].
+  bool _hasValidIntegrity(Uint8List data, String password) {
+    if (password.isEmpty) return false;
+    final verified = parseStunMessage(data,
+        integrityKey: Uint8List.fromList(password.codeUnits));
+    return verified != null &&
+        verified.hasAttribute(StunAttributeType.messageIntegrity);
   }
 
   /// Handle incoming STUN binding request
@@ -1221,11 +1289,21 @@ class IceConnectionImpl implements IceConnection {
         'ICE_CONTROLLED=$hasIceControlled, tid=${request.transactionIdHex}, '
         'USERNAME=$usernameStr');
 
-    // RFC 8445 Section 7.2.1: Queue early checks if check list isn't ready
-    if (_checkList.isEmpty && !_earlyChecksDone) {
+    // RFC 8445 Section 7.2.1: Queue early checks if check list isn't ready.
+    // A check arriving before the remote credentials waits too: until then
+    // only our half of its USERNAME can be verified.
+    if ((_checkList.isEmpty || _remoteUsername.isEmpty) && !_earlyChecksDone) {
       _log.fine('[ICE] Queueing early check from ${address.address}:$port '
           '(check list not ready, ${_earlyChecks.length + 1} queued)');
       _earlyChecks.add(_EarlyCheck(request, address, port, receivingSocket: receivingSocket));
+      return;
+    }
+
+    // The full USERNAME, "<our ufrag>:<their ufrag>", now that both are known.
+    if (_remoteUsername.isEmpty ||
+        usernameStr != '$_localUsername:$_remoteUsername') {
+      _log.fine(
+          '[ICE] Dropping STUN request from ${address.address}:$port with a USERNAME for another session');
       return;
     }
 
@@ -1253,8 +1331,6 @@ class IceConnectionImpl implements IceConnection {
     // For ICE, responses use the local password (which is the remote's perspective)
     // Note: werift always adds MESSAGE-INTEGRITY regardless of whether request had it
     if (_localPassword.isNotEmpty) {
-      _log.fine(
-          '[ICE] Using password for MESSAGE-INTEGRITY: ${_localPassword.substring(0, 8)}... (ufrag=${_localUsername.substring(0, 4)})');
       final passwordBytes = Uint8List.fromList(_localPassword.codeUnits);
       response.addMessageIntegrity(passwordBytes);
     }
@@ -1567,6 +1643,9 @@ class IceConnectionImpl implements IceConnection {
   /// Perform a connectivity check on a single candidate pair
   Future<bool> _performConnectivityCheck(CandidatePair pair,
       {int retryCount = 0}) async {
+    // Without the remote credentials the peer cannot authenticate the check
+    // and we cannot authenticate its response.
+    if (_remoteUsername.isEmpty || _remotePassword.isEmpty) return false;
     try {
       pair.updateState(CandidatePairState.inProgress);
 
@@ -1642,8 +1721,7 @@ class IceConnectionImpl implements IceConnection {
 
       // Register pending transaction
       final tid = request.transactionIdHex;
-      final completer = Completer<StunMessage>();
-      _pendingStunTransactions[tid] = completer;
+      final completer = _expectResponse(tid, password: _remotePassword);
 
       // Send request - via TURN for relay candidates, direct for others
       final requestBytes = request.toBytes();
@@ -1824,8 +1902,7 @@ class IceConnectionImpl implements IceConnection {
 
       // Register pending transaction
       final tid = request.transactionIdHex;
-      final completer = Completer<StunMessage>();
-      _pendingStunTransactions[tid] = completer;
+      final completer = _expectResponse(tid, password: _remotePassword);
 
       // Set up listener for STUN responses over TCP
       final subscription = tcpConnection.onMessage.listen((data) {
@@ -1834,12 +1911,7 @@ class IceConnectionImpl implements IceConnection {
           if (response != null &&
               (response.messageClass == StunClass.successResponse ||
                   response.messageClass == StunClass.errorResponse)) {
-            final responseTid = response.transactionIdHex;
-            final pendingCompleter = _pendingStunTransactions[responseTid];
-            if (pendingCompleter != null && !pendingCompleter.isCompleted) {
-              _pendingStunTransactions.remove(responseTid);
-              pendingCompleter.complete(response);
-            }
+            _completeTransaction(data, response);
           }
         }
       });
@@ -2190,6 +2262,7 @@ class IceConnectionImpl implements IceConnection {
 
   /// Send a consent request to the nominated pair
   Future<bool> _sendConsentRequest(CandidatePair pair) async {
+    if (_remoteUsername.isEmpty || _remotePassword.isEmpty) return false;
     final localCandidate = pair.localCandidate;
     final remoteCandidate = pair.remoteCandidate;
 
@@ -2234,8 +2307,7 @@ class IceConnectionImpl implements IceConnection {
 
     // Register pending transaction
     final tid = request.transactionIdHex;
-    final completer = Completer<StunMessage>();
-    _pendingStunTransactions[tid] = completer;
+    final completer = _expectResponse(tid, password: _remotePassword);
 
     // Send request
     final requestBytes = request.toBytes();
@@ -2315,8 +2387,8 @@ class IceConnectionImpl implements IceConnection {
     _stopConsentChecks();
     _consentFailureCount = 0; // Reset consent failure count for fresh start
     _generation++;
-    _localUsername = randomString(4);
-    _localPassword = randomString(22);
+    _localUsername = randomString(_iceUfragLength);
+    _localPassword = randomString(_icePwdLength);
     _remoteUsername = '';
     _remotePassword = '';
 
@@ -2409,6 +2481,16 @@ class IceConnectionImpl implements IceConnection {
       return false;
     }
   }
+}
+
+/// A STUN request awaiting its response. [password] keys the
+/// MESSAGE-INTEGRITY the response must carry: the remote ice-pwd for
+/// connectivity and consent checks, null for a STUN server's binding response.
+class _PendingTransaction {
+  final completer = Completer<StunMessage>();
+  final String? password;
+
+  _PendingTransaction(this.password);
 }
 
 /// Queued early connectivity check (RFC 8445 Section 7.2.1)

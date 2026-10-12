@@ -38,7 +38,7 @@ class RtcIceParameters {
 
   @override
   String toString() =>
-      'RtcIceParameters(ufrag: $usernameFragment, pwd: ${password.substring(0, 4)}...)';
+      'RtcIceParameters(ufrag: $usernameFragment)';
 }
 
 /// RTCIceGatherer - Handles candidate gathering
