@@ -4,6 +4,7 @@ import 'dart:io';
 import '../bin/relay.dart';
 import 'package:test/test.dart';
 import 'package:web_socket_channel/io.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 Future<void> _settle() =>
     Future<void>.delayed(const Duration(milliseconds: 30));
@@ -22,7 +23,7 @@ void main() {
   });
 
   test('evicts a session after both peers disconnect', () async {
-    const code = 'rhr-test-eviction';
+    const code = 'rhr-aaaa-bbbb-cccc';
     final device = IOWebSocketChannel.connect(
       'ws://127.0.0.1:${server.port}/s/$code/device',
     );
@@ -38,8 +39,8 @@ void main() {
     await host.sink.close().catchError((_) {});
   });
 
-  test('replacement closes the previous peer with a reason', () async {
-    const code = 'rhr-test-replacement';
+  test('a second host is refused while the first is connected', () async {
+    const code = 'rhr-aaaa-bbbb-cccd';
     final first = IOWebSocketChannel.connect(
       'ws://127.0.0.1:${server.port}/s/$code/host',
     );
@@ -47,15 +48,24 @@ void main() {
     final second = IOWebSocketChannel.connect(
       'ws://127.0.0.1:${server.port}/s/$code/host',
     );
-    await second.ready;
+    await expectLater(second.ready, throwsA(isA<WebSocketChannelException>()));
+    expect(first.closeCode, isNull);
+    await first.sink.close();
+  });
 
-    await first.stream.drain<void>();
-    expect(first.closeReason, contains('replaced'));
-    await second.sink.close();
+  test('hand-picked codes are refused', () async {
+    final client = HttpClient();
+    addTearDown(client.close);
+    final request = await client.getUrl(
+      Uri.parse('http://127.0.0.1:${server.port}/s/aaaaaaaaaaaaaaaaaaaa/host'),
+    );
+    final response = await request.close();
+    await response.drain<void>();
+    expect(response.statusCode, HttpStatus.badRequest);
   });
 
   test('late host replays info after direct signaling has started', () async {
-    const code = 'rhr-test-direct-replay';
+    const code = 'rhr-aaaa-bbbb-ccce';
     final device = IOWebSocketChannel.connect(
       'ws://127.0.0.1:${server.port}/s/$code/device',
     );
@@ -75,7 +85,7 @@ void main() {
   });
 
   test('rejects binary payloads', () async {
-    const code = 'rhr-test-text-only';
+    const code = 'rhr-aaaa-bbbb-cccf';
     final device = IOWebSocketChannel.connect(
       'ws://127.0.0.1:${server.port}/s/$code/device',
     );
@@ -103,7 +113,7 @@ void main() {
     expect(shortResponse.statusCode, HttpStatus.badRequest);
 
     final browserRequest = await client.getUrl(
-      Uri.parse('http://127.0.0.1:${server.port}/s/rhr-test-origin-2345/host'),
+      Uri.parse('http://127.0.0.1:${server.port}/s/rhr-aaaa-bbbb-cccj/host'),
     );
     browserRequest.headers.set('Origin', 'https://evil.example');
     final browserResponse = await browserRequest.close();

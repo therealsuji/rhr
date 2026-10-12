@@ -11,6 +11,10 @@
 // TEXT frame from the device (the bridge's "info" hello carrying the VM
 // service URI) is cached and replayed to a host that connects later, so
 // connection order doesn't matter.
+//
+// It speaks plain ws and binds loopback by default. A session code grants the
+// phone's VM service, so off this machine it must sit behind a TLS proxy;
+// RHR_RELAY_BIND=0.0.0.0 opens it to the network for exactly that setup.
 
 import 'dart:convert';
 import 'dart:io';
@@ -21,8 +25,13 @@ import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 final sessions = <String, Session>{};
-const minSessionCodeLength = 16;
 const maxControlMessageBytes = 64 * 1024;
+
+/// The shape the CLI mints (bridge/lib/session_code.dart). Anything shorter
+/// or hand-picked is guessable, and a session code is a bearer credential.
+final sessionCodePattern = RegExp(
+  r'^rhr-[2-9a-hjkmnp-z]{4}-[2-9a-hjkmnp-z]{4}-[2-9a-hjkmnp-z]{4}$',
+);
 
 class Session {
   Session({this.onEmpty, this.allowBinaryPayloads = false});
@@ -61,7 +70,6 @@ class Session {
   }
 
   void pipeHost(WebSocketChannel ch) {
-    host?.sink.close(4001, 'replaced by new connection');
     host = ch;
     ch.stream.listen(
       (msg) {
@@ -116,7 +124,12 @@ class Session {
 
 bool _isInfoMessage(Object message) {
   if (message is! String) return false;
-  return message.contains('"t":"info"') || message.contains('"t": "info"');
+  try {
+    final decoded = jsonDecode(message);
+    return decoded is Map && decoded['t'] == 'info';
+  } on FormatException {
+    return false;
+  }
 }
 
 Session _sessionFor(String code, {bool allowBinaryPayloads = false}) {
@@ -136,6 +149,7 @@ Session _sessionFor(String code, {bool allowBinaryPayloads = false}) {
 Future<HttpServer> startRelay(
   int port, {
   bool allowBinaryPayloads = false,
+  Object address = '127.0.0.1',
 }) async {
   final handler = (Request req) {
     final seg = req.url.pathSegments;
@@ -145,14 +159,19 @@ Future<HttpServer> startRelay(
       final role = seg[2];
       if (role != 'device' && role != 'host')
         return Response.notFound('bad role');
-      if (code.length < minSessionCodeLength) {
-        return Response(
-          HttpStatus.badRequest,
-          body: 'session code must be at least $minSessionCodeLength chars',
-        );
+      if (!sessionCodePattern.hasMatch(code)) {
+        return Response(HttpStatus.badRequest, body: 'not a session code');
       }
       if (req.headers['origin'] != null) {
         return Response.forbidden('browser clients not allowed');
+      }
+      // One host per phone: a second is refused rather than allowed to
+      // evict the first, as on the hosted relay.
+      if (role == 'host' && sessions[code]?.host != null) {
+        return Response(
+          HttpStatus.conflict,
+          body: 'busy: another host is connected to this device',
+        );
       }
       return webSocketHandler((WebSocketChannel ws, _) {
         final s = _sessionFor(code, allowBinaryPayloads: allowBinaryPayloads);
@@ -163,17 +182,19 @@ Future<HttpServer> startRelay(
     return Response.notFound('not found');
   };
 
-  return shelf_io.serve(handler, InternetAddress.anyIPv4, port);
+  return shelf_io.serve(handler, address, port);
 }
 
 Future<void> main(List<String> args) async {
   final port = int.parse(
     args.isNotEmpty ? args[0] : Platform.environment['PORT'] ?? '8123',
   );
+  final address = Platform.environment['RHR_RELAY_BIND'] ?? '127.0.0.1';
   final server = await startRelay(
     port,
     allowBinaryPayloads:
         Platform.environment['RHR_ALLOW_BINARY_PAYLOADS'] == '1',
+    address: address,
   );
-  stderr.writeln('[relay] listening on :${server.port}');
+  stderr.writeln('[relay] listening on $address:${server.port}');
 }
