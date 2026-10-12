@@ -264,32 +264,21 @@ class RhrSessionService : Service() {
 		@Volatile var foreignAppName: String = "your app"
 
 		/**
-		 * Device control, as the user sees it. [agentActive] holds for a few
-		 * seconds after each request, so both surfaces can say the agent is
-		 * at work. [agentControlling] holds from the agent's first answer
-		 * until the host leaves, and is when the notification offers
+		 * Device control, as the user sees it: only in the session
+		 * notification, never on screen, where it would cover the app the
+		 * agent is reading. [agentControlling] holds from the agent's first
+		 * answer until the host leaves, and is when the notification offers
 		 * "Stop agent control". [agentStopped] is the user's choice: it
 		 * refuses every request until they allow it again or connect again.
 		 */
-		private const val AGENT_ACTIVE_MS = 5_000L
-		@Volatile private var agentActedAt = 0L
 		@Volatile var agentStopped = false
 		@Volatile var agentControlling = false
-		val agentActive: Boolean get() = System.currentTimeMillis() - agentActedAt < AGENT_ACTIVE_MS
-		private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
 
 		/** RHR Agent answered a request: it can see and tap this phone. */
 		fun agentActed() {
-			val announce = !agentActive
-			agentActedAt = System.currentTimeMillis()
-			if (!agentControlling) {
-				agentControlling = true
-				current?.refreshNotification()
-			}
-			if (!announce) return
-			updateListeners.forEach { it() }
-			// And once more when it lapses, or the card would stay up.
-			mainHandler.postDelayed({ updateListeners.forEach { it() } }, AGENT_ACTIVE_MS + 100)
+			if (agentControlling) return
+			agentControlling = true
+			current?.refreshNotification()
 		}
 
 		// When the current progress phase began, used for stall detection.

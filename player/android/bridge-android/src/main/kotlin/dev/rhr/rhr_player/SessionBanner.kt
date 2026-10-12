@@ -66,27 +66,6 @@ data class SessionBanner(
 			stalled: Boolean = false,
 			foreignApp: Boolean = false,
 			foreignAppName: String = "your app",
-			agentActive: Boolean = false,
-		): SessionBanner {
-			val banner = ofPhase(phase, status, done, total, message, stalled, foreignApp, foreignAppName)
-			// The coding agent seeing and tapping the phone is never
-			// silent, but anything the session has to say comes first.
-			return if (agentActive && !banner.isVisible) {
-				SessionBanner("Your coding agent is using this phone", null, Style.BUSY)
-			} else {
-				banner
-			}
-		}
-
-		private fun ofPhase(
-			phase: String,
-			status: String,
-			done: Long,
-			total: Long,
-			message: String,
-			stalled: Boolean,
-			foreignApp: Boolean,
-			foreignAppName: String,
 		): SessionBanner = when (phase) {
 			"reload_complete" -> SessionBanner("App updated", 1000, Style.DETERMINATE)
 			"reload_failed" -> SessionBanner("Could not update the app. Check your terminal.", null, Style.FAILED, failure = "Reload failed")

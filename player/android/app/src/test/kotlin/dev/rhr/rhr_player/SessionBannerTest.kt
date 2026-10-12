@@ -303,25 +303,6 @@ class SessionBannerTest {
 		assertTrue(stuck.label.contains("your terminal"))
 	}
 
-	// ---- agent control -----------------------------------------------------
-
-	/**
-	 * The coding agent at work shows on a phone that would otherwise
-	 * rest, but never hides what the session itself has to say.
-	 */
-	@Test
-	fun `an active agent shows only when nothing else does`() {
-		val resting = SessionBanner.of(phase = "", status = "connected", agentActive = true)
-		assertTrue(resting.isVisible)
-		assertTrue(resting.label.contains("agent"))
-
-		val reloading = SessionBanner.of(phase = "reloading", status = "connected", agentActive = true)
-		assertFalse(reloading.label.contains("agent"))
-
-		val idle = SessionBanner.of(phase = "", status = "connected", agentActive = false)
-		assertFalse(idle.isVisible)
-	}
-
 	/** The agent add-on is named for what it is, not as the user's app. */
 	@Test
 	fun `a foreign install names what it installs`() {
