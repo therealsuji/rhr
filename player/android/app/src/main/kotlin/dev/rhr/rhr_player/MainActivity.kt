@@ -169,10 +169,10 @@ class MainActivity : FlutterActivity() {
 
 	// The session service's overlay holds the screen when the player may draw
 	// over other apps. Without that permission, this keeps the player's own
-	// screen on while the host is connected.
+	// screen on for the session, from the moment it starts connecting.
 	private val keepScreenOn: () -> Unit = {
 		runOnUiThread {
-			if (RhrSessionService.status == "connected")
+			if (RhrSessionService.holdsScreen)
 				window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 			else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 		}

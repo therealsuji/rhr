@@ -1774,8 +1774,9 @@ Future<int?> _runSession({
         ok: true,
         message:
             'RHR Agent is installed, and the phone now shows its setup screen. '
-            'Ask the user to tap Turn on, find RHR Agent in Settings > '
-            'Accessibility and switch it on. If the switch is greyed out: '
+            'Ask the user to tap Turn on, then Installed apps (Downloaded '
+            'apps on some phones), RHR Agent, the switch, and Allow. If the '
+            'switch is greyed out: '
             'App info, the three-dot menu, Allow restricted settings, then '
             'try the switch again.',
         then: null,

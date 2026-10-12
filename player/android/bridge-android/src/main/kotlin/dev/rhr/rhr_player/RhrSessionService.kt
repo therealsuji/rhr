@@ -197,6 +197,15 @@ class RhrSessionService : Service() {
 				updateListeners.forEach { it() }
 			}
 
+		/**
+		 * Whether the screen should stay on: from the moment a session starts
+		 * dialing until it is stopped or paused. The user may be waiting
+		 * hands-free on the relay, the computer, a build, or their coding
+		 * agent, and a phone that sleeps meanwhile freezes all of it.
+		 */
+		val holdsScreen: Boolean
+			get() = current?.run { sessionCode.isNotEmpty() && !stopped.get() && !paused } == true
+
 		// Latest session code / VM URI, surfaced in the native dev menu so the
 		// user can see them even after the guest app has taken the screen.
 		@Volatile var currentCode: String = ""
@@ -607,13 +616,13 @@ class RhrSessionService : Service() {
 
 	private val main = android.os.Handler(android.os.Looper.getMainLooper())
 	private val refreshScreenHold: () -> Unit = {
-		main.post { if (RhrSessionService.current === this) holdScreen(status == "connected") }
+		main.post { if (RhrSessionService.current === this) holdScreen(holdsScreen) }
 	}
 	private var screenHold: android.view.View? = null
 
 	/**
-	 * Keeps the display from timing out while the host is connected,
-	 * whatever the session is doing: building, installing, or running.
+	 * Keeps the display from timing out while [holdsScreen], whatever the
+	 * session is doing: connecting, building, installing, or running.
 	 *
 	 * The user may be looking at the player or at a separate debug app, and
 	 * the player cannot set FLAG_KEEP_SCREEN_ON on another app's window. It

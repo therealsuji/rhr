@@ -234,10 +234,16 @@ class AgentService : AccessibilityService() {
 		return JSONObject()
 	}
 
-	/** Types into the focused field; the agent taps the field first. */
+	/**
+	 * Types into the focused field; the agent taps the field first. Every
+	 * window has its own input focus, and the keyboard's (a key, never
+	 * editable) usually comes first, so look past windows whose focus is not
+	 * a text field.
+	 */
 	private fun setText(text: String): JSONObject {
-		val field = windows.firstNotNullOfOrNull { it.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }
-			?.takeIf { it.isEditable }
+		val field = windows.firstNotNullOfOrNull { window ->
+			window.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
+		}
 			?: throw AgentError("no_text_field", "No text field has focus. Tap the field first.")
 		val args = Bundle().apply {
 			putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)

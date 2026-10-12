@@ -506,12 +506,45 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
         'Installs RHR Agent, which provides device control, on the phone. The '
         'user confirms the install, then turns the agent on in the '
         "phone's Accessibility settings; ask them to. Waits up to 10 minutes "
-        'for the install.',
+        'for each, then brings the app back to the front, so device control '
+        'works as soon as this returns.',
     inputSchema: Schema.object(),
   );
 
   Future<CallToolResult> _installAgent(CallToolRequest request) =>
-      _sessionCommand('install_agent');
+      _run(() async {
+        final project = _project();
+        final installed = await sendSessionCommand(project, 'install_agent');
+        if (installed == null) {
+          throw _ToolFailure('No rhr session is running for $project.');
+        }
+        if (!installed.ok) throw _ToolFailure(installed.message);
+        // Device control answering is the sign the user has turned it on.
+        final session = await _current();
+        final deadline = DateTime.now().add(const Duration(minutes: 10));
+        while (true) {
+          try {
+            final device = await session.device();
+            await device.request('info', const {}, const Duration(seconds: 5));
+            final app = session.endpoints.app;
+            // Turning it on leaves the user in Settings; take them back.
+            if (app != null) await device.request('launch', {'package': app});
+            return _text(
+              'RHR Agent is on and device control works.'
+              '${app == null ? '' : ' $app is back in front.'}',
+            );
+          } on DeviceControlException catch (e) {
+            if (e.code == 'agent_stopped') rethrow;
+            if (DateTime.now().isAfter(deadline)) {
+              return _text(
+                '${installed.message}\n\nIt is not on yet (${e.code}); status '
+                'shows when it is.',
+              );
+            }
+          }
+          await Future<void>.delayed(const Duration(seconds: 2));
+        }
+      });
 
   /// A frozen app cannot take a reload, and Flutter would wait minutes for
   /// it. With device control, check the app is in front first.
