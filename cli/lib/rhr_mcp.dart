@@ -520,10 +520,13 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
         }
         if (!installed.ok) throw _ToolFailure(installed.message);
         // Device control answering is the sign the user has turned it on.
-        final session = await _current();
+        // The phone may reconnect while the user is in Settings, and the
+        // session then comes back on new endpoints, so look it up each time.
         final deadline = DateTime.now().add(const Duration(minutes: 10));
         while (true) {
+          String waiting;
           try {
+            final session = await _current();
             final device = await session.device();
             await device.request('info', const {}, const Duration(seconds: 5));
             final app = session.endpoints.app;
@@ -535,12 +538,17 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
             );
           } on DeviceControlException catch (e) {
             if (e.code == 'agent_stopped') rethrow;
-            if (DateTime.now().isAfter(deadline)) {
-              return _text(
-                '${installed.message}\n\nIt is not on yet (${e.code}); status '
-                'shows when it is.',
-              );
-            }
+            waiting = e.code;
+          } on _ToolFailure {
+            waiting = 'session reconnecting';
+          } on SocketException {
+            waiting = 'session reconnecting';
+          }
+          if (DateTime.now().isAfter(deadline)) {
+            return _text(
+              '${installed.message}\n\nIt is not on yet ($waiting); status '
+              'shows when it is.',
+            );
           }
           await Future<void>.delayed(const Duration(seconds: 2));
         }
