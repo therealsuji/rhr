@@ -116,7 +116,7 @@ internal object DeviceEndpoints {
 			return refusal(
 				"agent_stopped",
 				"The user turned off agent control on the phone. It stays off until they allow it again " +
-					"from the session notification, or connect again.",
+					"from the session notification, or start another session.",
 			)
 		}
 		// A provider authority belongs to whichever app claimed it first. Only

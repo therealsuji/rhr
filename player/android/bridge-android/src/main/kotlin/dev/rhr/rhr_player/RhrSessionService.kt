@@ -277,7 +277,8 @@ class RhrSessionService : Service() {
 		 * agent is reading. [agentControlling] holds from the agent's first
 		 * answer until the host leaves, and is when the notification offers
 		 * "Stop agent control". [agentStopped] is the user's choice: it
-		 * refuses every request until they allow it again or connect again.
+		 * refuses every request until they allow it again or start another
+		 * session, and survives Android restarting the player.
 		 */
 		@Volatile var agentStopped = false
 		@Volatile var agentControlling = false
