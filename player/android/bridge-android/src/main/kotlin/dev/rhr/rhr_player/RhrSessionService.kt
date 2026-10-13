@@ -51,6 +51,8 @@ class RhrSessionService : Service() {
 		private const val DIRECT_SIGNAL_VERSION = 1
 		/** rhr_native preference: the session code the tester paused. */
 		private const val PAUSED_CODE = "paused_session_code"
+		/** rhr_native preference: the session code agent control was stopped for. */
+		private const val AGENT_STOPPED_CODE = "agent_stopped_session_code"
 		// More concurrent VM channels than Flutter's tooling ever opens (a
 		// handful, plus DevTools). Each costs a socket and two threads, so a
 		// peer that keeps opening them must hit a ceiling.
@@ -409,7 +411,7 @@ class RhrSessionService : Service() {
 	 * Remembered per session code, because every reconnect also tells the
 	 * relay when the phone is NOT paused (a resume can be lost the same way).
 	 * Forgotten in memory, a player restarted by Android would announce a
-	 * resume the tester never gave.
+	 * resume the user never gave.
 	 */
 	@Volatile private var paused = false
 		set(value) {
@@ -422,6 +424,22 @@ class RhrSessionService : Service() {
 	private fun pausedEarlier(code: String): Boolean =
 		getSharedPreferences("rhr_native", Context.MODE_PRIVATE)
 			.getString(PAUSED_CODE, null) == code
+
+	/**
+	 * Sets [agentStopped] and remembers it per session code, like [paused]:
+	 * Android restarting the player resumes the same session, and must not
+	 * hand device control back to a host the user stopped.
+	 */
+	private fun setAgentStopped(value: Boolean) {
+		agentStopped = value
+		val preferences = getSharedPreferences("rhr_native", Context.MODE_PRIVATE)
+		if (value) preferences.edit().putString(AGENT_STOPPED_CODE, sessionCode).apply()
+		else preferences.edit().remove(AGENT_STOPPED_CODE).apply()
+	}
+
+	private fun agentStoppedEarlier(code: String): Boolean =
+		getSharedPreferences("rhr_native", Context.MODE_PRIVATE)
+			.getString(AGENT_STOPPED_CODE, null) == code
 
 	/** Tells the relay whether developers may claim this phone. */
 	private fun availabilityMessage(): String =
@@ -550,8 +568,10 @@ class RhrSessionService : Service() {
 					// A new session starts with no host having left it; a
 					// stale flag here would suppress a real reconnect notice.
 					hostLeft = false
-					// "Stop agent control" lasts until the user connects again.
-					agentStopped = false
+					// "Stop agent control" lasts until the user allows it again
+					// or connects to another session; the same code coming
+					// back after Android restarted the player stays stopped.
+					agentStopped = agentStoppedEarlier(requestedCode)
 					agentControlling = false
 					// A pause stays with its session code until the user
 					// resumes or disconnects: the same code coming back after
@@ -614,16 +634,17 @@ class RhrSessionService : Service() {
 				}
 			}
 			"stop_agent" -> {
-				agentStopped = true
+				setAgentStopped(true)
 				refreshNotification()
 			}
 			"allow_agent" -> {
-				agentStopped = false
+				setAgentStopped(false)
 				refreshNotification()
 			}
 			"stop" -> {
 				stopped.set(true)
 				paused = false
+				setAgentStopped(false)
 				ws?.close(1000, "stopped")
 				directTransport?.close()
 				directTransport = null

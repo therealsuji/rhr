@@ -11,9 +11,10 @@ import android.os.Process
 import org.json.JSONObject
 
 /**
- * Where the player passes device-control requests. It answers only an app
- * signed with this app's own key, which is how a phone's RHR player and its
- * RHR Agent recognize each other; nothing else on the phone gets control.
+ * Where the player passes device-control requests. It answers only the RHR
+ * player, signed with this app's own key, which is how a phone's RHR player
+ * and its RHR Agent recognize each other; nothing else on the phone gets
+ * control.
  *
  * Each request is its own binder call on purpose. Samsung freezes a
  * background process whenever no binder call is running in it, accessibility
@@ -27,8 +28,7 @@ class AgentProvider : ContentProvider() {
 	override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
 		if (method != "request") return null
 		val context = context ?: return null
-		if (context.packageManager.checkSignatures(Binder.getCallingUid(), Process.myUid()) !=
-			PackageManager.SIGNATURE_MATCH) {
+		if (!callerIsPlayer(context.packageManager)) {
 			throw SecurityException("RHR Agent only serves the RHR player signed with its key.")
 		}
 		val request = JSONObject(arg ?: "{}")
@@ -42,6 +42,24 @@ class AgentProvider : ContentProvider() {
 						"Settings > Accessibility > Installed apps.",
 				)
 		return Bundle().apply { putString("response", response.toString()) }
+	}
+
+	/**
+	 * The caller is an RHR player (`dev.rhr.rhr_player`, or a suffixed build
+	 * of it) signed with this app's key. The key alone is not enough: a
+	 * self-built player and agent use the computer's debug key, which signs
+	 * every other debug app built there too.
+	 */
+	private fun callerIsPlayer(packages: PackageManager): Boolean {
+		val uid = Binder.getCallingUid()
+		if (packages.checkSignatures(uid, Process.myUid()) != PackageManager.SIGNATURE_MATCH) return false
+		return packages.getPackagesForUid(uid).orEmpty().any {
+			it == PLAYER_PACKAGE || it.startsWith("$PLAYER_PACKAGE.")
+		}
+	}
+
+	private companion object {
+		const val PLAYER_PACKAGE = "dev.rhr.rhr_player"
 	}
 
 	override fun query(uri: Uri, projection: Array<String>?, selection: String?, args: Array<String>?, sort: String?): Cursor? = null

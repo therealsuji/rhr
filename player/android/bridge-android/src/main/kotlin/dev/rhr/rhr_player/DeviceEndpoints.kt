@@ -1,6 +1,7 @@
 package dev.rhr.rhr_player
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -75,6 +76,7 @@ internal object DeviceEndpoints {
 	const val TARGET_DEVICE = 1
 	const val TARGET_LOGS = 2
 	private const val AGENT_AUTHORITY = "dev.rhr.agent.control"
+	private const val AGENT_PACKAGE = "dev.rhr.agent"
 	private const val ATTACHED = 0
 
 	fun open(context: Context, target: Int, connectedPackage: String?): ChannelEnd = when (target) {
@@ -115,6 +117,23 @@ internal object DeviceEndpoints {
 				"agent_stopped",
 				"The user turned off agent control on the phone. It stays off until they allow it again " +
 					"from the session notification, or connect again.",
+			)
+		}
+		// A provider authority belongs to whichever app claimed it first. Only
+		// RHR Agent signed like this player may receive requests (they carry
+		// text the agent types) and answer them.
+		val provider = context.packageManager.resolveContentProvider(AGENT_AUTHORITY, 0)
+			?: return refusal(
+				"agent_missing",
+				"RHR Agent is not installed on the phone. Install it with install_agent (rhr mcp).",
+			)
+		if (provider.packageName != AGENT_PACKAGE ||
+			context.packageManager.checkSignatures(context.packageName, AGENT_PACKAGE) !=
+			PackageManager.SIGNATURE_MATCH) {
+			return refusal(
+				"agent_untrusted",
+				"The app answering for RHR Agent on the phone is not RHR Agent signed like this player. " +
+					"Uninstall it on the phone, then install RHR Agent again with install_agent (rhr mcp).",
 			)
 		}
 		val response = try {
