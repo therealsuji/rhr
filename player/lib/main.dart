@@ -97,6 +97,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
 
   /// This build's version, shown in the footer. Null until read.
   String? _installedVersion;
+
+  /// RHR Agent on this phone: "missing", "untrusted", "off" or "on". Null
+  /// until read, and while the phone has joined no account: agent control
+  /// is for the account's computers.
+  String? _agent;
+  bool _installingAgent = false;
+  String? _agentProblem;
   bool _checkingUpdate = false;
 
   /// Whether the code field is on screen.
@@ -166,6 +173,37 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       _waitOnAccountRendezvous();
     });
     _readInstalledVersion();
+    _readAgent();
+  }
+
+  Future<void> _readAgent() async {
+    final joined = (await joinedAccounts()).isNotEmpty;
+    final agent = joined
+        ? await const MethodChannel(
+            'rhr/connector',
+          ).invokeMethod<String>('agentStatus')
+        : null;
+    if (!mounted) return;
+    setState(() {
+      // A problem belongs to the step that raised it.
+      if (agent != _agent) _agentProblem = null;
+      _agent = agent;
+    });
+  }
+
+  Future<void> _installAgent() async {
+    setState(() {
+      _installingAgent = true;
+      _agentProblem = null;
+    });
+    final problem = await const MethodChannel(
+      'rhr/connector',
+    ).invokeMethod<String>('installAgent');
+    if (!mounted) return;
+    setState(() {
+      _installingAgent = false;
+      _agentProblem = problem;
+    });
   }
 
   /// Reads this build's version for the footer.
@@ -282,6 +320,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // Back from Android's installer or the accessibility switch.
+      _readAgent();
       // Pass the current VM URI along: iOS has no logcat watcher, so the
       // native service re-announces from this. Android ignores the arg and
       // discovers the URI from logcat itself.
@@ -498,6 +538,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       await _waitOnAccountRendezvous();
       if (!mounted) return;
     }
+    await _readAgent();
+    if (!mounted) return;
     setState(() {
       _status = switch (outcome) {
         JoinAccepted(:final account, alreadyJoined: true) =>
@@ -695,6 +737,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
                         const SizedBox(height: 18),
+                        if (_agent case final agent? when agent != 'on') ...[
+                          _agentCard(agent),
+                          const SizedBox(height: 18),
+                        ],
                         if (_active && _setupAction.isNotEmpty) ...[
                           Text(
                             _setupMessage,
@@ -1116,6 +1162,60 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         }
         return base;
     }
+  }
+
+  /// Sets up agent control from the phone: install RHR Agent, then turn it
+  /// on. After that the coding agent on the computer can do the rest,
+  /// including the prompts an install raises.
+  Widget _agentCard(String agent) {
+    final (text, action, onPressed) = switch (agent) {
+      'missing' => (
+        'Let your coding agent use this phone. RHR Agent lets it see the '
+            'screen, tap, and approve installs, so you do not have to.',
+        _installingAgent ? 'Installing…' : 'Install RHR Agent',
+        _installingAgent ? null : _installAgent,
+      ),
+      'off' => (
+        'RHR Agent is installed. Turn it on so your coding agent can use '
+            'this phone.',
+        'Turn on RHR Agent',
+        () => const MethodChannel('rhr/connector').invokeMethod('openAgent'),
+      ),
+      _ => (
+        'The RHR Agent on this phone is signed with a different key than '
+            'this player. Uninstall it in Settings, then install it here.',
+        null,
+        null,
+      ),
+    };
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _surfaceHi),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            text,
+            style: const TextStyle(color: _ink, fontSize: 13.5, height: 1.4),
+          ),
+          if (_agentProblem case final problem?) ...[
+            const SizedBox(height: 8),
+            Text(
+              problem,
+              style: const TextStyle(color: _err, fontSize: 12.5, height: 1.4),
+            ),
+          ],
+          if (action != null) ...[
+            const SizedBox(height: 12),
+            FilledButton(onPressed: onPressed, child: Text(action)),
+          ],
+        ],
+      ),
+    );
   }
 
   /// Non-active hint (e.g. a format error or "Disconnected").

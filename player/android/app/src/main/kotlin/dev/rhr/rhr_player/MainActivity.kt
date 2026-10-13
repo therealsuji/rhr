@@ -308,6 +308,16 @@ class MainActivity : FlutterActivity() {
 					startActivity(SystemOverlayHost.permissionIntent(this))
 					result.success(null)
 				}
+				// Agent control, set up from the phone (see AgentSetup).
+				"agentStatus" -> result.success(AgentSetup.status(this))
+				"installAgent" -> Thread {
+					val problem = AgentSetup.install(this)
+					runOnUiThread { result.success(problem) }
+				}.start()
+				"openAgent" -> {
+					AgentSetup.open(this)
+					result.success(null)
+				}
 				else -> result.notImplemented()
 			}
 		}

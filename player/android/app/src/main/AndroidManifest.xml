@@ -118,6 +118,10 @@
         <receiver
             android:name=".UpdateResultReceiver"
             android:exported="false" />
+        <!-- PackageInstaller callback for installing RHR Agent from the lobby. -->
+        <receiver
+            android:name=".AgentInstallReceiver"
+            android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
