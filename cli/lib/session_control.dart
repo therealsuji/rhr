@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'private_file.dart';
 
@@ -18,6 +19,8 @@ import 'private_file.dart';
 typedef SessionAnswer = ({bool ok, String message, void Function()? then});
 
 final class SessionControl {
+  static const _maxRequestBytes = 4096;
+
   SessionControl._(this._server, this._file, this.token);
 
   final ServerSocket _server;
@@ -47,11 +50,9 @@ final class SessionControl {
     server.listen((client) async {
       client.done.catchError((_) {});
       try {
-        final line = await utf8.decoder
-            .bind(client)
-            .transform(const LineSplitter())
-            .first
-            .timeout(const Duration(seconds: 5));
+        final line = await _firstLine(
+          client,
+        ).timeout(const Duration(seconds: 5));
         final request = jsonDecode(line);
         if (request is! Map<String, dynamic> || request['token'] != token) {
           return;
@@ -72,6 +73,22 @@ final class SessionControl {
       }
     });
     return SessionControl._(server, file, token);
+  }
+
+  /// The client's first line, read before its token is checked, so it is
+  /// capped: any local process can connect and stream bytes with no newline.
+  static Future<String> _firstLine(Stream<List<int>> client) async {
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in client) {
+      final newline = chunk.indexOf(10);
+      bytes.add(newline < 0 ? chunk : chunk.sublist(0, newline));
+      if (newline >= 0) break;
+      if (bytes.length > _maxRequestBytes) break;
+    }
+    if (bytes.length > _maxRequestBytes) {
+      throw const FormatException('control request too long');
+    }
+    return utf8.decode(bytes.takeBytes());
   }
 
   Future<void> close() async {

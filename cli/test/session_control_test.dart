@@ -57,6 +57,30 @@ void main() {
     expect(answer?.ok, isFalse);
   });
 
+  test('a request line with no end is cut off, not buffered', () async {
+    final control = await SessionControl.serve(
+      project.path,
+      (_) async => (ok: true, message: '', then: null),
+    );
+    addTearDown(control.close);
+    final config = jsonDecode(
+      SessionControl.fileFor(project.path).readAsStringSync(),
+    );
+    final socket = await Socket.connect(
+      InternetAddress.loopbackIPv4,
+      config['port'] as int,
+    );
+    final closed = socket.drain<void>().then((_) => true);
+    // Writes may fail once the server hangs up; that is the point.
+    socket.done.catchError((_) {});
+    for (var i = 0; i < 8 && !await _settled(closed); i++) {
+      socket.add(List.filled(1024, 0x61));
+      await socket.flush().catchError((_) {});
+    }
+    expect(await closed.timeout(const Duration(seconds: 2)), isTrue);
+    socket.destroy();
+  });
+
   test('readConnectionInfo reads the pairing file, or nothing', () {
     expect(readConnectionInfo(project.path), isNull);
     File('${project.path}/.dart_tool/rhr/connection.json')
@@ -101,3 +125,7 @@ void main() {
     expect(() => findSessionProject(root.path), throwsA(isA<StateError>()));
   });
 }
+
+/// Whether [future] has already completed, without waiting for it.
+Future<bool> _settled(Future<bool> future) =>
+    Future.any([future, Future.delayed(Duration.zero, () => false)]);

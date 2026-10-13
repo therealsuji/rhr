@@ -794,19 +794,27 @@ final class LogTail {
 
 /// The device tree as text an agent reads cheaply: one line per element,
 /// indented by nesting, with its tap point.
+///
+/// Every string comes from whatever is on screen, so each is escaped: a
+/// label holding a newline and a quote must not be able to forge windows,
+/// buttons or tap points the agent then believes.
 String formatTree(Map<String, dynamic> tree) {
   final out = StringBuffer();
   for (final window in (tree['windows'] as List).cast<Map<String, dynamic>>()) {
-    out.write('window ${window['type']} ${window['package']}');
-    if (window['title'] case final String title) out.write(' "$title"');
+    out.write('window ${_word(window['type'])} ${_word(window['package'])}');
+    if (window['title'] case final String title) {
+      out.write(' ${jsonEncode(title)}');
+    }
     if (window['active'] == true) out.write(' (active)');
     out.writeln();
     void node(Map<String, dynamic> n, int depth) {
       out.write('  ' * depth);
-      out.write(n['class'] ?? '?');
-      if (n['text'] case final String text) out.write(' "$text"');
-      if (n['description'] case final String d) out.write(' desc="$d"');
-      if (n['id'] case final String id) out.write(' id=$id');
+      out.write(_word(n['class'] ?? '?'));
+      if (n['text'] case final String text) out.write(' ${jsonEncode(text)}');
+      if (n['description'] case final String d) {
+        out.write(' desc=${jsonEncode(d)}');
+      }
+      if (n['id'] case final String id) out.write(' id=${_word(id)}');
       if (n['flags'] case final List flags) out.write(' [${flags.join(', ')}]');
       if (n['frame'] case [
         final num x,
@@ -827,6 +835,13 @@ String formatTree(Map<String, dynamic> tree) {
     }
   }
   return out.toString().trimRight();
+}
+
+/// [value] bare when it is a plain name (a class, package or resource id),
+/// quoted and escaped otherwise.
+String _word(Object? value) {
+  final text = '$value';
+  return RegExp(r'^[\w.$:/-]+$').hasMatch(text) ? text : jsonEncode(text);
 }
 
 /// Every text and description in the device tree.
