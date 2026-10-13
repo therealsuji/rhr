@@ -22,6 +22,12 @@ connection. The client URL must be `wss://…`; the plain `ws://` form is only f
 trusted local development. A reverse proxy should forward WebSocket upgrades
 and expose `/healthz` for its health check.
 
+This relay is for development, not for the open internet. `dart:io` buffers
+each WebSocket message whole and offers no size limit, so anyone who can reach
+it can make it hold a very large message in memory. Common proxies do not cap
+WebSocket frames either. Keep it on a private network or VPN; the hosted relay
+caps messages at 1 MiB.
+
 Use the resulting URL with the product flow:
 
 ```bash
