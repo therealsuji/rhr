@@ -99,12 +99,9 @@ Uint8List _createMinimalCertificate({
   // For now, we'll create a minimal DER-encoded certificate structure
   // that's sufficient for DTLS handshake testing
 
-  final builder = _Asn1Builder();
-
-  // Certificate ::= SEQUENCE {
-  builder.startSequence();
-
   // TBSCertificate ::= SEQUENCE {
+  // Built on its own: it is the exact bytes the signature covers.
+  final builder = _Asn1Builder();
   builder.startSequence();
 
   // Version [0] EXPLICIT Version DEFAULT v1
@@ -173,21 +170,20 @@ Uint8List _createMinimalCertificate({
 
   builder.endSequence(); // End TBSCertificate
 
-  // Sign the TBSCertificate
   final tbsCertificate = builder.getBytes();
   final signature = _signCertificate(tbsCertificate, privateKey);
 
-  // Signature algorithm
-  builder.startSequence();
-  builder.writeOid([1, 2, 840, 10045, 4, 3, 2]); // ecdsaWithSHA256
-  builder.endSequence();
+  // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
+  final certificate = _Asn1Builder();
+  certificate.startSequence();
+  certificate.writeRaw(tbsCertificate);
+  certificate.startSequence();
+  certificate.writeOid([1, 2, 840, 10045, 4, 3, 2]); // ecdsaWithSHA256
+  certificate.endSequence();
+  certificate.writeBitString(signature);
+  certificate.endSequence();
 
-  // Signature value
-  builder.writeBitString(signature);
-
-  builder.endSequence(); // End Certificate
-
-  return builder.getBytes();
+  return certificate.getBytes();
 }
 
 /// Write public key info to ASN.1 builder
@@ -270,24 +266,43 @@ class _Asn1Builder {
     _writeTagLengthValue(tag, Uint8List.fromList(data));
   }
 
+  /// A non-negative INTEGER: [value] is an int, a hex string, or the
+  /// big-endian bytes of the magnitude.
+  ///
+  /// DER integers are signed and minimal, so leading zero bytes are dropped
+  /// and a 0x00 is added when the top bit is set. Without that, half of all
+  /// random serial numbers read as negative, and BoringSSL refuses the
+  /// certificate (INVALID_INTEGER).
   void writeInteger(dynamic value) {
-    Uint8List bytes;
+    final List<int> magnitude;
     if (value is Uint8List) {
-      bytes = value;
+      magnitude = value;
     } else if (value is String) {
-      bytes = Uint8List.fromList(
-        BigInt.parse(value, radix: 16)
-            .toRadixString(16)
-            .padLeft((value.length / 2).ceil() * 2, '0')
-            .codeUnits
-            .map((c) {
-          return int.parse(String.fromCharCode(c), radix: 16);
-        }).toList(),
-      );
+      magnitude = _bigIntBytes(BigInt.parse(value, radix: 16));
     } else {
-      bytes = Uint8List.fromList([value as int]);
+      magnitude = _bigIntBytes(BigInt.from(value as int));
     }
-    _writeTagLengthValue(0x02, bytes);
+    var start = 0;
+    while (start < magnitude.length - 1 && magnitude[start] == 0) {
+      start++;
+    }
+    final bytes = magnitude.sublist(start);
+    _writeTagLengthValue(
+      0x02,
+      Uint8List.fromList([
+        if (bytes.isEmpty || bytes.first & 0x80 != 0) 0,
+        ...bytes,
+      ]),
+    );
+  }
+
+  static List<int> _bigIntBytes(BigInt value) {
+    var hex = value.toRadixString(16);
+    if (hex.length.isOdd) hex = '0$hex';
+    return [
+      for (var i = 0; i < hex.length; i += 2)
+        int.parse(hex.substring(i, i + 2), radix: 16),
+    ];
   }
 
   void writeOid(List<int> oid) {
@@ -313,7 +328,10 @@ class _Asn1Builder {
     _writeTagLengthValue(0x0C, Uint8List.fromList(value.codeUnits));
   }
 
-  void writeUtcTime(DateTime dateTime) {
+  /// UTCTime ends in Z, so the fields must be UTC: local fields put the
+  /// validity hours off by the machine's offset from UTC.
+  void writeUtcTime(DateTime time) {
+    final dateTime = time.toUtc();
     final year = dateTime.year.toString().substring(2);
     final month = dateTime.month.toString().padLeft(2, '0');
     final day = dateTime.day.toString().padLeft(2, '0');
@@ -362,6 +380,15 @@ class _Asn1Builder {
         temp >>= 8;
       }
       return [0x80 | bytes.length, ...bytes];
+    }
+  }
+
+  /// Appends already-encoded DER, such as a finished TBSCertificate.
+  void writeRaw(List<int> der) {
+    if (_stack.isNotEmpty) {
+      _stack.last.addAll(der);
+    } else {
+      _bytes.addAll(der);
     }
   }
 
