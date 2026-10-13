@@ -587,7 +587,7 @@ class RhrSessionService : Service() {
 				directTransport?.close()
 				directTransport = null
 				cleanupChannels()
-				updater?.cancel("the tester paused this phone")
+				updater?.cancel("this phone was paused")
 				// The progress was theirs, and a phase outranks the status on
 				// the banner, so leaving it would hide "Paused".
 				setProgress("", 0, 0)

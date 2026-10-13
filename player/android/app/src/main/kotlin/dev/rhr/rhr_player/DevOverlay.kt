@@ -1101,13 +1101,13 @@ class DevOverlay(
 			setOnClickListener { }
 		}
 		sheet.addView(TextView(activity).apply {
-			text = "Install an app from the developer?"
+			text = "Install an app from your computer?"
 			setTextColor(ink)
 			textSize = 16f
 			typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 		})
 		sheet.addView(TextView(activity).apply {
-			text = "The developer connected to this session wants to install this app on your phone:"
+			text = "The computer connected to this session wants to install this app on your phone:"
 			setTextColor(inkDim)
 			textSize = 13f
 			setPadding(0, dp(10), 0, 0)

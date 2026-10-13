@@ -132,20 +132,20 @@ class RhrPlayerUpdater(
 		}
 		active = this
 		Log.i(TAG, "update transfer $id announced ($size bytes, kind=$kind)")
-		if (kind == "player") status(id, "ready") else askTester(id, target)
+		if (kind == "player") status(id, "ready") else askUser(id, target)
 	}
 
 	/**
 	 * Asks the tester before a foreign package's bytes are taken. Only a
 	 * yes opens the file and answers "ready"; the CLI sends nothing before.
 	 */
-	private fun askTester(id: Int, target: String) {
+	private fun askUser(id: Int, target: String) {
 		status(id, "awaiting_approval")
 		val request = InstallConsent.ask(target) { allowed ->
 			val accepted = synchronized(this) {
 				if (transferId != id || finished) return@ask
 				consent = null
-				if (!allowed) fail("the tester did not allow installing $target") else openFile()
+				if (!allowed) fail("installing $target was not allowed on the phone") else openFile()
 				allowed
 			}
 			if (accepted) status(id, "ready")

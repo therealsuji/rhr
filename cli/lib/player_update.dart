@@ -239,11 +239,11 @@ final class PlayerUpdateSender {
       // The phone asks the tester before it accepts an app it did not ask
       // for, and gives them a minute to answer; this waits a little longer
       // so the phone's own verdict arrives first.
-      stderr.writeln('[rhr] waiting for the tester to allow the install');
+      stderr.writeln('[rhr] waiting for the install to be allowed on the phone');
       await _awaitState(
         {'ready'},
         timeout: const Duration(seconds: 75),
-        onTimeout: 'the tester did not answer the install request',
+        onTimeout: 'nobody answered the install request on the phone',
       );
     }
 
