@@ -896,11 +896,9 @@ Future<int?> _runSession({
       code: code,
       claimFile: File('$project/.dart_tool/rhr/claim.json'),
     );
-  } on DeviceBusyException catch (e) {
-    // Someone else is on this device. Retrying would only fight them for it,
-    // so say who has it and stop — the caller must not treat this as a
-    // transient relay failure.
-    stderr.writeln('[rhr] $e');
+  } on DeviceBusyException {
+    // Someone else is on this device, or it is paused. Retrying would only
+    // fight for it; the caller reports it and stops.
     rethrow;
   } on DeviceAccessException {
     // Ends the session loop: no number of retries makes a device that left
