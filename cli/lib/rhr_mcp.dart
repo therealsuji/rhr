@@ -109,7 +109,12 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
     final project = _project();
     final session = await _current();
     final lines = <String>[
-      'session: running (${session.endpoints.vm})',
+      switch (session.endpoints.vm) {
+        final vm? => 'session: running ($vm)',
+        null =>
+          'session: preparing the app on the phone. Device control works; '
+              'answer any prompt the phone shows with describe and tap.',
+      },
       if (session.endpoints.app case final app?) 'app package: $app',
       if (readConnectionInfo(project) case final connect?) ...[
         'connect code: ${connect.code} (type into the RHR player)',
@@ -647,6 +652,9 @@ CallToolResult _error(String text) =>
 final class _ToolFailure implements Exception {
   _ToolFailure(this.message);
   final String message;
+
+  @override
+  String toString() => message;
 }
 
 const _instructions = '''
@@ -700,9 +708,17 @@ final class _Session {
   Future<VmService> vmService() async {
     final open = _vm;
     if (open != null) return open;
-    final ws = endpoints.vm.replace(
+    final uri = endpoints.vm;
+    if (uri == null) {
+      throw _ToolFailure(
+        'The app is still being prepared on the phone, so there is no Dart VM '
+        'yet. Use describe and tap to answer what the phone shows (an install '
+        'prompt, for example), then try again.',
+      );
+    }
+    final ws = uri.replace(
       scheme: 'ws',
-      path: '${endpoints.vm.path.replaceFirst(RegExp(r'/$'), '')}/ws',
+      path: '${uri.path.replaceFirst(RegExp(r'/$'), '')}/ws',
     );
     final vm = await answered(
       vmServiceConnectUri(ws.toString()),

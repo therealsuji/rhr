@@ -42,11 +42,8 @@ final class SessionControl {
     final token = base64UrlEncode(
       List<int>.generate(16, (_) => Random.secure().nextInt(256)),
     );
-    final file = fileFor(project);
-    writePrivateFile(
-      file,
-      jsonEncode({...endpoints, 'port': server.port, 'token': token}),
-    );
+    final control = SessionControl._(server, fileFor(project), token)
+      ..publish(endpoints);
     server.listen((client) async {
       client.done.catchError((_) {});
       try {
@@ -72,7 +69,7 @@ final class SessionControl {
         client.destroy();
       }
     });
-    return SessionControl._(server, file, token);
+    return control;
   }
 
   /// The client's first line, read before its token is checked, so it is
@@ -91,6 +88,13 @@ final class SessionControl {
     return utf8.decode(bytes.takeBytes());
   }
 
+  /// Writes the control file with [endpoints], replacing what it said. A
+  /// session publishes device control first and the VM once the app runs.
+  void publish(Map<String, Object> endpoints) => writePrivateFile(
+    _file,
+    jsonEncode({...endpoints, 'port': _server.port, 'token': token}),
+  );
+
   Future<void> close() async {
     await _server.close();
     if (_file.existsSync()) _file.deleteSync();
@@ -98,12 +102,13 @@ final class SessionControl {
 }
 
 /// What a running session publishes for local clients: the control [token],
-/// the tunneled VM service, the loopback ports that open device-control and
+/// the tunneled VM service (null while the app is still being prepared), the
+/// loopback ports that open device-control and
 /// native-log channels to the phone, and the package the app runs in (absent
 /// for `rhr attach`, which does not know it).
 typedef SessionEndpoints = ({
   String token,
-  Uri vm,
+  Uri? vm,
   int device,
   int logs,
   String? app,
@@ -119,13 +124,15 @@ SessionEndpoints? readSessionEndpoints(String project) {
     );
     if (saved case {
       'token': final String token,
-      'vm': final String vm,
       'device': final int device,
       'logs': final int logs,
     }) {
       return (
         token: token,
-        vm: Uri.parse(vm),
+        vm: switch (saved['vm']) {
+          final String vm => Uri.parse(vm),
+          _ => null,
+        },
         device: device,
         logs: logs,
         app: saved['app'] as String?,

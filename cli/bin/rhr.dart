@@ -1405,84 +1405,201 @@ Future<int?> _runSession({
     }
   });
 
-  stderr.writeln('[rhr] waiting for device bridge...');
-  Uri? vm;
-  try {
-    vm = await _waitForDeviceBridge(
-      vmReady,
-      wsDied,
-      code,
-      bridgeDeadline,
-      // An update in flight IS the player, busy. Without this the wait
-      // loop told the user to check whether the phone was connected,
-      // every 30 seconds, while it was streaming an APK to that phone.
-      updating: () => updateSender != null || preparation != null,
-    );
-  } on _WaitTimedOut {
-    preparation?.close();
-    await preparing;
-    await interrupts.cancel();
-    await terminations.cancel();
-    await hangups.cancel();
-    keepalive.cancel();
-    // `rhr attach` gives up here; `rhr run` keeps the device and waits on.
-    if (!prepareRun) relayTransport.release();
-    await transport.close();
-    stderr.writeln(
-      prepareRun
-          ? '[rhr] Still waiting for the phone. Keeping this session available.'
-          : '[rhr] no player joined session "$code" within 5 minutes. '
-                'Check the code, scan the QR again, and rerun rhr attach.',
-    );
-    return prepareRun ? null : _noDeviceExitCode;
-  }
-  if (vm == null) {
-    preparation?.close();
-    await preparing;
-    keepalive.cancel();
-    await interrupts.cancel();
-    await terminations.cancel();
-    await hangups.cancel();
-    if (fatalExit != null || preparationRetry != null) {
-      // A final exit (not a reprepare or a retry) ends the session on
-      // purpose: hand the device back now.
-      if (fatalExit != null && fatalExit != _reprepare) {
-        relayTransport.release();
-      }
-      sayGoodbye();
-      await Future<void>.delayed(const Duration(milliseconds: 250));
-      await transport.close();
+  var nextChannel = 1;
+
+  /// Sends [data] on [channel], split at the SCTP limit, and pauses [reader]
+  /// whenever the channel's window is full.
+  ///
+  /// A dart:io read is whatever the kernel had buffered, often far more than
+  /// 64 KiB on a fast machine pushing a kernel, and one oversized message
+  /// makes libwebrtc close the data channel while reporting the send as
+  /// successful. That is the "spontaneous disconnect" half of a session
+  /// dying mid-sync. Pausing at a full window is what keeps a fast computer
+  /// from ballooning buffers inside the relay.
+  void tunnelData(
+    int channel,
+    Uint8List data,
+    StreamSubscription<Uint8List> reader,
+  ) {
+    for (var start = 0; start < data.length; start += maxTunnelPayload) {
+      final end = min(start + maxTunnelPayload, data.length);
+      sendPayload(
+        encodeFrame(opData, channel, Uint8List.sublistView(data, start, end)),
+      );
     }
-    // An exit the session chose (approval needed, a fatal preparation
-    // error, a native reprepare) outranks the direct path the phone tore down
-    // because of it; rethrowing that would only reconnect into the same stop.
-    final failure = directFailure;
-    if (failure != null && fatalExit == null) {
+    if (flow.sent(channel, data.length)) {
+      reader.pause();
+      flow.onWindowOpen(channel, reader.resume);
+    }
+  }
+
+  void closeTunnel(int channel) {
+    flow.forget(channel);
+    if (sockets.remove(channel) != null) {
+      sendPayload(encodeFrame(opClose, channel));
+    }
+  }
+
+  // Device control and the app's native log, open from the moment the phone
+  // connects: preparing the app can stop on a prompt (an install, Play
+  // Protect) that only someone looking at the phone can answer, and with RHR
+  // Agent on, that can be the coding agent. A connection first sends the
+  // session control token and a newline: unlike the VM service, these have
+  // no secret of their own.
+  void acceptTarget(Socket sock, int target) {
+    accepted.add(sock);
+    sock.done.catchError((_) {}).whenComplete(() => accepted.remove(sock));
+    BytesBuilder? unauthenticated = BytesBuilder();
+    int? channel;
+    late final StreamSubscription<Uint8List> sub;
+    void close() {
+      if (channel case final open?) closeTunnel(open);
+    }
+
+    sub = sock.listen(
+      (data) {
+        final prefix = unauthenticated;
+        if (prefix == null) {
+          tunnelData(channel!, data, sub);
+          return;
+        }
+        prefix.add(data);
+        final bytes = prefix.toBytes();
+        final newline = bytes.indexOf(10);
+        if (newline < 0) {
+          if (bytes.length > 256) sock.destroy();
+          return;
+        }
+        final token = sessionControl?.token;
+        if (token == null ||
+            utf8.decode(bytes.sublist(0, newline), allowMalformed: true) !=
+                token) {
+          sock.destroy();
+          return;
+        }
+        unauthenticated = null;
+        final opened = channel = nextChannel++;
+        sockets[opened] = sock;
+        sendPayload(encodeOpen(opened, target));
+        final rest = Uint8List.sublistView(bytes, newline + 1);
+        if (rest.isNotEmpty) tunnelData(opened, rest, sub);
+      },
+      onDone: close,
+      onError: (Object _) => close(),
+    );
+  }
+
+  final deviceServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  deviceServer.listen((sock) => acceptTarget(sock, targetDevice));
+  final logsServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  logsServer.listen((sock) => acceptTarget(sock, targetLogs));
+  // Commands (persist, release, reload, install_agent) need the attached
+  // app; until then they are refused with a reason.
+  Future<SessionAnswer> Function(String command)? controlHandler;
+  sessionControl = await SessionControl.serve(
+    project,
+    (command) async =>
+        await controlHandler?.call(command) ??
+        (
+          ok: false,
+          message:
+              'The app is still being prepared on the phone. Use describe and '
+              'tap to answer what the phone shows, then try again.',
+          then: null,
+        ),
+    endpoints: {'device': deviceServer.port, 'logs': logsServer.port},
+  );
+  Future<void> closeEndpoints() async {
+    await sessionControl?.close();
+    await deviceServer.close();
+    await logsServer.close();
+  }
+
+  Uri? vm;
+  // Every way out before the app is attached ends here, and must not
+  // leave device control open or a control file naming a dead session.
+  var attached = false;
+  try {
+    stderr.writeln('[rhr] waiting for device bridge...');
+    try {
+      vm = await _waitForDeviceBridge(
+        vmReady,
+        wsDied,
+        code,
+        bridgeDeadline,
+        // An update in flight IS the player, busy. Without this the wait
+        // loop told the user to check whether the phone was connected,
+        // every 30 seconds, while it was streaming an APK to that phone.
+        updating: () => updateSender != null || preparation != null,
+      );
+    } on _WaitTimedOut {
+      preparation?.close();
+      await preparing;
+      await interrupts.cancel();
+      await terminations.cancel();
+      await hangups.cancel();
+      keepalive.cancel();
+      // `rhr attach` gives up here; `rhr run` keeps the device and waits on.
+      if (!prepareRun) relayTransport.release();
+      await transport.close();
+      stderr.writeln(
+        prepareRun
+            ? '[rhr] Still waiting for the phone. Keeping this session available.'
+            : '[rhr] no player joined session "$code" within 5 minutes. '
+                  'Check the code, scan the QR again, and rerun rhr attach.',
+      );
+      return prepareRun ? null : _noDeviceExitCode;
+    }
+    if (vm == null) {
+      preparation?.close();
+      await preparing;
+      keepalive.cancel();
+      await interrupts.cancel();
+      await terminations.cancel();
+      await hangups.cancel();
+      if (fatalExit != null || preparationRetry != null) {
+        // A final exit (not a reprepare or a retry) ends the session on
+        // purpose: hand the device back now.
+        if (fatalExit != null && fatalExit != _reprepare) {
+          relayTransport.release();
+        }
+        sayGoodbye();
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        await transport.close();
+      }
+      // An exit the session chose (approval needed, a fatal preparation
+      // error, a native reprepare) outranks the direct path the phone tore down
+      // because of it; rethrowing that would only reconnect into the same stop.
+      final failure = directFailure;
+      if (failure != null && fatalExit == null) {
+        await transport.close();
+        throw failure;
+      }
+      final retry = preparationRetry;
+      if (retry != null) {
+        await transport.close();
+        throw retry;
+      }
+      await transport.close();
+      return fatalExit; // relay died while waiting
+    }
+    stderr.writeln('[rhr] device VM service: $vm');
+
+    try {
+      await transport.payloadReady;
+    } on DirectTransportFailure catch (failure) {
+      keepalive.cancel();
+      await interrupts.cancel();
+      await terminations.cancel();
+      await hangups.cancel();
       await transport.close();
       throw failure;
     }
-    final retry = preparationRetry;
-    if (retry != null) {
-      await transport.close();
-      throw retry;
-    }
-    await transport.close();
-    return fatalExit; // relay died while waiting
-  }
-  stderr.writeln('[rhr] device VM service: $vm');
 
-  try {
-    await transport.payloadReady;
-  } on DirectTransportFailure catch (failure) {
-    keepalive.cancel();
-    await interrupts.cancel();
-    await terminations.cancel();
-    await hangups.cancel();
-    await transport.close();
-    throw failure;
+    attached = true;
+  } finally {
+    if (!attached) await closeEndpoints();
   }
-
-  var nextChannel = 1;
 
   /// Writes [bytes] to [channel], pausing whenever its window is full.
   /// False when the phone closed the channel or the session ended first.
@@ -1620,86 +1737,36 @@ Future<int?> _runSession({
     }();
   }
 
-  // Tunnels one local connection to the phone: to the VM service, or to
-  // [target] (see bridge/lib/tunnel.dart). A target connection first sends
-  // the session control token and a newline: unlike the VM service, device
-  // control and logs have no secret of their own.
-  void accept(Socket sock, [int? target]) {
+  // Tunnels one local connection to the phone's VM service (see
+  // bridge/lib/tunnel.dart; device control and logs are [acceptTarget]).
+  void accept(Socket sock) {
     accepted.add(sock);
     // Socket write failures (peer reset mid-transfer) surface on `done`;
     // unhandled they crash the process.
     sock.done.catchError((_) {}).whenComplete(() => accepted.remove(sock));
-    var unauthenticated = target == null ? null : BytesBuilder();
     // Until the first request head shows whether this is a DevFS upload the
     // phone can rebuild from a delta, hold the bytes. Everything else is
     // tunnelled byte for byte, exactly as before.
-    var sniffing = target == null && (devFsDelta || prepareRun)
-        ? HttpRequestReader()
-        : null;
+    var sniffing = devFsDelta || prepareRun ? HttpRequestReader() : null;
     int? rawChannel;
     late final StreamSubscription<Uint8List> sub;
 
-    void forward(Uint8List data) {
-      final channel = rawChannel!;
-      // Split at the SCTP limit. A dart:io read is whatever the kernel had
-      // buffered — often far more than 64 KiB on a fast machine pushing a
-      // kernel — and one oversized message makes libwebrtc close the data
-      // channel while reporting the send as successful. That is the
-      // "spontaneous disconnect" half of a session dying mid-sync.
-      for (var start = 0; start < data.length; start += maxTunnelPayload) {
-        final end = start + maxTunnelPayload < data.length
-            ? start + maxTunnelPayload
-            : data.length;
-        sendPayload(
-          encodeFrame(opData, channel, Uint8List.sublistView(data, start, end)),
-        );
-      }
-      // Pause the local reader once the window fills — this is what keeps
-      // a fast dev machine from ballooning buffers inside the relay.
-      if (flow.sent(channel, data.length)) {
-        sub.pause();
-        flow.onWindowOpen(channel, sub.resume);
-      }
-    }
+    void forward(Uint8List data) => tunnelData(rawChannel!, data, sub);
 
     void openRaw(Uint8List first) {
       sniffing = null;
       final channel = rawChannel = nextChannel++;
       sockets[channel] = sock;
-      sendPayload(encodeOpen(channel, target));
+      sendPayload(encodeOpen(channel));
       if (first.isNotEmpty) forward(first);
     }
 
     void closeRaw() {
-      final channel = rawChannel;
-      if (channel == null) return;
-      flow.forget(channel);
-      if (sockets.remove(channel) != null) {
-        sendPayload(encodeFrame(opClose, channel));
-      }
+      if (rawChannel case final channel?) closeTunnel(channel);
     }
 
     sub = sock.listen(
       (data) {
-        if (unauthenticated case final prefix?) {
-          prefix.add(data);
-          final bytes = prefix.toBytes();
-          final newline = bytes.indexOf(10);
-          if (newline < 0) {
-            if (bytes.length > 256) sock.destroy();
-            return;
-          }
-          final token = sessionControl?.token;
-          if (token == null ||
-              utf8.decode(bytes.sublist(0, newline), allowMalformed: true) !=
-                  token) {
-            sock.destroy();
-            return;
-          }
-          unauthenticated = null;
-          openRaw(Uint8List.sublistView(bytes, newline + 1));
-          return;
-        }
         final reader = sniffing;
         if (reader == null) {
           if (rawChannel == null) {
@@ -1747,15 +1814,11 @@ Future<int?> _runSession({
     );
     // A host that cannot rebuild deltas (the pure-Dart desktop bridge) gets
     // the channel opened at accept.
-    if (sniffing == null && unauthenticated == null) openRaw(Uint8List(0));
+    if (sniffing == null) openRaw(Uint8List(0));
   }
 
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   server.listen(accept);
-  final deviceServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-  deviceServer.listen((sock) => accept(sock, targetDevice));
-  final logsServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-  logsServer.listen((sock) => accept(sock, targetLogs));
 
   final local = vm.replace(host: '127.0.0.1', port: server.port);
   stderr.writeln('[rhr] tunneled VM service: $local');
@@ -1957,26 +2020,21 @@ Future<int?> _runSession({
     }
   }
 
-  sessionControl = await SessionControl.serve(
-    project,
-    control,
-    endpoints: {
-      'vm': '$local',
-      'device': deviceServer.port,
-      'logs': logsServer.port,
-      'app': ?sessionPackage,
-    },
-  );
+  controlHandler = control;
+  sessionControl.publish({
+    'vm': '$local',
+    'device': deviceServer.port,
+    'logs': logsServer.port,
+    'app': ?sessionPackage,
+  });
 
   Future<void> cleanup() async {
     reloadFeedbackTimer?.cancel();
     preparation?.close();
     keepalive.cancel();
     if (!sessionOver.isCompleted) sessionOver.complete();
-    await sessionControl?.close();
     await server.close();
-    await deviceServer.close();
-    await logsServer.close();
+    await closeEndpoints();
     for (final s in accepted.toList()) {
       s.destroy();
     }
