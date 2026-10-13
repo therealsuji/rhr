@@ -72,8 +72,11 @@ internal object RelayDial {
 		val service = Uri.parse(RhrConfig.accountService(context))
 		val candidate = Uri.parse(relay)
 		return candidate.scheme == "wss" && service.scheme == "https" &&
-			candidate.host == service.host && candidate.port == service.port
+			candidate.host == service.host && tlsPort(candidate) == tlsPort(service)
 	}
+
+	/** -1 means the URL names no port, which for wss and https is 443. */
+	private fun tlsPort(uri: Uri): Int = if (uri.port == -1) 443 else uri.port
 
 	private fun isIpLiteral(host: String): Boolean =
 		host.contains(':') || host.matches(Regex("""\d{1,3}(\.\d{1,3}){3}"""))

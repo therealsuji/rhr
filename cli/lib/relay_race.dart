@@ -130,6 +130,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   final _selected = Completer<String>();
   final _candidates = <_RelayCandidate>[];
   _RelayCandidate? _winner;
+  bool _ticketRefused = false;
   var _closed = false;
 
   Stream<Object> get stream => _events.stream;
@@ -172,11 +173,11 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
           refusals,
           // Only the account service can check a ticket, so no other relay
           // in the race is handed one to replay.
-          ticket: _isAccountService(relay) ? ticket : null,
+          ticket: relayIsService(relay, accountService()) ? ticket : null,
         ),
       ),
     );
-    if (refusals.isNotEmpty) {
+    if (refusals.isNotEmpty || race._ticketRefused) {
       // The relays that admitted us each hold a claim this run will not use.
       for (final candidate in race._candidates) {
         if (!candidate.closed) candidate.channel.sink.add(_release);
@@ -184,6 +185,12 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       final drain = race.stream.listen((_) {});
       await race.close();
       await drain.cancel();
+      if (race._ticketRefused) {
+        throw const DeviceAccessException(
+          'the account service refused this device ticket. '
+          'Run `rhr devices` to check.',
+        );
+      }
       throw DeviceBusyException(refusals.first);
     }
     if (race._candidates.isEmpty) {
@@ -193,14 +200,6 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       candidate.channel.sink.add(race._hello);
     }
     return race;
-  }
-
-  static bool _isAccountService(String relay) {
-    final service = Uri.parse(accountService());
-    final candidate = Uri.tryParse(relay);
-    return candidate != null &&
-        candidate.host == service.host &&
-        candidate.port == service.port;
   }
 
   Future<void> _connectCandidate(
@@ -239,6 +238,9 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       // race across several candidates expects some of them to fail.
       final text = '$e';
       if (text.contains('409')) refusals.add(_busyReason(text));
+      // A ticket the account service refused will be refused again; waiting
+      // on the other candidates would hang on a phone that never arrives.
+      if (ticket != null && text.contains('401')) _ticketRefused = true;
       return;
     }
     socket.pingInterval = const Duration(seconds: 20);
@@ -292,7 +294,11 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         if (file != null) {
           writePrivateFile(
             file,
-            jsonEncode({'code': _code, 'relay': candidate.relay, 'id': granted}),
+            jsonEncode({
+              'code': _code,
+              'relay': candidate.relay,
+              'id': granted,
+            }),
           );
         }
       }

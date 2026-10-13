@@ -126,7 +126,9 @@ Future<DeviceCodePrompt> requestDeviceCode({HttpClient? client}) async {
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
     if (response.statusCode != 200) {
-      throw AuthFailure('could not start sign-in (${response.statusCode}): $body');
+      throw AuthFailure(
+        'could not start sign-in (${response.statusCode}): $body',
+      );
     }
     final json = jsonDecode(body) as Map<String, Object?>;
     return DeviceCodePrompt(
@@ -136,7 +138,9 @@ Future<DeviceCodePrompt> requestDeviceCode({HttpClient? client}) async {
       verificationUriComplete:
           (json['verification_uri_complete'] as String?) ??
           json['verification_uri']! as String,
-      expiresIn: Duration(seconds: (json['expires_in'] as num?)?.toInt() ?? 300),
+      expiresIn: Duration(
+        seconds: (json['expires_in'] as num?)?.toInt() ?? 300,
+      ),
       interval: Duration(seconds: (json['interval'] as num?)?.toInt() ?? 5),
     );
   } finally {
@@ -160,8 +164,10 @@ Future<AccountSession> pollForToken(
     while (DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(interval);
       final request = await http.postUrl(Uri.parse(_tokenUrl));
-      request.headers.contentType =
-          ContentType('application', 'x-www-form-urlencoded');
+      request.headers.contentType = ContentType(
+        'application',
+        'x-www-form-urlencoded',
+      );
       request.write(
         'grant_type=${Uri.encodeComponent('urn:ietf:params:oauth:grant-type:device_code')}'
         '&device_code=${Uri.encodeComponent(prompt.deviceCode)}'
@@ -216,8 +222,10 @@ Future<AccountSession?> refreshAccountSession(
   final http = client ?? HttpClient();
   try {
     final request = await http.postUrl(Uri.parse(_tokenUrl));
-    request.headers.contentType =
-        ContentType('application', 'x-www-form-urlencoded');
+    request.headers.contentType = ContentType(
+      'application',
+      'x-www-form-urlencoded',
+    );
     request.write(
       'grant_type=refresh_token'
       '&refresh_token=${Uri.encodeComponent(session.refreshToken)}'
@@ -287,6 +295,25 @@ String accountService() => const String.fromEnvironment(
   defaultValue: defaultPublicRelay,
 ).replaceFirst('wss://', 'https://').replaceFirst('ws://', 'http://');
 
+/// Whether the WebSocket [relay] is the deployment behind the HTTPS [service].
+///
+/// Decides who is handed a ticket, so it compares origins exactly. Ports are
+/// defaulted by scheme: Dart's [Uri.port] answers 443 for https but 0 for
+/// wss, so a plain `wss://getrhr.dev` would never match `https://getrhr.dev`.
+bool relayIsService(String relay, String service) {
+  final serviceUri = Uri.parse(service);
+  final relayUri = Uri.tryParse(relay);
+  return relayUri != null &&
+      relayUri.scheme == (serviceUri.scheme == 'https' ? 'wss' : 'ws') &&
+      relayUri.host == serviceUri.host &&
+      _port(relayUri) == _port(serviceUri);
+}
+
+int _port(Uri uri) {
+  if (uri.hasPort) return uri.port;
+  return uri.scheme == 'https' || uri.scheme == 'wss' ? 443 : 80;
+}
+
 /// Permission from the account service to dial one device once.
 typedef DeviceGrant = ({String rendezvous, String ticket});
 
@@ -349,8 +376,7 @@ Future<String?> rendezvousTicket(String rendezvous) async {
 ///
 /// Per project rather than global: someone with two projects and two phones
 /// should not have one of them silently retarget the other.
-File _preferredDeviceFile(String project) =>
-    File('$project/.rhr-device');
+File _preferredDeviceFile(String project) => File('$project/.rhr-device');
 
 Future<String?> preferredDevice(String project) async {
   final file = _preferredDeviceFile(project);
@@ -374,7 +400,9 @@ Future<void> forgetPreferredDevice(String project) async {
 /// is never committed by accident.
 File accountSessionFile() {
   final home =
-      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '.';
+      Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'] ??
+      '.';
   return File('$home/.rhr/session.json');
 }
 
