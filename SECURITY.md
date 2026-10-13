@@ -38,6 +38,9 @@ screen. Treat it as untrusted input to the agent.
   the phone accepts nothing else.
 - **A link never connects on its own.** The player names the relay and asks
   first.
+- **`rhr update` installs only signed releases.** A release tag must carry an
+  SSH signature from the release key built into the CLI, and the CLI installs
+  the exact commit that signed tag names, so a moved or forged tag is refused.
 - **Running rhr in a project trusts that project.** rhr runs the project's
   Flutter SDK (`.fvm`), Gradle build and plugins, as `flutter run` does.
 
