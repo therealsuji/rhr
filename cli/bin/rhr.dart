@@ -1028,6 +1028,10 @@ Future<int?> _runSession({
   var updateAttempted = false;
   var effectiveSyncAssets = syncAssets;
   var staleDart = false;
+  // Reattached to the same running debug app after a reconnect: it already
+  // runs this session's hot-reloaded code, so a restart would only throw
+  // its state away.
+  var sameApp = false;
   final preparation = prepareRun
       ? RunPreparation(
           transport: transport,
@@ -1051,7 +1055,10 @@ Future<int?> _runSession({
             return;
           }
           effectiveSyncAssets = ready.route == RunRoute.player;
-          staleDart = ready.staleDart;
+          sameApp =
+              ready.route == RunRoute.app &&
+              ready.vm == preparation.progress.liveApp;
+          staleDart = ready.staleDart && !sameApp;
           sessionRoute = ready.route;
           sessionPackage = ready.package;
           nativeBaseline = await nativeFingerprint(project);
@@ -2172,20 +2179,31 @@ Future<int?> _runSession({
               'The connected runtime is not running this project.',
             );
           }
+          final pid = int.parse(
+            File(effectivePidFile).readAsStringSync().trim(),
+          );
           if (staleDart) {
             // The installed app predates the latest Dart edits; its APK
             // was reused because only native changes need a new one.
             stderr.writeln(
               '[rhr] the installed app has older Dart code; hot restarting',
             );
-            final pid = int.parse(
-              File(effectivePidFile).readAsStringSync().trim(),
-            );
             await trackHotRestart(
               vmService: local,
               trigger: () => Process.killPid(pid, ProcessSignal.sigusr2),
               onProgress: reportProgress,
             );
+          } else if (sameApp) {
+            // The app kept running through the reconnect. A reload brings in
+            // edits made while disconnected and keeps its state.
+            stderr.writeln(
+              '[rhr] reattached to the running app; hot reloading any edits '
+              'made while disconnected',
+            );
+            Process.killPid(pid, ProcessSignal.sigusr1);
+          }
+          if (sessionRoute == RunRoute.app) {
+            preparation?.progress.liveApp = vm;
           }
         }
         if (sessionActive) {

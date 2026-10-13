@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'apk_identity.dart';
 import 'beacon_build.dart';
 import 'flutter_compatibility.dart';
+import 'native_fingerprint.dart';
 import 'player_update.dart';
 import 'project_apk.dart';
 import 'relay_race.dart';
@@ -61,6 +62,17 @@ final class RunProgress {
   bool playerUpdateSubmitted = false;
 
   Completer<void>? _persist;
+
+  /// The debug app's VM this run last brought up to date. Its address holds
+  /// a token that is new for every app process, so seeing it again after a
+  /// reconnect means the same running app, already on the current code.
+  Uri? liveApp;
+
+  /// What the last full preparation verified, and on which phone. While the
+  /// same phone comes back and the native fingerprint is unchanged, a
+  /// reconnect reattaches without hashing the project and the APK again (over
+  /// ten seconds on a real project). Another phone is verified from scratch.
+  ({String device, String native, String package, String player})? verifiedApp;
 
   /// `rhr persist` sent to a running session: its next preparation installs
   /// a debug build of the current code, then attaches as usual. Completes
@@ -347,6 +359,28 @@ final class RunPreparation {
           'debug build should trust.',
         );
       }
+      final native = await nativeFingerprint(project);
+      final player = '${beacon.package}:${beacon.certificate}';
+      final verified = progress.verifiedApp;
+      if (!persist &&
+          verified != null &&
+          verified.device == _deviceId &&
+          verified.native == native &&
+          verified.player == player) {
+        // A reconnect: this run already verified the installed app, and no
+        // native code changed since. Whether it still runs the current Dart
+        // is settled after attaching (see [RunProgress.liveApp]).
+        await _setup('beacon_setup');
+        phase('launching', 'Reconnecting to ${verified.package}.');
+        final launched = await request('launch', package: verified.package);
+        return PreparedRun(
+          Uri.parse(launched['vm'] as String),
+          '',
+          route,
+          verified.package,
+          staleDart: true,
+        );
+      }
       final projectInputs = await projectBuildIdentity(
         project,
         profile.flutter,
@@ -412,6 +446,12 @@ final class RunPreparation {
       } else {
         await _deliver(apk, player: false);
       }
+      progress.verifiedApp = (
+        device: _deviceId,
+        native: native,
+        package: package,
+        player: player,
+      );
       if (persist) {
         progress._settlePersist();
         phase(
