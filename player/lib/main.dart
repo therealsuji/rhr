@@ -492,6 +492,12 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
 
     final outcome = await redeemInvite(invite);
     if (!mounted) return;
+    // Wait for the computer now rather than at the next launch, unless a
+    // session is already running.
+    if (outcome is JoinAccepted && !_active) {
+      await _waitOnAccountRendezvous();
+      if (!mounted) return;
+    }
     setState(() {
       _status = switch (outcome) {
         JoinAccepted(:final account, alreadyJoined: true) =>
