@@ -1123,7 +1123,7 @@ class DevOverlay(
 			ViewGroup.LayoutParams.MATCH_PARENT,
 			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
 		sheet.addView(TextView(activity).apply {
-			text = "Only allow it if you expected an app from them."
+			text = "Only allow it if you started this from your computer."
 			setTextColor(inkDim)
 			textSize = 13f
 			setPadding(0, dp(10), 0, 0)
