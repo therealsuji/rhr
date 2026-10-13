@@ -197,11 +197,12 @@ export class RelaySession implements DurableObject {
 			);
 			if (decision.refused) {
 				console.log(`[rhr] host REFUSED ${decision.reason}`);
-				// 409 rather than a close code: the CLI learns why before it has a
-				// socket to be closed on, so it can say "busy" instead of retrying
-				// into a fight for a phone another session is holding.
+				// A status rather than a close code: the CLI learns why before it
+				// has a socket to be closed on, so it can stop instead of retrying
+				// into a fight for the phone. The status carries the reason,
+				// because dart:io drops the body: 409 busy, 423 paused.
 				return new Response(decision.reason, {
-					status: 409,
+					status: decision.status,
 					headers: { "content-type": "text/plain" },
 				});
 			}
@@ -292,11 +293,13 @@ export class RelaySession implements DurableObject {
 		offeredClaimId: string | null,
 		holderLive: boolean,
 	): Promise<
-		{ refused: false; claim: Claim } | { refused: true; reason: string }
+		| { refused: false; claim: Claim }
+		| { refused: true; status: 409 | 423; reason: string }
 	> {
 		if (await this.ctx.storage.get<boolean>(pausedKey(code))) {
 			return {
 				refused: true,
+				status: 423,
 				reason: "paused: this device was paused on the phone",
 			};
 		}
@@ -313,6 +316,7 @@ export class RelaySession implements DurableObject {
 			const seconds = Math.max(0, Math.round((held.expiresAt - now) / 1000));
 			return {
 				refused: true,
+				status: 409,
 				reason: holderLive
 					? "busy: another host is connected to this device"
 					: `busy: another host holds this device for ${seconds}s more`,

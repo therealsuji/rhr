@@ -237,10 +237,18 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       // is an ordinary unreachable-relay failure and stays silent, because a
       // race across several candidates expects some of them to fail.
       final text = '$e';
-      if (text.contains('409')) refusals.add(_busyReason(text));
+      if (text.contains('status code: 409')) refusals.add(_busyReason(text));
+      if (text.contains('status code: 423')) {
+        refusals.add(
+          'this device was paused on the phone. Resume it there, then run '
+          'rhr again.',
+        );
+      }
       // A ticket the account service refused will be refused again; waiting
       // on the other candidates would hang on a phone that never arrives.
-      if (ticket != null && text.contains('401')) _ticketRefused = true;
+      if (ticket != null && text.contains('status code: 401')) {
+        _ticketRefused = true;
+      }
       return;
     }
     socket.pingInterval = const Duration(seconds: 20);
