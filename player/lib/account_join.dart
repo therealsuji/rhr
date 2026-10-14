@@ -159,6 +159,26 @@ Future<void> _remember(JoinedAccount account) async {
   ]);
 }
 
+/// Takes this phone off [account]: forgotten here at once, then removed from
+/// the account's device list. Null once both are done, or why the account
+/// service could not be told; the phone has left either way.
+Future<String?> leaveAccount(JoinedAccount account) async {
+  await forgetAccount(account.id);
+  final raw = await _connector.invokeMethod<String>('leaveAccount', {
+    'accountId': account.id,
+  });
+  try {
+    final json = raw == null ? null : jsonDecode(raw);
+    if (json is Map<String, Object?> && json.containsKey('left')) return null;
+    if (json is Map<String, Object?> && json['error'] is String) {
+      return json['error']! as String;
+    }
+  } on FormatException {
+    // Falls through to the generic reason.
+  }
+  return 'The account service sent something unexpected.';
+}
+
 /// Forgets an account locally.
 ///
 /// Blocks it here immediately, whatever the network is doing: removing the

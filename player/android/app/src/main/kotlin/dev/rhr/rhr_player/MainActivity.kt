@@ -300,6 +300,9 @@ class MainActivity : FlutterActivity() {
 				"joinAccount" -> accountCall(result) {
 					AccountClient.join(this, call.argument<String>("invite").orEmpty())
 				}
+				"leaveAccount" -> accountCall(result) {
+					AccountClient.leave(this, call.argument<String>("accountId").orEmpty())
+				}
 				// The shake-to-open bubble needs "Display over other apps" to
 				// draw above the user's own app. There is no runtime prompt
 				// for it — only a settings screen the user has to visit.

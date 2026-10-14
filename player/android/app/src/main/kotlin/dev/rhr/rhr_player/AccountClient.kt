@@ -9,7 +9,8 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * The phone's side of the account service: reading and redeeming invites.
+ * The phone's side of the account service: reading and redeeming invites,
+ * and leaving an account.
  *
  * Native rather than Dart because joining sends the installation secret, and
  * the Dart in this process is whatever a developer last hot-restarted into
@@ -39,11 +40,20 @@ object AccountClient {
 			// list. A starting point the account owner can rename.
 			.put("label", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()))
 
+	/** Ends this installation's membership of [accountId] on the service. */
+	fun leave(context: Context, accountId: String): Outcome =
+		request(context, "DELETE",
+			"/device/accounts?installationId=${URLEncoder.encode(InstallationIdentity.id(context), "UTF-8")}" +
+				"&accountId=${URLEncoder.encode(accountId, "UTF-8")}",
+			null,
+			secret = InstallationIdentity.secret(context))
+
 	private fun request(
 		context: Context,
 		method: String,
 		path: String,
 		body: JSONObject?,
+		secret: String? = null,
 	): Outcome {
 		val connection = try {
 			URL(RhrConfig.accountService(context) + path).openConnection() as HttpURLConnection
@@ -54,6 +64,7 @@ object AccountClient {
 			connection.requestMethod = method
 			connection.connectTimeout = 10_000
 			connection.readTimeout = 15_000
+			if (secret != null) connection.setRequestProperty("x-rhr-installation-secret", secret)
 			if (body != null) {
 				connection.doOutput = true
 				connection.setRequestProperty("Content-Type", "application/json")
@@ -67,7 +78,8 @@ object AccountClient {
 				status in 200..299 && json != null -> Outcome.Ok(json)
 				else -> Outcome.Refused(
 					json?.optString("error")?.takeIf { it.isNotBlank() }
-						?: "The account service refused this invite.")
+						?: text.trim().takeIf { it.isNotEmpty() && it.length < 200 }
+						?: "The account service refused the request.")
 			}
 		} catch (_: IOException) {
 			Outcome.Refused("Could not reach the account service.")
