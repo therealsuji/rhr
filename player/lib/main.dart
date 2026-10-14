@@ -103,6 +103,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// is for the account's computers.
   String? _agent;
   bool _installingAgent = false;
+
+  /// The accounts this phone has joined, shown so the user can see whose
+  /// computers may connect and leave any of them.
+  List<JoinedAccount> _accounts = const [];
   String? _agentProblem;
   bool _checkingUpdate = false;
 
@@ -173,18 +177,20 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       _waitOnAccountRendezvous();
     });
     _readInstalledVersion();
-    _readAgent();
+    _readAccounts();
   }
 
-  Future<void> _readAgent() async {
-    final joined = (await joinedAccounts()).isNotEmpty;
-    final agent = joined
+  /// Reads the joined accounts, and RHR Agent's state when there are any.
+  Future<void> _readAccounts() async {
+    final accounts = await joinedAccounts();
+    final agent = accounts.isNotEmpty
         ? await const MethodChannel(
             'rhr/connector',
           ).invokeMethod<String>('agentStatus')
         : null;
     if (!mounted) return;
     setState(() {
+      _accounts = accounts;
       // A problem belongs to the step that raised it.
       if (agent != _agent) _agentProblem = null;
       _agent = agent;
@@ -321,7 +327,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       // Back from Android's installer or the accessibility switch.
-      _readAgent();
+      _readAccounts();
       // Pass the current VM URI along: iOS has no logcat watcher, so the
       // native service re-announces from this. Android ignores the arg and
       // discovers the URI from logcat itself.
@@ -538,7 +544,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       await _waitOnAccountRendezvous();
       if (!mounted) return;
     }
-    await _readAgent();
+    await _readAccounts();
     if (!mounted) return;
     setState(() {
       _status = switch (outcome) {
@@ -564,8 +570,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     await _connect();
   }
 
-  /// Stop the session and forget it: kills the native service, clears the saved
-  /// code + auto-resume so the next launch starts clean at the lobby.
+  /// Stop the session and forget it: kills the native service and clears the
+  /// saved code + auto-resume. A phone on an account then waits for that
+  /// account's computers again, so connecting back never takes a QR; one on
+  /// no account starts clean at the lobby.
   Future<void> _disconnect() async {
     await _session.invokeMethod('stop');
     final prefs = await SharedPreferences.getInstance();
@@ -580,6 +588,47 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       _fallbackRelays = const [];
       _relayPin = null;
       _status = 'Disconnected. Scan a QR or enter a code to connect.';
+    });
+    await _waitOnAccountRendezvous();
+  }
+
+  /// Takes this phone off [account], after asking. A session waiting on the
+  /// phone's rendezvous ends once no account is left to connect through it.
+  Future<void> _leave(JoinedAccount account) async {
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Leave ${account.email}?'),
+        content: const Text(
+          'Computers on this account will no longer be able to connect to '
+          'this phone. To come back, scan a new invite.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true) return;
+    final problem = await leaveAccount(account);
+    final rendezvous = await ownRendezvous();
+    if (!mounted) return;
+    if ((await joinedAccounts()).isEmpty && _code.text == rendezvous) {
+      await _disconnect();
+    }
+    await _readAccounts();
+    if (!mounted) return;
+    setState(() {
+      _status = problem == null
+          ? 'Left ${account.email}.'
+          : 'Left ${account.email} on this phone, but the account service '
+                'could not be told: $problem';
     });
   }
 
@@ -737,6 +786,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                         const SizedBox(height: 18),
                         if (_active) _sessionCard() else _statusHint(),
                         const SizedBox(height: 18),
+                        if (_accounts.isNotEmpty) ...[
+                          _accountsCard(),
+                          const SizedBox(height: 18),
+                        ],
                         if (_agent case final agent? when agent != 'on') ...[
                           _agentCard(agent),
                           const SizedBox(height: 18),
@@ -1163,6 +1216,40 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         return base;
     }
   }
+
+  /// Whose computers can connect to this phone, each with a way out.
+  Widget _accountsCard() => Container(
+    padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+    decoration: BoxDecoration(
+      color: _surface,
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: _surfaceHi),
+    ),
+    child: Column(
+      children: [
+        for (final account in _accounts)
+          Row(
+            children: [
+              const Icon(Icons.verified_user_outlined, size: 16, color: _ok),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  account.email.isEmpty
+                      ? 'This phone is on your account'
+                      : 'This phone is on ${account.email}',
+                  style: const TextStyle(color: _ink, fontSize: 13.5),
+                ),
+              ),
+              TextButton(
+                onPressed: () => _leave(account),
+                style: TextButton.styleFrom(foregroundColor: _inkDim),
+                child: const Text('Leave'),
+              ),
+            ],
+          ),
+      ],
+    ),
+  );
 
   /// Sets up agent control from the phone: install RHR Agent, then turn it
   /// on. After that the coding agent on the computer can do the rest,
