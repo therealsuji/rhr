@@ -55,4 +55,36 @@ void main() {
       expect(await cachedProjectApk(root.path, identity.native), isNull);
     },
   );
+
+  test(
+    'the debug key is found where Gradle looks, and changes the digest',
+    () async {
+      final home = await Directory.systemTemp.createTemp('rhr-key-');
+      addTearDown(() => home.delete(recursive: true));
+      expect(
+        defaultDebugKeystore({'HOME': '/h'}).path,
+        '/h/.android/debug.keystore',
+      );
+      expect(
+        defaultDebugKeystore({'HOME': '/h', 'ANDROID_SDK_HOME': '/s'}).path,
+        '/s/.android/debug.keystore',
+      );
+      expect(
+        defaultDebugKeystore({
+          'HOME': '/h',
+          'ANDROID_SDK_HOME': '/s',
+          'ANDROID_USER_HOME': '/u',
+        }).path,
+        '/u/debug.keystore',
+      );
+
+      final env = {'ANDROID_USER_HOME': home.path};
+      expect(await debugKeystoreDigest(env), 'none');
+      final keystore = File('${home.path}/debug.keystore');
+      await keystore.writeAsString('one key');
+      final first = await debugKeystoreDigest(env);
+      await keystore.writeAsString('another key');
+      expect(await debugKeystoreDigest(env), isNot(first));
+    },
+  );
 }

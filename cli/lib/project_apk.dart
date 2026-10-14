@@ -88,6 +88,31 @@ Future<ProjectBuildIdentity> projectBuildIdentity(
   return (native: digest(inputs), dart: digest(dartInputs));
 }
 
+/// The key Gradle signs a debug build with when the project names none,
+/// where the Android Gradle plugin looks for it. It is a build input like the
+/// project's own files: an APK signed with another key cannot update the app
+/// already on the phone.
+File defaultDebugKeystore([Map<String, String>? environment]) {
+  final env = environment ?? Platform.environment;
+  final userHome = env['ANDROID_USER_HOME'];
+  if (userHome != null && userHome.isNotEmpty) {
+    return File('$userHome/debug.keystore');
+  }
+  final sdkHome = env['ANDROID_SDK_HOME'];
+  if (sdkHome != null && sdkHome.isNotEmpty) {
+    return File('$sdkHome/.android/debug.keystore');
+  }
+  final home = env['HOME'] ?? env['USERPROFILE'] ?? '';
+  return File('$home/.android/debug.keystore');
+}
+
+/// [defaultDebugKeystore]'s digest, or `none` before Gradle has made one.
+Future<String> debugKeystoreDigest([Map<String, String>? environment]) async {
+  final keystore = defaultDebugKeystore(environment);
+  if (!keystore.existsSync()) return 'none';
+  return (await sha256.bind(keystore.openRead()).first).toString();
+}
+
 /// The cached APK built from [identity], and the Dart source it carries.
 Future<({File apk, String dart})?> cachedProjectApk(
   String project,

@@ -388,6 +388,7 @@ final class RunPreparation {
       final inputs = [
         projectInputs.native,
         'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
+        'debugKey:${await debugKeystoreDigest()}',
       ].join('|');
       final cached = await cachedProjectApk(project, inputs);
       // A plain run reuses an APK with older Dart and hot restarts it;
