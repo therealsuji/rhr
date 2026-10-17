@@ -1030,6 +1030,9 @@ Future<int?> _runSession({
   // runs this session's hot-reloaded code, so a restart would only throw
   // its state away.
   var sameApp = false;
+  // The phone's relay connection, as it announced it. A new one mid-session
+  // means the phone reconnected, and its direct path went with the old one.
+  String? deviceLink;
   final preparation = prepareRun
       ? RunPreparation(
           transport: transport,
@@ -1119,6 +1122,21 @@ Future<int?> _runSession({
         final m = decodePeerMessage(msg);
         if (m == null) return;
         if (m['t'] == 'info') {
+          final link = m['link'];
+          if (link is String && link.isNotEmpty) {
+            if (m['answers'] == relayTransport.connectionId) {
+              deviceLink ??= link;
+            }
+            final known = deviceLink;
+            if (known != null && link != known) {
+              stderr.writeln(
+                '[rhr] the phone reconnected (a network change?); '
+                'reconnecting now',
+              );
+              if (!wsDied.isCompleted) wsDied.complete();
+              return;
+            }
+          }
           devFsDelta = m['devfsDelta'] == 1;
           if (m['playerCertificate'] case final String certificate) {
             playerCertificate = certificate;
