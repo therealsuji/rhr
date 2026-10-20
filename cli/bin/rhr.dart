@@ -235,12 +235,9 @@ Future<void> main(List<String> args) async {
   }
 
   if (args.first == 'whoami') {
-    final session = await currentAccountSession();
-    if (session == null) {
-      stderr.writeln('[rhr] not signed in — run `rhr login`');
-      exit(1);
-    }
-    stdout.writeln(session.email.isEmpty ? session.userId : session.email);
+    final session = await _requireSignIn();
+    if (session == null) exit(1);
+    stdout.writeln(_accountName(session));
     exit(0);
   }
 
@@ -2843,11 +2840,33 @@ Future<String?> _resolveDevice({
       device ?? (code == null ? await preferredDevice(project) : null);
   if (wanted == null) return null;
 
-  final session = await currentAccountSession();
-  if (session == null) {
-    if (device == null) return null; // a stale preference, not a request
-    stderr.writeln('[rhr] not signed in — run `rhr login`');
-    exit(1);
+  final AccountSession session;
+  switch (await accountState()) {
+    case SignedIn(session: final signedIn):
+      session = signedIn;
+    case SignedOut() when device == null:
+      // Signed out on purpose: the remembered phone is a stale preference,
+      // not a request.
+      stderr.writeln(
+        '[rhr] signed out, so not using the remembered device "$wanted" '
+        '(`rhr login` to use it again)',
+      );
+      return null;
+    case AccountUnreachable(:final reason):
+      stderr.writeln('[rhr] could not reach the account service: $reason');
+      exit(1);
+    case final state:
+      // An ended sign-in, or a device named outright: the user wants their
+      // phone, so sign in here rather than fall back to a pairing link.
+      if (state case SignInEnded(:final reason)) {
+        stderr.writeln('[rhr] your sign-in ended ($reason)');
+      }
+      try {
+        session = await _signIn(stderr);
+      } on AuthFailure catch (e) {
+        stderr.writeln('[rhr] $e');
+        exit(1);
+      }
   }
   final grant = await requestDeviceGrant(
     service: accountService(),
@@ -2874,11 +2893,8 @@ Future<String?> _resolveDevice({
 
 /// `rhr devices`: list the phones on this account, or remove one.
 Future<int> _devices(List<String> args) async {
-  final session = await currentAccountSession();
-  if (session == null) {
-    stderr.writeln('[rhr] not signed in — run `rhr login`');
-    return 1;
-  }
+  final session = await _requireSignIn();
+  if (session == null) return 1;
   final removeIndex = args.indexOf('--remove');
   final removing = removeIndex != -1 && removeIndex + 1 < args.length
       ? args[removeIndex + 1]
@@ -2945,11 +2961,8 @@ Future<int> _devices(List<String> args) async {
 /// then on, which is what lets the user add a phone to their account without
 /// signing in on it.
 Future<int> _invite() async {
-  final session = await currentAccountSession();
-  if (session == null) {
-    stderr.writeln('[rhr] not signed in — run `rhr login`');
-    return 1;
-  }
+  final session = await _requireSignIn();
+  if (session == null) return 1;
   final relay = accountService();
   final http = HttpClient();
   try {
@@ -3002,37 +3015,59 @@ String _loginLink(String workosUrl) {
   return '$base?to=${Uri.encodeComponent(workosUrl)}';
 }
 
+/// `rhr login`. "Already signed in" is only said after the account service
+/// accepted the stored session: a file on disk is not a sign-in.
 Future<int> _login() async {
-  final existing = await loadAccountSession();
-  if (existing != null) {
-    stdout.writeln(
-      '[rhr] already signed in as '
-      '${existing.email.isEmpty ? existing.userId : existing.email}',
-    );
-    return 0;
+  switch (await accountState()) {
+    case SignedIn(:final session):
+      stdout.writeln('[rhr] already signed in as ${_accountName(session)}');
+      return 0;
+    case AccountUnreachable(:final reason):
+      stderr.writeln('[rhr] could not reach the account service: $reason');
+      return 1;
+    case SignInEnded(:final reason):
+      stdout.writeln('[rhr] your sign-in ended ($reason)');
+    case SignedOut():
+      break;
   }
   try {
-    final prompt = await requestDeviceCode();
-    stdout.writeln('');
-    stdout.writeln('  Open        ${_loginLink(prompt.verificationUri)}');
-    stdout.writeln('  Enter code  ${prompt.userCode}');
-    stdout.writeln('');
-    stdout.writeln(
-      '  (or go straight to ${_loginLink(prompt.verificationUriComplete)})',
-    );
-    stdout.writeln('');
-    stdout.writeln('[rhr] waiting for you to approve…');
-    final session = await pollForToken(prompt);
-    await saveAccountSession(session);
-    stdout.writeln(
-      '[rhr] signed in as '
-      '${session.email.isEmpty ? session.userId : session.email}',
-    );
+    await _signIn(stdout);
     return 0;
   } on AuthFailure catch (e) {
     stderr.writeln('[rhr] $e');
     return 1;
   }
+}
+
+/// Runs the device sign-in, printing the link and code to [out], and stores
+/// the session. Plain lines rather than a prompt, so an agent reading a
+/// background run's log can pass the link on.
+Future<AccountSession> _signIn(IOSink out) async {
+  final prompt = await requestDeviceCode();
+  out.writeln('');
+  out.writeln('  Open        ${_loginLink(prompt.verificationUri)}');
+  out.writeln('  Enter code  ${prompt.userCode}');
+  out.writeln('');
+  out.writeln(
+    '  (or go straight to ${_loginLink(prompt.verificationUriComplete)})',
+  );
+  out.writeln('');
+  out.writeln('[rhr] waiting for you to approve…');
+  final session = await pollForToken(prompt);
+  await saveAccountSession(session);
+  out.writeln('[rhr] signed in as ${_accountName(session)}');
+  return session;
+}
+
+String _accountName(AccountSession session) =>
+    session.email.isEmpty ? session.userId : session.email;
+
+/// The signed-in session, or null after telling the user why there is none.
+Future<AccountSession?> _requireSignIn() async {
+  final state = await accountState();
+  if (state is SignedIn) return state.session;
+  stderr.writeln('[rhr] ${signInHint(state)}');
+  return null;
 }
 
 /// `rhr setup`: enable Flutter custom devices and register the `rhr` device so
