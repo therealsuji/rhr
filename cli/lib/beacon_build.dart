@@ -22,6 +22,7 @@ Future<File> buildBeaconDebugApk({
   required String project,
   required BeaconPlayer player,
   String? targetPlatform,
+  Map<String, String>? environment,
 }) async {
   final root = Directory(project).absolute.path;
   final gradlew = File('$root/android/gradlew');
@@ -38,12 +39,17 @@ Future<File> buildBeaconDebugApk({
 
   final script = File('${work.path}/rhr_beacon.gradle')
     ..writeAsStringSync(beaconInitScript(module.path, player));
-  final result = await Process.run(gradlew.path, [
-    'assembleDebug',
-    '--init-script',
-    script.path,
-    if (targetPlatform != null) '-Ptarget-platform=$targetPlatform',
-  ], workingDirectory: '$root/android');
+  final result = await Process.run(
+    gradlew.path,
+    [
+      'assembleDebug',
+      '--init-script',
+      script.path,
+      if (targetPlatform != null) '-Ptarget-platform=$targetPlatform',
+    ],
+    workingDirectory: '$root/android',
+    environment: environment,
+  );
   if (result.exitCode != 0) {
     final output = '${result.stdout}\n${result.stderr}'.trim().split('\n');
     throw StateError(

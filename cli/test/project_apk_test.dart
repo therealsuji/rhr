@@ -87,4 +87,47 @@ void main() {
       expect(await debugKeystoreDigest(env), isNot(first));
     },
   );
+
+  test('reads the certificate digest the way apksigner prints it', () {
+    expect(
+      keytoolSha256(
+        '\t SHA1: 11:01:78:2B\n'
+        '\t SHA256: 19:8F:CD:3A:6C:BD\n'
+        'Signature algorithm name: SHA256withRSA\n',
+      ),
+      '198fcd3a6cbd',
+    );
+    expect(keytoolSha256('keytool error: wrong password'), isNull);
+  });
+
+  test('lists each debug keystore on the machine once', () async {
+    final home = await Directory.systemTemp.createTemp('rhr-keys-');
+    addTearDown(() => home.delete(recursive: true));
+    for (final dir in ['.android', '.config/.android']) {
+      await File('${home.path}/$dir/debug.keystore').create(recursive: true);
+    }
+    final env = {
+      'HOME': home.path,
+      'ANDROID_USER_HOME': '${home.path}/.config/.android',
+    };
+    expect(debugKeystoreCandidates(env).map((file) => file.path), [
+      '${home.path}/.config/.android/debug.keystore',
+      '${home.path}/.android/debug.keystore',
+    ]);
+  });
+
+  test('a pinned key reaches Gradle only while its keystore exists', () async {
+    final root = await Directory.systemTemp.createTemp('rhr-pin-');
+    addTearDown(() => root.delete(recursive: true));
+    final userHome = Directory('${root.path}/keys')..createSync();
+    expect(await debugSigningEnvironment(root.path), isEmpty);
+
+    await pinDebugSigning(root.path, userHome);
+    expect(await debugSigningEnvironment(root.path), isEmpty);
+
+    File('${userHome.path}/debug.keystore').writeAsStringSync('key');
+    expect(await debugSigningEnvironment(root.path), {
+      'ANDROID_USER_HOME': userHome.path,
+    });
+  });
 }

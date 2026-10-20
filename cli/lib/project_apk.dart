@@ -106,6 +106,87 @@ File defaultDebugKeystore([Map<String, String>? environment]) {
   return File('$home/.android/debug.keystore');
 }
 
+/// Every debug keystore on this machine a past build may have signed with.
+///
+/// One machine often has several: `ANDROID_USER_HOME` set in an interactive
+/// shell's config points Gradle at one, while an SSH or agent shell without
+/// that config falls back to `~/.android` and Gradle makes a new key there.
+List<File> debugKeystoreCandidates([Map<String, String>? environment]) {
+  final env = environment ?? Platform.environment;
+  final home = env['HOME'] ?? env['USERPROFILE'] ?? '';
+  final sdkHome = env['ANDROID_SDK_HOME'];
+  final paths = {
+    defaultDebugKeystore(env).path,
+    if (sdkHome != null && sdkHome.isNotEmpty)
+      '$sdkHome/.android/debug.keystore',
+    '$home/.android/debug.keystore',
+    // The usual ANDROID_USER_HOME for people who keep dotfiles under XDG.
+    '$home/.config/.android/debug.keystore',
+  };
+  return [
+    for (final path in paths)
+      if (File(path).existsSync()) File(path),
+  ];
+}
+
+/// The SHA-256 digest of [keystore]'s debug certificate, in the form
+/// apksigner prints and the phone reports, or null when keytool cannot read
+/// it. Debug keystores all use the same well-known password and alias.
+Future<String?> debugKeystoreCertificate(
+  File keystore, [
+  Map<String, String>? environment,
+]) async {
+  final env = environment ?? Platform.environment;
+  final javaHome = env['JAVA_HOME'];
+  final bundled = javaHome == null ? null : File('$javaHome/bin/keytool');
+  try {
+    final result = await Process.run(
+      bundled != null && bundled.existsSync() ? bundled.path : 'keytool',
+      [
+        '-list',
+        '-v',
+        '-keystore',
+        keystore.path,
+        '-storepass',
+        'android',
+        '-alias',
+        'androiddebugkey',
+      ],
+    );
+    return result.exitCode == 0 ? keytoolSha256('${result.stdout}') : null;
+  } on ProcessException {
+    return null;
+  }
+}
+
+/// The `SHA256:` fingerprint in `keytool -list -v` output, colons removed.
+String? keytoolSha256(String output) => RegExp(
+  r'SHA256:\s*([0-9A-Fa-f:]+)',
+).firstMatch(output)?.group(1)!.replaceAll(':', '').toLowerCase();
+
+File _signingPin(String project) =>
+    File('$project/.dart_tool/rhr/android-user-home');
+
+/// Records that [project]'s debug builds sign with the key in [userHome],
+/// because that is the key the app already on the phone was signed with.
+/// Under `.dart_tool`, so `flutter clean` drops it and the next mismatch
+/// finds the key again.
+Future<void> pinDebugSigning(String project, Directory userHome) async {
+  final pin = _signingPin(project);
+  await pin.parent.create(recursive: true);
+  await pin.writeAsString('${userHome.absolute.path}\n');
+}
+
+/// The environment [project]'s debug build runs Gradle with: the pinned
+/// `ANDROID_USER_HOME` when there is one, so Gradle signs with that key.
+Future<Map<String, String>> debugSigningEnvironment(String project) async {
+  final pin = _signingPin(project);
+  if (!pin.existsSync()) return const {};
+  final userHome = (await pin.readAsString()).trim();
+  if (!File('$userHome/debug.keystore').existsSync()) return const {};
+  return {'ANDROID_USER_HOME': userHome};
+}
+
 /// [defaultDebugKeystore]'s digest, or `none` before Gradle has made one.
 Future<String> debugKeystoreDigest([Map<String, String>? environment]) async {
   final keystore = defaultDebugKeystore(environment);

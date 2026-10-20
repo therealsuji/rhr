@@ -209,13 +209,46 @@ Future<AccountSession> pollForToken(
   }
 }
 
+/// Where this machine's sign-in stands.
+///
+/// "Never signed in" and "the service ended the sign-in" both leave no usable
+/// token, but only the first may quietly fall back to a pairing link: a user
+/// whose session ended still expects their account's phone, and has to be told
+/// to sign in again rather than handed a QR.
+sealed class AccountState {
+  const AccountState();
+}
+
+final class SignedIn extends AccountState {
+  const SignedIn(this.session);
+  final AccountSession session;
+}
+
+/// No sign-in on this machine, or `rhr logout` removed it.
+final class SignedOut extends AccountState {
+  const SignedOut();
+}
+
+/// A stored sign-in the account service refused to refresh, in its words
+/// ("Session ended due to inactivity."). It stays on disk until `rhr login`
+/// replaces it, so every command keeps saying why instead of only the first.
+final class SignInEnded extends AccountState {
+  const SignInEnded(this.reason);
+  final String reason;
+}
+
+/// The account service could not be asked: offline, DNS, a 5xx.
+final class AccountUnreachable extends AccountState {
+  const AccountUnreachable(this.reason);
+  final String reason;
+}
+
 /// Exchanges the refresh token for a new access token.
 ///
-/// WorkOS access tokens last about an hour, so any command run the next
-/// morning would otherwise be told to sign in again. The refresh token
-/// outlives them and is what makes sign-in a one-time step rather than a
-/// daily one.
-Future<AccountSession?> refreshAccountSession(
+/// WorkOS access tokens last minutes, so any command run the next morning
+/// would otherwise be told to sign in again. The refresh token outlives them
+/// and is what makes sign-in a one-time step rather than a daily one.
+Future<AccountState> refreshAccountSession(
   AccountSession session, {
   HttpClient? client,
 }) async {
@@ -233,39 +266,74 @@ Future<AccountSession?> refreshAccountSession(
     );
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
-    if (response.statusCode != 200) return null;
-    final json = jsonDecode(body) as Map<String, Object?>;
-    final user = json['user'] as Map<String, Object?>?;
-    return AccountSession(
-      accessToken: json['access_token']! as String,
-      refreshToken: (json['refresh_token'] as String?) ?? session.refreshToken,
-      userId: (user?['id'] as String?) ?? session.userId,
-      email: (user?['email'] as String?) ?? session.email,
-      provider: session.provider,
-    );
-  } on Exception {
-    // A refresh that cannot complete is not fatal here: the caller decides
-    // whether to fall back to the unauthenticated path or ask for a sign-in.
-    return null;
+    return refreshOutcome(response.statusCode, body, session);
+  } on Exception catch (error) {
+    return AccountUnreachable('$error');
   } finally {
     if (client == null) http.close();
   }
 }
 
-/// The stored session with a token that has not expired, refreshing if needed.
+/// What a refresh response means. A 4xx is the service's answer about this
+/// session, so it ends it; anything else says nothing about the session.
+AccountState refreshOutcome(int status, String body, AccountSession session) {
+  Object? json;
+  try {
+    json = jsonDecode(body);
+  } on FormatException {
+    json = null;
+  }
+  if (status == 200 && json is Map<String, Object?>) {
+    final access = json['access_token'];
+    if (access is String) {
+      final user = json['user'];
+      String? field(String name) =>
+          user is Map<String, Object?> && user[name] is String
+          ? user[name]! as String
+          : null;
+      return SignedIn(
+        AccountSession(
+          accessToken: access,
+          refreshToken:
+              (json['refresh_token'] as String?) ?? session.refreshToken,
+          userId: field('id') ?? session.userId,
+          email: field('email') ?? session.email,
+          provider: session.provider,
+        ),
+      );
+    }
+  }
+  if (status >= 400 && status < 500) {
+    final reason = json is Map<String, Object?>
+        ? json['error_description'] ?? json['error']
+        : null;
+    return SignInEnded(reason is String ? reason : 'HTTP $status');
+  }
+  return AccountUnreachable('the account service answered HTTP $status');
+}
+
+/// The stored sign-in, with its token refreshed when it is about to expire.
 ///
 /// Every caller wants a usable token rather than whatever was written to disk
-/// last time, so the refresh happens here instead of at each call site — and
-/// the refreshed session is written back, so the next command starts valid.
-Future<AccountSession?> currentAccountSession() async {
+/// last time, so the refresh happens here instead of at each call site, and
+/// the refreshed session is written back so the next command starts valid.
+Future<AccountState> accountState() async {
   final stored = await loadAccountSession();
-  if (stored == null) return null;
-  if (!_expiresSoon(stored.accessToken)) return stored;
+  if (stored == null) return const SignedOut();
+  if (!_expiresSoon(stored.accessToken)) return SignedIn(stored);
   final refreshed = await refreshAccountSession(stored);
-  if (refreshed == null) return null;
-  await saveAccountSession(refreshed);
+  if (refreshed is SignedIn) await saveAccountSession(refreshed.session);
   return refreshed;
 }
+
+/// What to tell a user who needs to be signed in and is not.
+String signInHint(AccountState state) => switch (state) {
+  SignedIn() => '',
+  SignedOut() => 'not signed in, run `rhr login`',
+  SignInEnded(:final reason) => 'your sign-in ended ($reason), run `rhr login`',
+  AccountUnreachable(:final reason) =>
+    'could not reach the account service: $reason',
+};
 
 /// True when a token is expired or close enough that a request would race it.
 bool _expiresSoon(String jwt) {
@@ -362,14 +430,15 @@ Future<DeviceGrant?> requestDeviceGrant({
 Future<String?> rendezvousTicket(String rendezvous) async {
   final installationId = rhrRendezvousInstallation(rendezvous);
   if (installationId == null) return null;
-  final session = await currentAccountSession();
-  if (session == null) return null;
-  final grant = await requestDeviceGrant(
-    service: accountService(),
-    installationId: installationId,
-    session: session,
-  );
-  return grant?.rendezvous == rendezvous ? grant?.ticket : null;
+  if (await accountState() case SignedIn(:final session)) {
+    final grant = await requestDeviceGrant(
+      service: accountService(),
+      installationId: installationId,
+      session: session,
+    );
+    return grant?.rendezvous == rendezvous ? grant?.ticket : null;
+  }
+  return null;
 }
 
 /// The device this project last connected to.

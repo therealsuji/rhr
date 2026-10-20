@@ -56,6 +56,41 @@ final class PreparedRun {
   final bool staleDart;
 }
 
+/// The APK is signed with another key than the app already on the phone, so
+/// Android would refuse it as an update. RHR never uninstalls to get past
+/// this: that would erase the app's data.
+final class SigningKeyMismatch implements Exception {
+  const SigningKeyMismatch(
+    this.package, {
+    required this.installed,
+    required this.built,
+  });
+  final String package;
+
+  /// SHA-256 digests of the installed app's signing certificates.
+  final List<String> installed;
+
+  /// SHA-256 digest of the certificate the new APK carries.
+  final String built;
+
+  /// What to tell the user once no keystore here matches: both digests and
+  /// where RHR looked, so they can find the original key themselves.
+  String explain(File used, List<File> checked) =>
+      'Cannot update $package: the installed app was signed with a different key.\n'
+      '  installed app  ${installed.join(', ')}\n'
+      '  this build     $built (${used.path})\n'
+      'No debug keystore on this machine matches the installed app. Checked: '
+      '${checked.isEmpty ? 'none found' : checked.map((file) => file.path).join(', ')}.\n'
+      'Copy the original debug.keystore into ~/.android, or set ANDROID_USER_HOME '
+      'to the folder that holds it. RHR will not uninstall the app or erase its data.';
+
+  @override
+  String toString() =>
+      'Cannot update $package: the installed app was signed with a different key '
+      '(installed ${installed.join(', ')}, this build $built). '
+      'RHR will not uninstall it or erase its data.';
+}
+
 /// Reconnects reuse approvals; APK receipts independently validate build inputs.
 final class RunProgress {
   final approvedPlans = <String>{};
@@ -237,14 +272,16 @@ final class RunPreparation {
       );
     }
     final installed = await request('inspect', package: identity.package);
+    final certificates = installed['certificates'];
+    final installedCertificates = certificates is List
+        ? certificates.whereType<String>().toList()
+        : const <String>[];
     if (installed['installed'] == true &&
-        !(installed['certificates'] is List &&
-            (installed['certificates'] as List).contains(
-              identity.certificate,
-            ))) {
-      throw StateError(
-        'Cannot update ${identity.package}: the installed app was signed with a different key. '
-        'Use its original signing key. RHR will not uninstall it or erase its data.',
+        !installedCertificates.contains(identity.certificate)) {
+      throw SigningKeyMismatch(
+        identity.package,
+        installed: installedCertificates,
+        built: identity.certificate,
       );
     }
     await _setup('install_permission');
@@ -385,12 +422,18 @@ final class RunPreparation {
         project,
         profile.flutter,
       );
-      final inputs = [
+      // What Gradle signs with is a build input too: a pinned key, once a
+      // mismatch has found the one the installed app carries.
+      Future<Map<String, String>> signing() async => {
+        ...Platform.environment,
+        ...await debugSigningEnvironment(project),
+      };
+      Future<String> buildInputs() async => [
         projectInputs.native,
         'beacon:$beaconVersion:${beacon.package}:${beacon.certificate}',
-        'debugKey:${await debugKeystoreDigest()}',
+        'debugKey:${await debugKeystoreDigest(await signing())}',
       ].join('|');
-      final cached = await cachedProjectApk(project, inputs);
+      final cached = await cachedProjectApk(project, await buildInputs());
       // A plain run reuses an APK with older Dart and hot restarts it;
       // persisting is asking for an APK that holds the current Dart.
       final stale = persist && cached?.dart != projectInputs.dart;
@@ -423,12 +466,12 @@ final class RunPreparation {
       // lets the player open the app from the background.
       await _setup('beacon_setup');
 
-      if (apk == null) {
-        phase('building', 'Building your debug app.');
-        apk = await (await buildBeaconDebugApk(
+      Future<File> build() async {
+        final built = await (await buildBeaconDebugApk(
           project: project,
           player: beacon,
           targetPlatform: 'android-arm64',
+          environment: await debugSigningEnvironment(project),
         )).copy('$project/.dart_tool/rhr/app-debug.apk');
         final afterBuild = await projectBuildIdentity(project, profile.flutter);
         if (afterBuild != projectInputs) {
@@ -436,8 +479,19 @@ final class RunPreparation {
             'Build inputs changed while the APK was being built. Run rhr again before installing it.',
           );
         }
-        await recordProjectApk(project, inputs, projectInputs.dart, apk);
+        await recordProjectApk(
+          project,
+          await buildInputs(),
+          projectInputs.dart,
+          built,
+        );
         apkDart = projectInputs.dart;
+        return built;
+      }
+
+      if (apk == null) {
+        phase('building', 'Building your debug app.');
+        apk = await build();
       }
       // The package comes from the APK, not the Gradle file: a build type's
       // applicationIdSuffix only shows up in what Gradle produced.
@@ -445,7 +499,34 @@ final class RunPreparation {
       if (current) {
         phase('checking', 'The correct debug app is already installed.');
       } else {
-        await _deliver(apk, player: false);
+        try {
+          await _deliver(apk, player: false);
+        } on SigningKeyMismatch catch (mismatch) {
+          // The installed app holds data the user cares about, so the fix is
+          // to sign with its key, never to replace it. Find that key among
+          // the ones this machine has, and rebuild once with it.
+          final used = defaultDebugKeystore(await signing());
+          final candidates = debugKeystoreCandidates(await signing());
+          File? match;
+          for (final keystore in candidates) {
+            final certificate = await debugKeystoreCertificate(keystore);
+            if (certificate != null &&
+                mismatch.installed.contains(certificate)) {
+              match = keystore;
+              break;
+            }
+          }
+          if (match == null || match.path == used.path) {
+            throw StateError(mismatch.explain(used, candidates));
+          }
+          await pinDebugSigning(project, match.parent);
+          phase(
+            'building',
+            'The app on the phone was signed with ${match.path}. Rebuilding with that key.',
+          );
+          apk = await build();
+          await _deliver(apk, player: false);
+        }
       }
       progress.verifiedApp = (
         device: _deviceId,
