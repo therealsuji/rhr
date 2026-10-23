@@ -5,7 +5,7 @@ import 'package:test/test.dart';
 
 void main() {
   test(
-    'receipts reject changed native inputs or APK but not Dart edits',
+    'receipts reject changed APK inputs or APK, but not Dart or unrelated edits',
     () async {
       final root = await Directory.systemTemp.createTemp('rhr-receipt-');
       addTearDown(() => root.delete(recursive: true));
@@ -42,6 +42,30 @@ void main() {
       expect(edited.native, identity.native);
       expect(edited.dart, isNot(identity.dart));
       expect(await cachedProjectApk(root.path, edited.native), isNotNull);
+
+      // Files that never reach the APK leave it valid; a declared asset
+      // does not.
+      await File(
+        '${root.path}/pubspec.yaml',
+      ).writeAsString('name: app\nflutter:\n  assets:\n    - images/\n');
+      final image = File('${root.path}/images/logo.png');
+      await image.parent.create();
+      await image.writeAsString('first');
+      final withAssets = await projectBuildIdentity(root.path, sdk);
+      for (final path in ['design/mock.fig', 'README.md', '.rhr-device']) {
+        final unrelated = File('${root.path}/$path');
+        await unrelated.parent.create(recursive: true);
+        await unrelated.writeAsString('anything');
+      }
+      expect(
+        (await projectBuildIdentity(root.path, sdk)).native,
+        withAssets.native,
+      );
+      await image.writeAsString('other');
+      expect(
+        (await projectBuildIdentity(root.path, sdk)).native,
+        isNot(withAssets.native),
+      );
 
       await native.writeAsString('other');
       expect(
