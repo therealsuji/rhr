@@ -111,6 +111,11 @@ interface ConnMeta {
 	generation: number;
 }
 
+/** When a socket's peer was last heard from, kept with the socket. */
+interface Heard {
+	lastSeen: number;
+}
+
 // Every key and socket tag carries the session code, because one object now
 // holds every session: without it, one session's state would answer for
 // another's.
@@ -133,6 +138,12 @@ const socketTag = (code: string, role: Role) => `${code}|${role}`;
 // live socket holds the phone on its own, so these seconds only matter across
 // a disconnect.
 const CLAIM_GRACE_MS = 45_000;
+
+// How long a host may say nothing before its socket counts as gone. Hosts
+// send an app-level ping every 20 s; one that was killed outright leaves a
+// socket Cloudflare can take many minutes to close (observed: 14), which held
+// the phone against every other host for all of that time.
+const HOST_SILENT_MS = 60_000;
 
 /**
  * Who currently holds the device, across disconnects.
@@ -193,7 +204,7 @@ export class RelaySession implements DurableObject {
 			const decision = await this.admitHost(
 				code,
 				request.headers.get(CLAIM_HEADER),
-				before.host > 0,
+				this.liveHosts(code).length > 0,
 			);
 			if (decision.refused) {
 				console.log(`[rhr] host REFUSED ${decision.reason}`);
@@ -236,6 +247,7 @@ export class RelaySession implements DurableObject {
 			socketTag(code, role),
 			JSON.stringify(meta),
 		]);
+		pair[1].serializeAttachment({ lastSeen: Date.now() } satisfies Heard);
 		console.log(
 			`[rhr] ${role} CONNECTED gen=${generation} ` +
 				`(was host=${before.host} device=${before.device})`,
@@ -353,6 +365,9 @@ export class RelaySession implements DurableObject {
 		if (meta) {
 			meta.msgs++;
 			meta.bytes += messageBytes;
+		}
+		if (role === "host") {
+			ws.serializeAttachment({ lastSeen: Date.now() } satisfies Heard);
 		}
 		// The message's type, read from its `t` field. A substring match
 		// would let any payload that merely mentions "pause" pause the phone.
@@ -575,6 +590,29 @@ export class RelaySession implements DurableObject {
 
 	private roleOf(ws: WebSocket): Role {
 		return this.sessionOf(ws).role;
+	}
+
+	/**
+	 * The host sockets on [code] that have been heard from recently. A silent
+	 * one is closed here: its holder is gone, and keeping it would hold the
+	 * phone until Cloudflare noticed.
+	 */
+	private liveHosts(code: string): WebSocket[] {
+		const now = Date.now();
+		return this.ctx.getWebSockets(socketTag(code, "host")).filter((ws) => {
+			const heard = ws.deserializeAttachment() as Heard | null;
+			const lastSeen = heard?.lastSeen ?? this.metaOf(ws)?.connectedAt ?? 0;
+			if (now - lastSeen <= HOST_SILENT_MS) return true;
+			console.log(
+				`[rhr] host silent ${Math.round((now - lastSeen) / 1000)}s; closing`,
+			);
+			try {
+				ws.close(1001, "host silent");
+			} catch {
+				// Already gone.
+			}
+			return false;
+		});
 	}
 
 	private metaOf(ws: WebSocket): ConnMeta | null {
