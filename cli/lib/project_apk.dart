@@ -2,13 +2,20 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:yaml/yaml.dart';
 
 import 'flutter_compatibility.dart';
+import 'native_fingerprint.dart';
 
-/// What a project's debug APK is built from, in two parts. [native] is
-/// everything but Dart source: a change there needs a new APK. [dart] is the
-/// Dart source: a change there reaches a running app by hot restart, a few
-/// kilobytes, so it must not cost a 40 MB rebuild and reinstall.
+/// What a project's debug APK is built from, in two parts. [native] is what
+/// goes into the APK besides Dart: the native build ([nativeFingerprint]),
+/// the pubspecs, and the assets, fonts and shaders they declare. A change
+/// there needs a new APK. [dart] is the Dart source: a change there reaches a
+/// running app by hot restart, a few kilobytes, so it must not cost a 40 MB
+/// rebuild and reinstall.
+///
+/// Anything else in the project (docs, design files, tests, other platforms'
+/// folders, RHR's own files) never reaches the APK, so it is in neither.
 typedef ProjectBuildIdentity = ({String native, String dart});
 
 /// A receipt is only reusable while both the build inputs and APK are unchanged.
@@ -16,77 +23,138 @@ Future<ProjectBuildIdentity> projectBuildIdentity(
   String project,
   FlutterCompatibility sdk,
 ) async {
-  final root = Directory(project).absolute;
-  final roots = <String>{root.resolveSymbolicLinksSync()};
-  final config = File('${pubRoot(root.path)}/.dart_tool/package_config.json');
+  final root = Directory(project).absolute.resolveSymbolicLinksSync();
+  // The project, and the packages it depends on by path. Published and git
+  // packages never change for a given pubspec.lock, which the native
+  // fingerprint covers.
+  final roots = <String>{root};
+  final published = readPublishedPackages(root);
+  final config = File('${pubRoot(root)}/.dart_tool/package_config.json');
   if (config.existsSync()) {
     final decoded =
         jsonDecode(await config.readAsString()) as Map<String, dynamic>;
     for (final package
         in (decoded['packages'] as List).cast<Map<String, dynamic>>()) {
+      if (published.contains(package['name'])) continue;
       final uri = config.uri.resolve(package['rootUri'] as String);
       if (uri.scheme != 'file') continue;
       final directory = Directory.fromUri(uri);
       // Flutter's packages are identified by the SDK revisions below.
       if (directory.path.contains('/packages/flutter')) continue;
+      if (!directory.existsSync()) continue;
       final path = directory.resolveSymbolicLinksSync();
-      if (path != root.path && !path.startsWith('${root.path}/'))
-        roots.add(path);
+      if (path != root && !path.startsWith('$root/')) roots.add(path);
     }
   }
   final inputs = <String>[
     sdk.frameworkRevision,
     sdk.engineRevision,
     sdk.dartSdkVersion,
+    'native:${await nativeFingerprint(root)}',
   ];
   final dartInputs = <String>[];
-  final visited = <String>{};
-  Future<void> visit(Directory directory) async {
+
+  Future<String> hash(File file) async =>
+      '${file.path}:${await sha256.bind(file.openRead()).first}';
+
+  // Sends each file under [directory] to [add], skipping build output and
+  // tool state, and following links once.
+  Future<void> walk(
+    Directory directory,
+    Future<void> Function(File) add, [
+    Set<String>? visited,
+  ]) async {
+    final seen = visited ?? <String>{};
+    if (!directory.existsSync()) return;
     final canonical = directory.resolveSymbolicLinksSync();
-    if (!visited.add(canonical)) return;
-    await for (final entry in Directory(canonical).list(followLinks: false)) {
+    if (!seen.add(canonical)) return;
+    await for (final entry in Directory(canonical).list(followLinks: true)) {
       final name = entry.uri.pathSegments.where((part) => part.isNotEmpty).last;
-      if ({
-        'build',
-        '.dart_tool',
-        '.gradle',
-        '.git',
-        '.idea',
-        '.DS_Store',
-        '.fvm',
-        '.cxx',
-        '.kotlin',
-        '.flutter-plugins-dependencies',
-        'local.properties',
-        'GeneratedPluginRegistrant.java',
-        'GeneratedPluginRegistrant.kt',
-      }.contains(name))
-        continue;
+      if (_notInputs.contains(name)) continue;
       if (entry is Directory) {
-        await visit(entry);
+        await walk(entry, add, seen);
       } else if (entry is File) {
-        (entry.path.endsWith('.dart') ? dartInputs : inputs).add(
-          '${entry.path}:${await sha256.bind(entry.openRead()).first}',
-        );
-      } else if (entry is Link) {
-        final target = entry.resolveSymbolicLinksSync();
-        inputs.add('${entry.path}:$target');
-        if (Directory(target).existsSync()) {
-          await visit(Directory(target));
-        } else {
-          inputs.add(
-            '$target:${await sha256.bind(File(target).openRead()).first}',
-          );
-        }
+        await add(entry);
       }
     }
   }
 
-  for (final path in roots) await visit(Directory(path));
-  String digest(List<String> lines) =>
-      sha256.convert(utf8.encode((lines..sort()).join('\n'))).toString();
+  for (final path in roots) {
+    await walk(Directory(path), (file) async {
+      if (file.path.endsWith('.dart')) dartInputs.add(await hash(file));
+    });
+    final pubspec = File('$path/pubspec.yaml');
+    if (!pubspec.existsSync()) continue;
+    inputs.add(await hash(pubspec));
+    for (final declared in _bundledPaths(pubspec)) {
+      final target = '$path/$declared';
+      if (FileSystemEntity.isDirectorySync(target)) {
+        await walk(
+          Directory(target),
+          (file) async => inputs.add(await hash(file)),
+        );
+        continue;
+      }
+      final asset = File(target);
+      if (!asset.existsSync()) continue;
+      // A file asset also bundles its resolution variants (2.0x/ and the
+      // like) from the folder around it, so that folder is the input; unless
+      // it is the package itself, which would bring everything back in.
+      if (asset.parent.resolveSymbolicLinksSync() ==
+          Directory(path).resolveSymbolicLinksSync()) {
+        inputs.add(await hash(asset));
+      } else {
+        await walk(asset.parent, (file) async => inputs.add(await hash(file)));
+      }
+    }
+  }
+  String digest(List<String> lines) => sha256
+      .convert(utf8.encode((lines.toSet().toList()..sort()).join('\n')))
+      .toString();
   return (native: digest(inputs), dart: digest(dartInputs));
 }
+
+const _notInputs = {
+  'build',
+  '.dart_tool',
+  '.gradle',
+  '.git',
+  '.idea',
+  '.DS_Store',
+  '.fvm',
+  '.cxx',
+  '.kotlin',
+};
+
+/// The asset, font and shader paths [pubspec]'s `flutter:` section bundles
+/// into the app, relative to its package. Empty when the pubspec cannot be
+/// read: its own hash is an input regardless.
+List<String> _bundledPaths(File pubspec) {
+  final Object? flutter;
+  try {
+    final doc = loadYaml(pubspec.readAsStringSync());
+    flutter = doc is YamlMap ? doc['flutter'] : null;
+  } on YamlException {
+    return const [];
+  }
+  if (flutter is! YamlMap) return const [];
+  return [
+    for (final asset in _list(flutter['assets']))
+      if (asset is String)
+        asset
+      else if (asset is YamlMap && asset['path'] is String)
+        asset['path'] as String,
+    for (final family in _list(flutter['fonts']))
+      if (family is YamlMap)
+        for (final font in _list(family['fonts']))
+          if (font is YamlMap && font['asset'] is String)
+            font['asset'] as String,
+    for (final shader in _list(flutter['shaders']))
+      if (shader is String) shader,
+  ];
+}
+
+List<Object?> _list(Object? value) => value is YamlList ? value : const [];
 
 /// The key Gradle signs a debug build with when the project names none,
 /// where the Android Gradle plugin looks for it. It is a build input like the
