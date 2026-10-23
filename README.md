@@ -53,7 +53,7 @@ Works without an account too: a plain session code and QR is still the setup pat
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.28
+  --git-ref v0.1.0-beta.29
 
 ~/.pub-cache/bin/rhr setup
 ```
@@ -145,7 +145,7 @@ Same as above, locked to the beta tag:
 dart pub global activate --source git \
   https://github.com/therealsuji/rhr.git \
   --git-path cli \
-  --git-ref v0.1.0-beta.28
+  --git-ref v0.1.0-beta.29
 ~/.pub-cache/bin/rhr setup
 ```
 
