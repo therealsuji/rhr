@@ -79,8 +79,9 @@ Usage:
   rhr login                   sign in so this machine can use account devices
   rhr logout                  forget the signed-in account
   rhr whoami                  print the signed-in account
-  rhr invite                  show a QR for a phone to join this account
-  rhr devices [--remove <id>] list the phones on this account
+  rhr invite                  show a QR for a phone to join this account, and
+                              wait for it to join
+  rhr devices [--remove <device>]  list the phones on this account
   rhr --version               print the installed CLI version
   rhr update [--check]         install the newest release, or only check for it
   rhr push-assets [options]   push assets into an already-attached session
@@ -99,7 +100,7 @@ run options:
   --project <dir>       Flutter project dir (default: current dir)
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      override the saved pairing code (new code on first run)
-  --device <id>         a phone on your account (see `rhr devices`)
+  --device <name|id>    a phone on your account (see `rhr devices`)
   --no-direct           use the relay for tunnel payloads (legacy/private mode;
                         direct WebRTC is strict and enabled by default)
   --resync              ignore the local asset manifest and re-push all assets
@@ -121,7 +122,7 @@ player build options:
 attach options:
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      session code, rhr-xxxx-xxxx-xxxx (or `code:` in .rhr.yaml)
-  --device <id>         a phone on your account (see `rhr devices`)
+  --device <name|id>    a phone on your account (see `rhr devices`)
   --project <dir>       Flutter project dir (default: current dir)
   --sync-assets         also push build/flutter_assets — required for the
                         generic player (its APK has no per-project assets)
@@ -135,9 +136,10 @@ attach options:
   -h, --help            show this help
 
 Session selection, for both run and attach: --device, else --code, else
-`code:` in .rhr.yaml, then run reuses its recent saved code or generates one.
---device and --code together are
-refused rather than one quietly winning.
+`code:` in .rhr.yaml, else the phone this project last used, else the phone on
+your account (you pick when there are several), else run reuses its recent
+pairing code or generates one. --device and --code together are refused rather
+than one quietly winning.
 
 Config: values in ./.rhr.yaml (keys `relay:`, `code:`, and optional
 `direct: true|false`) are used as
@@ -675,11 +677,14 @@ Future<void> main(List<String> args) async {
         exit(_directFailureExitCode);
       }
     } on DeviceBusyException catch (busy) {
-      // Reconnecting cannot win a device someone else is holding; it would
-      // only spin until they leave. Report and quit so the operator can pick
-      // another device or wait deliberately.
-      stderr.writeln('[rhr] $busy');
-      exit(_deviceBusyExitCode);
+      // Usually the claim of a run that was just stopped, which the relay
+      // keeps for 45 s. Wait that out; a host still using the phone is
+      // there after it, and then this stops so the operator can choose.
+      if (reconnectBackoff.busyTooLong()) {
+        stderr.writeln('[rhr] $busy');
+        exit(_deviceBusyExitCode);
+      }
+      stderr.writeln('[rhr] $busy; waiting for it to be released');
     } on DeviceAccessException catch (refused) {
       stderr.writeln('[rhr] $refused');
       exit(1);
@@ -1021,6 +1026,7 @@ Future<int?> _runSession({
   );
   PlayerUpdateSender? updateSender;
   var updateAttempted = false;
+  var playerUpdated = false;
   var effectiveSyncAssets = syncAssets;
   var staleDart = false;
   // Reattached to the same running debug app after a reconnect: it already
@@ -1268,12 +1274,21 @@ Future<int?> _runSession({
               unawaited(leave(78));
               return;
             }
-            if (updatePolicy == PlayerUpdatePolicy.never || updateAttempted) {
+            if (updateAttempted) {
+              // The phone announced itself again. Only an update that went
+              // through and still left it incompatible is worth saying; one
+              // that is running or was declined is already being handled.
+              if (playerUpdated) {
+                stderr.writeln(
+                  '[rhr] the player is still incompatible after the update.',
+                );
+                unawaited(leave(78));
+              }
+              return;
+            }
+            if (updatePolicy == PlayerUpdatePolicy.never) {
               stderr.writeln(
-                updateAttempted
-                    ? '[rhr] the player is still incompatible after the update.'
-                    : '[rhr] Rebuild/reinstall a compatible player before '
-                          'streaming.',
+                '[rhr] Rebuild/reinstall a compatible player before streaming.',
               );
               unawaited(leave(78));
               return;
@@ -1299,6 +1314,7 @@ Future<int?> _runSession({
                 attach: (sender) => updateSender = sender,
               ).then((updated) async {
                 updateSender = null;
+                playerUpdated = updated;
                 if (updated) return;
                 // The failure reason was just handed to the transport, whose
                 // send is async. Exiting here truncates it, and the phone is
@@ -2094,24 +2110,60 @@ Future<int?> _runSession({
   if (stalePid.existsSync()) stalePid.deleteSync();
   attachPidFile = effectivePidFile;
 
-  final proc = await Process.start(projectFlutterExecutable(project), [
-    'attach',
-    '-d',
-    'rhr',
-    '--debug-url',
-    local.toString(),
-    // The rhr custom device intentionally has no port-forward command: the
-    // VM service is already exposed on this host-local tunnel port. Without
-    // an explicit host port Flutter asks the device for a forward and
-    // silently ends up with port 0, leaving attach waiting forever.
-    '--host-vmservice-port',
-    '${local.port}',
-    // DDS tries to claim the same host port for a custom device whose VM
-    // service is already exposed by our tunnel. The tunneled VM service is
-    // sufficient for attach/hot reload, so keep DDS out of this path.
-    '--no-dds',
-    '--pid-file', effectivePidFile,
-  ], workingDirectory: project);
+  // Flutter keeps a copy of the compiled app under its temp directory for
+  // every attach, around 80 MB, and leaves it behind when it is killed rather
+  // than quit. On a machine whose /tmp is a small tmpfs, a day of reconnects
+  // fills it and the next compile fails. So each attach gets its own folder
+  // here, removed when it ends; one that outlived a killed run is swept up a
+  // day later.
+  final flutterTemp = Directory('${stateDirectory.path}/tmp');
+  if (flutterTemp.existsSync()) {
+    final dayAgo = DateTime.now().subtract(const Duration(days: 1));
+    for (final old in flutterTemp.listSync().whereType<Directory>()) {
+      if (old.statSync().modified.isBefore(dayAgo)) {
+        try {
+          old.deleteSync(recursive: true);
+        } on FileSystemException {
+          // Still in use, or already gone.
+        }
+      }
+    }
+  }
+  final attachTemp = (flutterTemp..createSync(recursive: true)).createTempSync(
+    'attach-',
+  );
+  final proc = await Process.start(
+    projectFlutterExecutable(project),
+    [
+      'attach',
+      '-d',
+      'rhr',
+      '--debug-url',
+      local.toString(),
+      // The rhr custom device intentionally has no port-forward command: the
+      // VM service is already exposed on this host-local tunnel port. Without
+      // an explicit host port Flutter asks the device for a forward and
+      // silently ends up with port 0, leaving attach waiting forever.
+      '--host-vmservice-port',
+      '${local.port}',
+      // DDS tries to claim the same host port for a custom device whose VM
+      // service is already exposed by our tunnel. The tunneled VM service is
+      // sufficient for attach/hot reload, so keep DDS out of this path.
+      '--no-dds',
+      '--pid-file', effectivePidFile,
+    ],
+    workingDirectory: project,
+    environment: {'TMPDIR': attachTemp.path},
+  );
+  unawaited(
+    proc.exitCode.then((_) {
+      try {
+        attachTemp.deleteSync(recursive: true);
+      } on FileSystemException {
+        // Swept up by a later run.
+      }
+    }),
+  );
 
   var sessionActive = true;
   void lostConnection() {
@@ -2673,14 +2725,19 @@ Future<int> _runAttachProductFlow({
   final sessionCode =
       code ?? config['code'] ?? savedCode ?? mintRhrSessionCode();
   _requireValidSessionCode(sessionCode);
-  writePrivateFile(
-    savedSession,
-    jsonEncode({
-      'code': sessionCode,
-      'relay': relay ?? config['relay'],
-      'created': DateTime.now().toUtc().toIso8601String(),
-    }),
-  );
+  // An account phone's rendezvous is found again from the account; the saved
+  // session is for pairing codes, which a run reuses so a retry needs no
+  // new scan.
+  if (rhrRendezvousInstallation(sessionCode) == null) {
+    writePrivateFile(
+      savedSession,
+      jsonEncode({
+        'code': sessionCode,
+        'relay': relay ?? config['relay'],
+        'created': DateTime.now().toUtc().toIso8601String(),
+      }),
+    );
+  }
   final configuredRelay = relay ?? config['relay'];
   if (configuredRelay != null) _requireAllowedRelay(configuredRelay);
   preferDirect ??= config['direct']?.toLowerCase() != 'false';
@@ -2704,23 +2761,31 @@ Future<int> _runAttachProductFlow({
   final qrPayload = configuredRelay == null && localRelay == null
       ? sessionCode
       : deepLink.toString();
-  final qr = renderTerminalQr(qrPayload);
   final connectionFile = File('$project/.dart_tool/rhr/connection.json');
-  writePrivateFile(
-    connectionFile,
-    jsonEncode({
-      'code': sessionCode,
-      'url': link,
-      'deepLink': deepLink.toString(),
-      'relays': deviceRelays,
-      'qrPayload': qrPayload,
-    }),
-  );
-  stderr.write(
-    '\nTap to connect: $link\nSession code: $sessionCode\n'
-    'Connection JSON: ${connectionFile.absolute.path}\n\n'
-    '${qr.text}\n  Scan with the RHR player\n\n',
-  );
+  if (rhrRendezvousInstallation(sessionCode) != null) {
+    // A phone on the account is already waiting on its rendezvous; a link or
+    // QR for it would only pull some other phone off its own. Nothing to
+    // pair, so nothing to show, and an older pairing's details must not
+    // outlive the session they were for.
+    if (connectionFile.existsSync()) connectionFile.deleteSync();
+  } else {
+    final qr = renderTerminalQr(qrPayload);
+    writePrivateFile(
+      connectionFile,
+      jsonEncode({
+        'code': sessionCode,
+        'url': link,
+        'deepLink': deepLink.toString(),
+        'relays': deviceRelays,
+        'qrPayload': qrPayload,
+      }),
+    );
+    stderr.write(
+      '\nTap to connect: $link\nSession code: $sessionCode\n'
+      'Connection JSON: ${connectionFile.absolute.path}\n\n'
+      '${qr.text}\n  Scan with the RHR player\n\n',
+    );
+  }
   if (localRelay != null) {
     stderr.writeln(
       '[rhr] LAN fast path: ${localRelay.advertisedUrl} '
@@ -2795,11 +2860,14 @@ Future<int> _runAttachProductFlow({
           '[rhr] $failure Reconnecting and reusing the built APK.',
         );
       } on DeviceBusyException catch (busy) {
-        // Reconnecting cannot win a device someone else is holding; it would
-        // only spin until they leave. Report and quit so the operator can pick
-        // another device or wait deliberately.
-        stderr.writeln('[rhr] $busy');
-        return _deviceBusyExitCode;
+        // Usually the claim of a run that was just stopped, which the relay
+        // keeps for 45 s. Wait that out; a host still using the phone is
+        // there after it, and then this stops so the operator can choose.
+        if (reconnectBackoff.busyTooLong()) {
+          stderr.writeln('[rhr] $busy');
+          return _deviceBusyExitCode;
+        }
+        stderr.writeln('[rhr] $busy; waiting for it to be released');
       } on DeviceAccessException catch (refused) {
         stderr.writeln('[rhr] $refused');
         return 1;
@@ -2818,7 +2886,11 @@ Future<int> _runAttachProductFlow({
 }
 
 /// Turns a device selector into a session name, or ends the process saying
-/// why not.
+/// why not. Null means no account phone: pair with a code instead.
+///
+/// In order: `--device`, else a pairing code (`--code`, or `code:` in
+/// `.rhr.yaml`), else the phone this project last used, else the phones on
+/// the signed-in account (the only one, or one the user picks).
 ///
 /// Shared by `run` and `attach` so the two cannot drift apart again — they
 /// disagreed about `.rhr.yaml` for long enough that a project pinning a code
@@ -2834,27 +2906,40 @@ Future<String?> _resolveDevice({
     );
     exit(64);
   }
-  // A remembered device is a convenience, not an instruction: anything the
-  // user actually typed wins, and so does a project that pins a code.
-  final wanted =
-      device ?? (code == null ? await preferredDevice(project) : null);
-  if (wanted == null) return null;
+  // A pinned or typed code is an instruction to pair with it.
+  if (device == null && (code ?? _loadConfig(project)['code']) != null) {
+    return null;
+  }
+  final remembered = device == null ? await preferredDevice(project) : null;
 
   final AccountSession session;
   switch (await accountState()) {
     case SignedIn(session: final signedIn):
       session = signedIn;
     case SignedOut() when device == null:
-      // Signed out on purpose: the remembered phone is a stale preference,
+      // Signed out on purpose: a remembered phone is a stale preference,
       // not a request.
-      stderr.writeln(
-        '[rhr] signed out, so not using the remembered device "$wanted" '
-        '(`rhr login` to use it again)',
-      );
+      if (remembered != null) {
+        stderr.writeln(
+          '[rhr] signed out, so not using the remembered device "$remembered" '
+          '(`rhr login` to use it again)',
+        );
+      }
+      return null;
+    case AccountUnreachable(:final reason)
+        when device == null && remembered == null:
+      // Nobody asked for an account phone; pair with a code as before.
+      stderr.writeln('[rhr] could not reach the account service: $reason');
       return null;
     case AccountUnreachable(:final reason):
       stderr.writeln('[rhr] could not reach the account service: $reason');
       exit(1);
+    case SignInEnded(:final reason) when device == null && remembered == null:
+      stderr.writeln(
+        '[rhr] your sign-in ended ($reason), so phones on your account are '
+        'not used (`rhr login` to use them)',
+      );
+      return null;
     case final state:
       // An ended sign-in, or a device named outright: the user wants their
       // phone, so sign in here rather than fall back to a pairing link.
@@ -2868,74 +2953,155 @@ Future<String?> _resolveDevice({
         exit(1);
       }
   }
+
+  final AccountDevice chosen;
+  if (remembered != null) {
+    // Only for its name in the line below; the grant decides whether it is
+    // still on the account.
+    final List<AccountDevice> devices = await listAccountDevices(
+      session,
+    ).catchError((Object _) => const <AccountDevice>[]);
+    chosen = devices.firstWhere(
+      (d) => d.id == remembered,
+      orElse: () => (id: remembered, label: ''),
+    );
+  } else {
+    final List<AccountDevice> devices;
+    try {
+      devices = await listAccountDevices(session);
+    } on Object catch (e) {
+      if (device != null) {
+        stderr.writeln('[rhr] $e');
+        exit(1);
+      }
+      stderr.writeln('[rhr] $e; pairing with a code instead');
+      return null;
+    }
+    if (device == null) {
+      final picked = await _pickAccountDevice(devices);
+      if (picked == null) return null;
+      chosen = picked;
+    } else {
+      final matches = matchDevices(devices, device);
+      if (matches.length != 1) {
+        stderr.writeln(
+          matches.isEmpty
+              ? '[rhr] "$device" is not a device on this account:'
+              : '[rhr] "$device" matches more than one device; pass its id:',
+        );
+        for (final d in matches.isEmpty ? devices : matches) {
+          stderr.writeln('  ${d.id}  ${d.label}');
+        }
+        exit(1);
+      }
+      chosen = matches.single;
+    }
+  }
+
   final grant = await requestDeviceGrant(
     service: accountService(),
-    installationId: wanted,
+    installationId: chosen.id,
     session: session,
   );
   if (grant == null) {
     if (device == null) {
       // The remembered phone has left the account. Say so and carry on
       // rather than failing a command the user did not aim at it.
-      stderr.writeln('[rhr] "$wanted" is no longer on this account');
+      stderr.writeln('[rhr] "${chosen.id}" is no longer on this account');
       await forgetPreferredDevice(project);
       return null;
     }
     stderr.writeln(
-      '[rhr] "$wanted" is not a device on this account — run `rhr devices`',
+      '[rhr] "${chosen.id}" is not a device on this account — run `rhr devices`',
     );
     exit(1);
   }
-  await rememberDevice(project, wanted);
+  await rememberDevice(project, chosen.id);
+  stderr.writeln(
+    '[rhr] Using ${chosen.label.isEmpty ? chosen.id : chosen.label} on your '
+    'account. Open RHR on it. (--code pairs another phone instead.)',
+  );
   // Only the name: the relay race asks for a fresh ticket on every dial.
   return grant.rendezvous;
 }
 
+/// The account phone to use when nobody named one: the only one, or the one
+/// the user picks. Null pairs another phone with a QR instead.
+Future<AccountDevice?> _pickAccountDevice(List<AccountDevice> devices) async {
+  if (devices.length <= 1) return devices.firstOrNull;
+  // Both ends: Dart calls /dev/null a terminal, and that is the stdin agents
+  // and scripts usually run with, while the prompt goes to stderr.
+  if (!stdin.hasTerminal || !stderr.hasTerminal) {
+    stderr.writeln(
+      '[rhr] Several phones are on your account; pass --device <name or id> '
+      'to use one:',
+    );
+    for (final d in devices) {
+      stderr.writeln('  ${d.id}  ${d.label}');
+    }
+    return null;
+  }
+  stderr.writeln('[rhr] Which phone?');
+  for (final (i, d) in devices.indexed) {
+    stderr.writeln('  ${i + 1}) ${d.label}  (${d.id})');
+  }
+  stderr.writeln('  0) another phone, with a QR');
+  stderr.write('[rhr] number [1]: ');
+  final answer =
+      (await terminalInput
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())
+              .first
+              .catchError((_) => '0'))
+          .trim();
+  final n = answer.isEmpty ? 1 : int.tryParse(answer);
+  if (n == null || n < 0 || n > devices.length) {
+    stderr.writeln('[rhr] "$answer" is not one of those; pairing with a QR');
+    return null;
+  }
+  return n == 0 ? null : devices[n - 1];
+}
+
+/// The signed-in session, signing in here when there is none or it ended:
+/// the user ran a command that needs one, so asking them to run another
+/// first only adds a step.
+Future<AccountSession?> _sessionOrSignIn() async {
+  switch (await accountState()) {
+    case SignedIn(:final session):
+      return session;
+    case AccountUnreachable(:final reason):
+      stderr.writeln('[rhr] could not reach the account service: $reason');
+      return null;
+    case final state:
+      if (state case SignInEnded(:final reason)) {
+        stderr.writeln('[rhr] your sign-in ended ($reason)');
+      }
+      try {
+        return await _signIn(stderr);
+      } on AuthFailure catch (e) {
+        stderr.writeln('[rhr] $e');
+        return null;
+      }
+  }
+}
+
 /// `rhr devices`: list the phones on this account, or remove one.
 Future<int> _devices(List<String> args) async {
-  final session = await _requireSignIn();
+  final session = await _sessionOrSignIn();
   if (session == null) return 1;
   final removeIndex = args.indexOf('--remove');
   final removing = removeIndex != -1 && removeIndex + 1 < args.length
       ? args[removeIndex + 1]
       : null;
 
-  final http = HttpClient();
+  final List<AccountDevice> devices;
   try {
-    final base = accountService();
-    if (removing != null) {
-      final request = await http.deleteUrl(
-        Uri.parse(
-          '$base/account/devices'
-          '?installationId=${Uri.encodeQueryComponent(removing)}',
-        ),
-      );
-      request.headers.add('Authorization', 'Bearer ${session.accessToken}');
-      final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode != 200) {
-        stderr.writeln('[rhr] could not remove that device: $body');
-        return 1;
-      }
-      final removed = (jsonDecode(body) as Map<String, Object?>)['removed'];
-      stdout.writeln(
-        removed == true
-            ? '[rhr] removed $removing'
-            : '[rhr] $removing was not on this account',
-      );
-      return removed == true ? 0 : 1;
-    }
-
-    final request = await http.getUrl(Uri.parse('$base/account/devices'));
-    request.headers.add('Authorization', 'Bearer ${session.accessToken}');
-    final response = await request.close();
-    final body = await response.transform(utf8.decoder).join();
-    if (response.statusCode != 200) {
-      stderr.writeln('[rhr] could not list devices: $body');
-      return 1;
-    }
-    final devices =
-        (jsonDecode(body) as Map<String, Object?>)['devices'] as List<Object?>;
+    devices = await listAccountDevices(session);
+  } on AuthFailure catch (e) {
+    stderr.writeln('[rhr] $e');
+    return 1;
+  }
+  if (removing == null) {
     if (devices.isEmpty) {
       stdout.writeln(
         'No devices yet. Run `rhr invite` and scan the QR with the player.',
@@ -2943,30 +3109,68 @@ Future<int> _devices(List<String> args) async {
       return 0;
     }
     stdout.writeln('');
-    for (final entry in devices.cast<Map<String, Object?>>()) {
-      // The id is what --device and --remove take; the label is only what the
-      // phone called itself, and two phones may well share one.
-      stdout.writeln('  ${entry['installationId']}  ${entry['label']}');
+    for (final d in devices) {
+      // The id is what --device and --remove take; so is a label, unless two
+      // phones share it.
+      stdout.writeln('  ${d.id}  ${d.label}');
     }
     stdout.writeln('');
     return 0;
+  }
+
+  final matches = matchDevices(devices, removing);
+  if (matches.length != 1) {
+    stderr.writeln(
+      matches.isEmpty
+          ? '[rhr] "$removing" is not a device on this account'
+          : '[rhr] "$removing" matches more than one device; pass its id',
+    );
+    return 1;
+  }
+  final id = matches.single.id;
+  final http = HttpClient();
+  try {
+    final request = await http.deleteUrl(
+      Uri.parse(
+        '${accountService()}/account/devices'
+        '?installationId=${Uri.encodeQueryComponent(id)}',
+      ),
+    );
+    request.headers.add('Authorization', 'Bearer ${session.accessToken}');
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) {
+      stderr.writeln('[rhr] could not remove that device: $body');
+      return 1;
+    }
+    final removed = (jsonDecode(body) as Map<String, Object?>)['removed'];
+    stdout.writeln(
+      removed == true
+          ? '[rhr] removed $id ${matches.single.label}'
+          : '[rhr] $id was not on this account',
+    );
+    return removed == true ? 0 : 1;
   } finally {
     http.close();
   }
 }
 
-/// `rhr invite`: show a QR a phone can scan to join this account.
+/// `rhr invite`: show a QR a phone can scan to join this account, and wait
+/// for it to.
 ///
 /// The phone never signs in — it redeems this and holds a membership from
 /// then on, which is what lets the user add a phone to their account without
 /// signing in on it.
 Future<int> _invite() async {
-  final session = await _requireSignIn();
+  final session = await _sessionOrSignIn();
   if (session == null) return 1;
-  final relay = accountService();
+  final service = accountService();
+  final List<AccountDevice> before;
+  final Map<String, Object?> json;
   final http = HttpClient();
   try {
-    final request = await http.postUrl(Uri.parse('$relay/account/invite'));
+    before = await listAccountDevices(session, client: http);
+    final request = await http.postUrl(Uri.parse('$service/account/invite'));
     request.headers.add('Authorization', 'Bearer ${session.accessToken}');
     final response = await request.close();
     final body = await response.transform(utf8.decoder).join();
@@ -2974,27 +3178,57 @@ Future<int> _invite() async {
       stderr.writeln('[rhr] could not create an invite: $body');
       return 1;
     }
-    final json = jsonDecode(body) as Map<String, Object?>;
-    // The phone redeems over HTTPS with the account service its build names,
-    // never through the relay socket, and asks the service whose account
-    // this is rather than trusting the QR. `service` only lets a phone built
-    // for another deployment say so instead of failing obscurely.
-    final payload = jsonEncode({
-      'v': 2,
-      'join': json['token'],
-      'service': relay,
-    });
-    final account = json['account'] is String && json['account'] != ''
-        ? json['account']! as String
-        : session.email;
-    final qr = renderTerminalQr(payload);
-    stdout.writeln('\n${qr.text}');
-    stdout.writeln('  Scan with the rhr player to join $account');
-    stdout.writeln('  Single-use, expires in 5 minutes.\n');
-    return 0;
+    json = jsonDecode(body) as Map<String, Object?>;
+  } on AuthFailure catch (e) {
+    stderr.writeln('[rhr] $e');
+    return 1;
   } finally {
     http.close();
   }
+  // The phone redeems over HTTPS with the account service its build names,
+  // never through the relay socket, and asks the service whose account
+  // this is rather than trusting the QR. `service` only lets a phone built
+  // for another deployment say so instead of failing obscurely.
+  final payload = jsonEncode({
+    'v': 2,
+    'join': json['token'],
+    'service': service,
+  });
+  final account = json['account'] is String && json['account'] != ''
+      ? json['account']! as String
+      : session.email;
+  final qr = renderTerminalQr(payload);
+  stdout.writeln('\n${qr.text}');
+  stdout.writeln('  Scan with the rhr player to join $account');
+  stdout.writeln('  Single-use, expires in 5 minutes.\n');
+
+  // Waits for the scan, so the user sees the phone arrive rather than having
+  // to go and check `rhr devices`.
+  stdout.writeln('[rhr] waiting for the phone to join… (Ctrl-C to stop)');
+  final known = {for (final d in before) d.id};
+  final expires = DateTime.now().add(const Duration(minutes: 5));
+  while (DateTime.now().isBefore(expires)) {
+    await Future<void>.delayed(const Duration(seconds: 2));
+    final List<AccountDevice> now;
+    try {
+      now = await listAccountDevices(session);
+    } on Object {
+      continue;
+    }
+    for (final d in now) {
+      if (known.contains(d.id)) continue;
+      stdout.writeln(
+        '[rhr] ${d.label.isEmpty ? d.id : d.label} joined $account. '
+        'Run `rhr run` in your project to use it.',
+      );
+      return 0;
+    }
+  }
+  stdout.writeln(
+    '[rhr] the invite expired with no new phone. A phone that was already on '
+    'this account stays on it.',
+  );
+  return 1;
 }
 
 /// `rhr login`: sign in so this machine can reach the devices on an account.
