@@ -29,6 +29,33 @@ class UpdateSinkTest {
 		assertEquals(apk.size, file.size())
 	}
 
+	/**
+	 * A transfer cut short and resumed: the first stream stops part-way, and
+	 * a fresh gzip of the rest is appended after the bytes already written.
+	 */
+	@Test
+	fun `a resumed transfer ends with the whole APK and its digest`() {
+		val apk = ByteArray(300_000) { (it * 7 % 251).toByte() }
+		val kept = 120_000
+		val file = ByteArrayOutputStream()
+		val (first, _) = chain(apk.size.toLong(), file)
+		first.write(gzip(apk.copyOf(kept)))
+		first.close()
+
+		val digest = MessageDigest.getInstance("SHA-256").apply { update(file.toByteArray()) }
+		val counting = CountingSink(file, digest, apk.size.toLong(), start = kept.toLong())
+		val rest = GzipSink(counting)
+		rest.write(gzip(apk.copyOfRange(kept, apk.size)))
+		rest.close()
+
+		assertEquals(apk.size.toLong(), counting.written)
+		assertEquals(apk.toList(), file.toByteArray().toList())
+		assertEquals(
+			MessageDigest.getInstance("SHA-256").digest(apk).toList(),
+			digest.digest().toList(),
+		)
+	}
+
 	/** A few kilobytes of gzip that inflate far past what was announced. */
 	@Test
 	fun `inflating past the announced size stops the transfer`() {
