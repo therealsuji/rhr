@@ -210,9 +210,20 @@ class RhrSessionService : Service() {
 		 * dialing until it is stopped or paused. The user may be waiting
 		 * hands-free on the relay, the computer, a build, or their coding
 		 * agent, and a phone that sleeps meanwhile freezes all of it.
+		 *
+		 * Except a phone on an account waiting on its own rendezvous: nobody
+		 * asked it to connect, and it may wait for hours, so it holds the
+		 * screen (and the "displaying over other apps" notice that comes with
+		 * the hold) only once a computer is connected.
 		 */
 		val holdsScreen: Boolean
-			get() = current?.run { sessionCode.isNotEmpty() && !stopped.get() && !paused } == true
+			get() = current?.run {
+				sessionCode.isNotEmpty() && !stopped.get() && !paused &&
+					(!sessionCode.startsWith(RENDEZVOUS_PREFIX) || status == "connected")
+			} == true
+
+		/** Mirrors rhrRendezvousPrefix in bridge/lib/session_code.dart. */
+		private const val RENDEZVOUS_PREFIX = "dev-"
 
 		// Latest session code / VM URI, surfaced in the native dev menu so the
 		// user can see them even after the guest app has taken the screen.

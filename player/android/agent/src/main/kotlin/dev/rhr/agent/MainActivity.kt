@@ -41,8 +41,9 @@ class MainActivity : Activity() {
 			gravity = Gravity.CENTER_VERTICAL
 			setPadding(padding, padding, padding, padding)
 			addView(status)
-			addView(restricted)
+			// Step 1 first; App info is the way out when step 3 is blocked.
 			addView(enable)
+			addView(restricted)
 		})
 	}
 
