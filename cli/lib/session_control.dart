@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'private_file.dart';
+import 'version.dart';
 
 /// How `rhr persist`, `rhr release` and `rhr mcp` reach an rhr session already
 /// holding the phone. The relay admits one host per phone, so a second
@@ -92,7 +93,12 @@ final class SessionControl {
   /// session publishes device control first and the VM once the app runs.
   void publish(Map<String, Object> endpoints) => writePrivateFile(
     _file,
-    jsonEncode({...endpoints, 'port': _server.port, 'token': token}),
+    jsonEncode({
+      ...endpoints,
+      'port': _server.port,
+      'token': token,
+      'version': rhrVersion,
+    }),
   );
 
   Future<void> close() async {
@@ -105,13 +111,15 @@ final class SessionControl {
 /// the tunneled VM service (null while the app is still being prepared), the
 /// loopback ports that open device-control and
 /// native-log channels to the phone, and the package the app runs in (absent
-/// for `rhr attach`, which does not know it).
+/// for `rhr attach`, which does not know it), and the rhr [version] the
+/// session runs (absent before 0.1.0-beta.30).
 typedef SessionEndpoints = ({
   String token,
   Uri? vm,
   int device,
   int logs,
   String? app,
+  String? version,
 });
 
 /// The endpoints of the session running for [project], or null when none has
@@ -136,6 +144,7 @@ SessionEndpoints? readSessionEndpoints(String project) {
         device: device,
         logs: logs,
         app: saved['app'] as String?,
+        version: saved['version'] as String?,
       );
     }
   } on Object {

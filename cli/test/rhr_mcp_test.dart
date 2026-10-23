@@ -76,4 +76,22 @@ void main() {
     expect(out, contains('"Evil\\nButton"'));
     expect(out, contains('id="a b"'));
   });
+
+  test('an exit record reads as a time and an age', () {
+    final now = DateTime(2026, 10, 23, 18);
+    final at = now.subtract(const Duration(hours: 18)).millisecondsSinceEpoch;
+    expect(
+      readableExit(
+        'rhr-exit time=$at pid=4242 reason=user_requested status=0 '
+        'description=null',
+        now: now,
+      ),
+      'rhr-exit the previous process ended 2026-10-23 00:00:00 (18 h ago): '
+      'reason=user_requested status=0 pid=4242',
+    );
+    expect(
+      readableExit('10-23 18:00:00.000 1 1 I flutter: hi'),
+      contains('flutter'),
+    );
+  });
 }

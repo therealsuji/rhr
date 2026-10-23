@@ -94,6 +94,9 @@ final class SigningKeyMismatch implements Exception {
 /// Reconnects reuse approvals; APK receipts independently validate build inputs.
 final class RunProgress {
   final approvedPlans = <String>{};
+
+  /// Whether this run has listed why the project needs its own app.
+  bool routeExplained = false;
   bool playerUpdateSubmitted = false;
 
   Completer<void>? _persist;
@@ -107,7 +110,11 @@ final class RunProgress {
   /// same phone comes back and the native fingerprint is unchanged, a
   /// reconnect reattaches without hashing the project and the APK again (over
   /// ten seconds on a real project). Another phone is verified from scratch.
-  ({String device, String native, String package, String player})? verifiedApp;
+  ///
+  /// [dart] is the Dart source the installed APK carries: an app relaunched
+  /// on a reconnect runs that, so it decides whether a hot restart is due.
+  ({String device, String native, String package, String player, String dart})?
+  verifiedApp;
 
   /// `rhr persist` sent to a running session: its next preparation installs
   /// a debug build of the current code, then attaches as usual. Completes
@@ -335,6 +342,7 @@ final class RunPreparation {
           'Android reported installation, but the expected APK is not installed.',
         );
       }
+      stderr.writeln('[rhr] Installed ${identity.package} on the phone.');
     } finally {
       _sender = null;
       sender.close();
@@ -390,7 +398,12 @@ final class RunPreparation {
             : 'This project will run as a separate debug app: it needs native '
                   'code the player does not include.',
       );
-      for (final reason in reasons) stderr.writeln('[rhr]   $reason');
+      // The reasons once per run: a reconnect reaches the same verdict, and
+      // repeating two dozen lines buries what changed.
+      if (!progress.routeExplained) {
+        progress.routeExplained = true;
+        for (final reason in reasons) stderr.writeln('[rhr]   $reason');
+      }
       final beacon = beaconPlayerFrom(info);
       if (beacon == null) {
         throw StateError(
@@ -407,17 +420,24 @@ final class RunPreparation {
           verified.native == native &&
           verified.player == player) {
         // A reconnect: this run already verified the installed app, and no
-        // native code changed since. Whether it still runs the current Dart
-        // is settled after attaching (see [RunProgress.liveApp]).
+        // native code changed since. An app that kept running is reloaded
+        // after attaching (see [RunProgress.liveApp]); one that starts again
+        // runs its APK's Dart, which needs a restart only if it is older
+        // than the project's. Assuming it always was cost a minute-long
+        // restart on every reconnect, into an app just built from this code.
         await _setup('beacon_setup');
         phase('launching', 'Reconnecting to ${verified.package}.');
         final launched = await request('launch', package: verified.package);
+        final dart = (await projectBuildIdentity(
+          project,
+          profile.flutter,
+        )).dart;
         return PreparedRun(
           Uri.parse(launched['vm'] as String),
           '',
           route,
           verified.package,
-          staleDart: true,
+          staleDart: verified.dart != dart,
         );
       }
       final projectInputs = await projectBuildIdentity(
@@ -493,7 +513,11 @@ final class RunPreparation {
 
       if (apk == null) {
         phase('building', 'Building your debug app.');
+        final clock = Stopwatch()..start();
         apk = await build();
+        stderr.writeln(
+          '[rhr] Built the debug app in ${clock.elapsed.inSeconds}s.',
+        );
       }
       // The package comes from the APK, not the Gradle file: a build type's
       // applicationIdSuffix only shows up in what Gradle produced.
@@ -535,6 +559,7 @@ final class RunPreparation {
         native: native,
         package: package,
         player: player,
+        dart: apkDart ?? '',
       );
       if (persist) {
         progress._settlePersist();
