@@ -15,6 +15,10 @@ import android.os.Looper
  * One question at a time. The [DevOverlay] paints it on whichever surface is
  * up (the player's Activity, or the system overlay above the tester's app),
  * and the first answer from any of them wins.
+ *
+ * A yes covers those exact bytes for the rest of the session: when the
+ * connection drops mid-transfer, the CLI sends the same APK again, and asking
+ * again for something already allowed only trains people to tap through.
  */
 object InstallConsent {
 	/**
@@ -25,16 +29,30 @@ object InstallConsent {
 	 */
 	private const val TIMEOUT_MS = 60_000L
 
-	class Request(val packageName: String, internal val onAnswer: (allowed: Boolean) -> Unit)
+	class Request(
+		val packageName: String,
+		internal val approval: String,
+		internal val onAnswer: (allowed: Boolean) -> Unit,
+	)
 
 	@Volatile var pending: Request? = null
 		private set
 
+	/** What the tester allowed: session, package and APK digest. */
+	private val allowed = mutableSetOf<String>()
+
+	/** The key a yes is remembered under. */
+	fun approval(session: String, packageName: String, sha256: String) =
+		"$session|$packageName|$sha256"
+
+	/** Whether the tester already allowed [approval] in this process. */
+	fun alreadyAllowed(approval: String): Boolean = synchronized(this) { approval in allowed }
+
 	private val main = Handler(Looper.getMainLooper())
 
 	/** Puts the question up, replacing any earlier one. [onAnswer] runs on the main thread. */
-	fun ask(packageName: String, onAnswer: (allowed: Boolean) -> Unit): Request {
-		val request = Request(packageName, onAnswer)
+	fun ask(packageName: String, approval: String, onAnswer: (allowed: Boolean) -> Unit): Request {
+		val request = Request(packageName, approval, onAnswer)
 		synchronized(this) { pending = request }
 		main.postDelayed({ answer(request, allowed = false) }, TIMEOUT_MS)
 		redraw()
@@ -46,6 +64,7 @@ object InstallConsent {
 		synchronized(this) {
 			if (pending !== request) return
 			pending = null
+			if (allowed) this.allowed += request.approval
 		}
 		redraw()
 		request.onAnswer(allowed)

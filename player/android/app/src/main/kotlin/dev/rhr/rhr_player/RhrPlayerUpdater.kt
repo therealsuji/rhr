@@ -22,7 +22,11 @@ import org.json.JSONObject
  *
  * Protocol (mirror of cli/lib/player_update.dart):
  *   {"t":"update_begin","id":N,"size":S,"sha256":H,
- *    "kind":"player"|"app","target":"<pkg>"}        -> answer "ready"
+ *    "kind":"player"|"app","target":"<pkg>",
+ *    "resume":true}                                  -> answer "ready",
+ *       with "offset": the bytes of this same APK still on disk from a
+ *       transfer the connection cut short. Kept only when the CLI says it
+ *       can start part-way; it then sends the APK from that byte.
  *   binary [op=4][4B id][chunk]                      -> append, ack (op 3)
  *   {"t":"update_commit","id":N}                     -> no more data is
  *       coming; verify once every byte has landed (the direct WebRTC path
@@ -89,6 +93,9 @@ class RhrPlayerUpdater(
 	private var finished = false
 	private var lastDataAt = 0L
 
+	/** Decoded bytes kept from an interrupted transfer of the same APK. */
+	private var resumeFrom = 0L
+
 
 	override fun handleBegin(message: JSONObject) {
 		val id = message.optInt("id")
@@ -115,7 +122,23 @@ class RhrPlayerUpdater(
 			return
 		}
 		synchronized(this) {
-			closeQuietly()
+			// The connection dropped mid-transfer and the same APK is coming
+			// again: keep what landed rather than receive it all a second time.
+			val partial = file?.length() ?: 0L
+			val resumable = message.optBoolean("resume") && !finished &&
+				sha == expectedSha256 && size == expectedSize && kind == installKind &&
+				(kind == "player" || target == installTarget) &&
+				partial in 1 until size
+			if (resumable) {
+				try { output?.close() } catch (_: Exception) {}
+				output = null
+				sink = null
+				resumeFrom = partial
+				Log.i(TAG, "update transfer resumes at $partial of $size bytes")
+			} else {
+				closeQuietly()
+				resumeFrom = 0L
+			}
 			consent?.let(InstallConsent::withdraw)
 			consent = null
 			installSessionId = null
@@ -125,7 +148,7 @@ class RhrPlayerUpdater(
 			installKind = kind
 			installTarget = if (kind == "app") target else context.packageName
 			RhrSessionService.foreignAppName = if (installTarget == AGENT_PACKAGE) "RHR Agent" else "your app"
-			received = 0
+			received = resumeFrom
 			commitRequested = false
 			finished = false
 			if (kind == "player") openFile()
@@ -140,8 +163,20 @@ class RhrPlayerUpdater(
 	 * yes opens the file and answers "ready"; the CLI sends nothing before.
 	 */
 	private fun askUser(id: Int, target: String) {
+		val approval = InstallConsent.approval(
+			RhrSessionService.currentCode, target, synchronized(this) { expectedSha256 },
+		)
+		if (InstallConsent.alreadyAllowed(approval)) {
+			// The same bytes again after a dropped transfer; already allowed.
+			synchronized(this) {
+				if (transferId != id || finished) return
+				openFile()
+			}
+			status(id, "ready")
+			return
+		}
 		status(id, "awaiting_approval")
-		val request = InstallConsent.ask(target) { allowed ->
+		val request = InstallConsent.ask(target, approval) { allowed ->
 			val accepted = synchronized(this) {
 				if (transferId != id || finished) return@ask
 				consent = null
@@ -184,10 +219,25 @@ class RhrPlayerUpdater(
 		// verification below is identical either way.
 		val hash = MessageDigest.getInstance("SHA-256")
 		digest = hash
+		// A resumed transfer appends to the bytes already here, which the
+		// digest has to cover too.
+		val kept = resumeFrom.takeIf { it > 0 && apk.length() == it } ?: 0L
+		if (kept > 0) {
+			apk.inputStream().use { input ->
+				val buffer = ByteArray(64 * 1024)
+				while (true) {
+					val read = input.read(buffer)
+					if (read < 0) break
+					hash.update(buffer, 0, read)
+				}
+			}
+		}
+		received = kept
 		// The dev always sends the APK gzipped. Counting and hashing sit
 		// at the FILE end of the chain, after decompression, and so does
 		// the size limit: a small gzip can inflate to fill the disk.
-		val counting = CountingSink(FileOutputStream(apk), hash, limit = expectedSize)
+		val counting = CountingSink(
+			FileOutputStream(apk, kept > 0), hash, limit = expectedSize, start = kept)
 		sink = counting
 		output = GzipSink(counting)
 	}
@@ -423,6 +473,7 @@ class RhrPlayerUpdater(
 		val payload = JSONObject().put("t", "update_status").put("id", id)
 			.put("state", state)
 		if (message != null) payload.put("message", message)
+		if (state == "ready") payload.put("offset", synchronized(this) { received })
 		try {
 			sendText(payload.toString())
 		} catch (e: Exception) {
@@ -598,8 +649,10 @@ internal class CountingSink(
     private val digest: MessageDigest,
     /** The announced APK size. Anything past it is not that APK. */
     private val limit: Long,
+    /** Bytes already in the file from an interrupted transfer. */
+    start: Long = 0L,
 ) : OutputStream() {
-    var written = 0L
+    var written = start
         private set
 
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
