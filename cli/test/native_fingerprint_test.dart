@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:rhr_cli/flutter_compatibility.dart';
 import 'package:rhr_cli/native_fingerprint.dart';
 import 'package:test/test.dart';
 
@@ -73,5 +74,21 @@ packages:
       {'name': 'battery_plus', 'path': '/x/.pub-cache/battery_plus-7.0.0/'},
     ]);
     expect(await nativeFingerprint(project.path), isNot(edited));
+  });
+
+  test('test sources never count as native code', () async {
+    final root = await Directory.systemTemp.createTemp('rhr-fp-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final unitTest = File(
+      '${root.path}/android/app/src/test/kotlin/FramingTest.kt',
+    );
+    await unitTest.parent.create(recursive: true);
+    await unitTest.writeAsString('first');
+    final before = await nativeFingerprint(root.path);
+    await unitTest.writeAsString('second');
+    expect(await nativeFingerprint(root.path), before);
+    expect(isTestSourceSet('test/kotlin/FramingTest.kt'), isTrue);
+    expect(isTestSourceSet('androidTest/java/X.java'), isTrue);
+    expect(isTestSourceSet('main/kotlin/MainActivity.kt'), isFalse);
   });
 }

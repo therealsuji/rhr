@@ -186,6 +186,11 @@ Future<void> main(List<String> args) async {
   if (args.isEmpty) args = ['run'];
   _invocation = args;
 
+  // A command with help of its own answers for itself.
+  if (args.first == 'update') {
+    exit(await runCliUpdate(args.skip(1).toList()));
+  }
+
   if (args.contains('-h') || args.contains('--help') || args.first == 'help') {
     stdout.write(_usage);
     exit(0);
@@ -212,10 +217,6 @@ Future<void> main(List<String> args) async {
     );
     await server.done;
     exit(0);
-  }
-
-  if (args.first == 'update') {
-    exit(await runCliUpdate(args.skip(1).toList()));
   }
 
   if (args.first == 'login') {
@@ -2312,11 +2313,22 @@ Future<int?> _runSession({
             stderr.writeln(
               '[rhr] the installed app has older Dart code; hot restarting',
             );
-            await trackHotRestart(
-              vmService: local,
-              trigger: () => Process.killPid(pid, ProcessSignal.sigusr2),
-              onProgress: reportProgress,
-            );
+            // Ready waits for Flutter's own "Restarted application": the new
+            // isolate exists a moment before Flutter has finished with it.
+            final restarted = reloadAsked = Completer<bool>();
+            try {
+              await trackHotRestart(
+                vmService: local,
+                trigger: () => Process.killPid(pid, ProcessSignal.sigusr2),
+                onProgress: reportProgress,
+              );
+              await restarted.future.timeout(
+                const Duration(seconds: 30),
+                onTimeout: () => false,
+              );
+            } finally {
+              if (identical(reloadAsked, restarted)) reloadAsked = null;
+            }
           } else if (sameApp) {
             // The app kept running through the reconnect. A reload brings in
             // edits made while disconnected and keeps its state.
@@ -2876,8 +2888,13 @@ Future<int> _runAttachProductFlow({
         stderr.writeln('[rhr] session error: $error');
       }
       final delay = reconnectBackoff.nextDelay();
+      // Drops are routine on a phone's network and the run recovers from
+      // them; say so, so the lines above do not read as the end.
       stderr.writeln(
-        '[rhr] reconnecting in ${delay.inSeconds}s (ctrl-c to quit)',
+        delay == Duration.zero
+            ? '[rhr] reconnecting to the phone; the session carries on'
+            : '[rhr] reconnecting to the phone in ${delay.inSeconds}s; the '
+                  'session carries on (ctrl-c to quit)',
       );
       await Future<void>.delayed(delay);
     }
@@ -3109,13 +3126,24 @@ Future<int> _devices(List<String> args) async {
       );
       return 0;
     }
+    // Which phone this project uses, when run inside one.
+    final mine = await preferredDevice(Directory.current.path);
     stdout.writeln('');
     for (final d in devices) {
       // The id is what --device and --remove take; so is a label, unless two
       // phones share it.
-      stdout.writeln('  ${d.id}  ${d.label}');
+      final marker = d.id == mine ? '  (this project)' : '';
+      stdout.writeln('  ${d.id}  ${d.label}$marker');
     }
     stdout.writeln('');
+    final labels = devices.map((d) => d.label).toList();
+    if (labels.toSet().length < labels.length) {
+      stdout.writeln(
+        'Phones with the same name are told apart by id. A reinstalled '
+        'player joins as a new one; remove the old entry with '
+        '`rhr devices --remove <id>`.',
+      );
+    }
     return 0;
   }
 

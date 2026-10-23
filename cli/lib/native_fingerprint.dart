@@ -32,6 +32,14 @@ Future<String> nativeFingerprint(String project) async {
     await for (final entry in directory.list(followLinks: false)) {
       final name = entry.uri.pathSegments.where((s) => s.isNotEmpty).last;
       if (_skipped.contains(name)) continue;
+      // A test source set never reaches the APK, so editing a test must not
+      // read as a native change.
+      if (entry is Directory &&
+          entry.parent.uri.pathSegments.where((s) => s.isNotEmpty).last ==
+              'src' &&
+          isTestSourceSet(name)) {
+        continue;
+      }
       if (entry is Directory) {
         await addTree(entry);
       } else if (entry is File) {

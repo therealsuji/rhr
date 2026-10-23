@@ -9,6 +9,7 @@ import 'package:vm_service/vm_service_io.dart';
 
 import 'device_control.dart';
 import 'session_control.dart';
+import 'version.dart';
 
 /// `rhr mcp`: lets a coding agent see, drive and debug the app on the user's
 /// phone, through the rhr session already holding that phone.
@@ -28,7 +29,7 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
   /// from [start] (see [findSessionProject]).
   RhrMcpServer(super.channel, {required this.start, this.project})
     : super.fromStreamChannel(
-        implementation: Implementation(name: 'rhr', version: '0.1.0'),
+        implementation: Implementation(name: 'rhr', version: rhrVersion),
         instructions: _instructions,
       ) {
     registerTool(_statusTool, _status);
@@ -109,6 +110,14 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
     final project = _project();
     final session = await _current();
     final lines = <String>[
+      // This server loads once, when the coding agent starts; `rhr update`
+      // replaces the CLI under it without replacing it.
+      switch (session.endpoints.version) {
+        final running? when running != rhrVersion =>
+          'rhr mcp: $rhrVersion, but the session runs rhr $running. '
+              'Restart your coding agent to load the same version.',
+        _ => 'rhr mcp: $rhrVersion',
+      },
       switch (session.endpoints.vm) {
         final vm? => 'session: running ($vm)',
         null =>
@@ -390,6 +399,7 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
       );
     }
     final lines = tail.lines
+        .map(readableExit)
         .where((line) => pattern == null || pattern.hasMatch(line))
         .toList();
     final count = (args['lines'] as num?)?.toInt() ?? 100;
@@ -417,7 +427,9 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
     final count = (request.arguments?['lines'] as num?)?.toInt() ?? 200;
     // Why the previous process ended is the first line of the stream, and
     // the one most worth keeping.
-    final exits = errors.where((l) => l.startsWith('rhr-exit '));
+    final exits = errors
+        .where((l) => l.startsWith('rhr-exit '))
+        .map(readableExit);
     final rest = errors.where((l) => !l.startsWith('rhr-exit ')).toList();
     final recent = rest.skip(rest.length > count ? rest.length - count : 0);
     return _text(
@@ -789,12 +801,15 @@ final class LogTail {
     if (_lines.length > capacity) _lines.removeFirst();
   }
 
-  /// Waits for the opening burst to finish: 300 ms without a line, or 3 s.
+  /// Waits for the opening burst to finish: 300 ms without a line once the
+  /// log itself has started, or 4 s. The beacon sends its exit record first
+  /// and starts logcat after, so quiet after that one line is not the end of
+  /// the burst; answering then gave a first call with nothing else in it.
   Future<void> settled() async {
-    final deadline = DateTime.now().add(const Duration(seconds: 3));
+    final deadline = DateTime.now().add(const Duration(seconds: 4));
     while (!isClosed && DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
-      if (_lines.isNotEmpty &&
+      if (_lines.any((line) => !line.startsWith('rhr-exit ')) &&
           DateTime.now().difference(_lastLine) >
               const Duration(milliseconds: 300)) {
         return;
@@ -878,6 +893,35 @@ Iterable<String> treeTexts(Map<String, dynamic> tree) sync* {
 }
 
 String _round(num value) => ((value * 1000).round() / 1000).toString();
+
+/// The beacon's exit record with its time made readable, how long ago it
+/// was, and no empty fields; any other line unchanged. An epoch in
+/// milliseconds said nothing about whether the exit was this session's or
+/// yesterday's.
+String readableExit(String line, {DateTime? now}) {
+  if (!line.startsWith('rhr-exit ')) return line;
+  final fields = <String, String>{
+    for (final match in RegExp(r'(\w+)=(\S*)').allMatches(line))
+      match.group(1)!: match.group(2)!,
+  };
+  final at = int.tryParse(fields['time'] ?? '');
+  if (at == null) return line;
+  final when = DateTime.fromMillisecondsSinceEpoch(at);
+  final ago = (now ?? DateTime.now()).difference(when);
+  final age = ago.inDays > 0
+      ? '${ago.inDays} d'
+      : ago.inHours > 0
+      ? '${ago.inHours} h'
+      : '${ago.inMinutes} min';
+  final detail = [
+    for (final key in ['reason', 'status', 'pid', 'description'])
+      if (fields[key] case final value?
+          when value.isNotEmpty && value != 'null')
+        '$key=$value',
+  ].join(' ');
+  final stamp = when.toIso8601String().substring(0, 19).replaceFirst('T', ' ');
+  return 'rhr-exit the previous process ended $stamp ($age ago): $detail';
+}
 
 /// The error-worthy lines of a logcat threadtime tail: error and fatal
 /// priority, the whole of each Flutter exception report (which Flutter prints

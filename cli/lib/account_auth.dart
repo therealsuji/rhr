@@ -459,6 +459,10 @@ Future<String?> preferredDevice(String project) async {
     final value = (await legacy.readAsString()).trim();
     await legacy.delete();
     if (value.isNotEmpty) await rememberDevice(project, value);
+    stderr.writeln(
+      '[rhr] Moved .rhr-device to .dart_tool/rhr/device, with the rest of '
+      "rhr's project state.",
+    );
   }
   final file = _preferredDeviceFile(project);
   if (!file.existsSync()) return null;

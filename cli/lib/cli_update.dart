@@ -231,8 +231,16 @@ Future<int> runCliUpdate(
   void Function(String)? output,
 }) async {
   final write = output ?? stdout.writeln;
+  const usage =
+      'Usage: rhr update [--check]\n\n'
+      'Installs the newest published rhr release, after checking that its tag\n'
+      'is signed by the release key. --check only reports whether there is one.';
+  if (args.length == 1 && (args.single == '-h' || args.single == '--help')) {
+    write(usage);
+    return 0;
+  }
   if (args.isNotEmpty && (args.length != 1 || args.single != '--check')) {
-    write('Usage: rhr update [--check]');
+    write(usage);
     return 64;
   }
   try {

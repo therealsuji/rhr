@@ -478,6 +478,10 @@ List<String> readUnsupportedAndroidInputs(String project) {
       '.so',
     };
     for (final file in sourceRoot.listSync(recursive: true).whereType<File>()) {
+      // Unit and instrumented tests never reach the APK.
+      if (isTestSourceSet(file.path.substring(sourceRoot.path.length + 1))) {
+        continue;
+      }
       final name = file.uri.pathSegments.last;
       final extension = name.contains('.')
           ? '.${name.split('.').last.toLowerCase()}'
@@ -505,6 +509,14 @@ List<String> readUnsupportedAndroidInputs(String project) {
 
   unsupported.sort();
   return List.unmodifiable(unsupported);
+}
+
+/// Whether [pathInSrc], a path relative to an Android `src` folder, is in a
+/// test source set (`test`, `androidTest`, `testDebug`, ...), which Gradle
+/// never packages into the app.
+bool isTestSourceSet(String pathInSrc) {
+  final sourceSet = pathInSrc.split('/').first;
+  return sourceSet.startsWith('test') || sourceSet.startsWith('androidTest');
 }
 
 bool _isTemplateMainActivity(String source) {
