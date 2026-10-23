@@ -226,7 +226,9 @@ final class RunPreparation {
           'Phone setup is still incomplete. Complete it in RHR, then run rhr again.',
         );
       }
-      await _connected(Future<void>.delayed(const Duration(seconds: 3)));
+      // Short, so the setup banner goes as soon as the user is done: a check
+      // is one small control message.
+      await _connected(Future<void>.delayed(const Duration(seconds: 1)));
     }
   }
 

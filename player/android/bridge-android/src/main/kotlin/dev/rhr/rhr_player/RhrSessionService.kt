@@ -222,6 +222,9 @@ class RhrSessionService : Service() {
 					(!sessionCode.startsWith(RENDEZVOUS_PREFIX) || status == "connected")
 			} == true
 
+		/** How long a confirmation such as "App updated" stays up. */
+		private const val CONFIRMATION_MS = 800L
+
 		/** Mirrors rhrRendezvousPrefix in bridge/lib/session_code.dart. */
 		private const val RENDEZVOUS_PREFIX = "dev-"
 
@@ -318,6 +321,15 @@ class RhrSessionService : Service() {
 		 * finished transfer, so the updater reports them locally.
 		 */
 		fun setInstallPhase(phase: String) = setProgress(phase, 0, 0)
+
+		/**
+		 * Ends [phase] now, because the phone saw it finish. The computer says
+		 * what comes next, but only after its own work (attaching Flutter, a
+		 * restart), and the banner should not outlive the event it names.
+		 */
+		fun finishPhase(phase: String) {
+			if (progressPhase == phase) setProgress("", 0, 0)
+		}
 
 		/** An install that died on this phone, with the reason it died. */
 		fun setInstallFailed(message: String) {
@@ -1176,10 +1188,13 @@ class RhrSessionService : Service() {
 							try {
 								val o = JSONObject(text)
 								progressMessage = o.optString("message", "")
-								setProgress(
-									o.optString("phase", ""),
-									o.optInt("done", 0),
-									o.optInt("total", 0))
+								val phase = o.optString("phase", "")
+								setProgress(phase, o.optInt("done", 0), o.optInt("total", 0))
+								// "App updated" is a confirmation, not a state: a
+								// glance, then out of the way.
+								if (phase == "reload_complete") {
+									main.postDelayed({ finishPhase("reload_complete") }, CONFIRMATION_MS)
+								}
 							} catch (_: Exception) {}
 						}
 					}

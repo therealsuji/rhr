@@ -2213,8 +2213,9 @@ Future<int?> _runSession({
       }
     }
     if (event == FlutterReloadEvent.completed) {
+      // A player clears "App updated" on its own; this covers older ones.
       reloadFeedbackTimer = Timer(
-        const Duration(seconds: 2),
+        const Duration(milliseconds: 800),
         () => reportProgress('ready', 0, 0),
       );
     }

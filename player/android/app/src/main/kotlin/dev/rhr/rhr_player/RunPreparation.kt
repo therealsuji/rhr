@@ -76,6 +76,8 @@ object RunPreparation {
 						val vm = launchWithBeacon(context, pkg)
 						if (!isCurrent()) return@Thread
 						selectVm(vm, pkg)
+						// The app is open and has reported in: "Opening" is over.
+						RhrSessionService.finishPhase("launching")
 						// The user may close and reopen the app; its VM then
 						// listens on a new port, and the beacon reports it.
 						Beacons.onAnnounce = { reported, address ->
