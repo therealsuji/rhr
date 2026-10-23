@@ -115,10 +115,14 @@ UpdateStatus compareVersions({
 }
 
 /// The part of a release body worth reading on a phone: what changed, as
-/// plain text. Everything after the first `---` is the same install blurb on
-/// every release, and Markdown markers read as noise outside a renderer.
+/// plain text. Notes are written above a `---` line; below it, and in a
+/// release with no notes, is the install blurb every release carries, which
+/// says nothing about this one. Markdown markers read as noise outside a
+/// renderer.
 String releaseNotes(String body) {
-  final changes = body.split(RegExp(r'^---\s*$', multiLine: true)).first;
+  final parts = body.split(RegExp(r'^---\s*$', multiLine: true));
+  if (parts.length < 2) return '';
+  final changes = parts.first;
   return changes
       .replaceAll('\r', '')
       .replaceAll(RegExp(r'^#+\s*', multiLine: true), '')

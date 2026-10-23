@@ -92,6 +92,8 @@ void main() {
       releaseNotes(body),
       "What's new in beta.27\n\nPlayer\n• Set up RHR Agent from the phone.",
     );
+    // A release with no notes carries only the blurb, which is not news.
+    expect(releaseNotes('**rhr player** — the generic Flutter shell.'), '');
   });
 }
 

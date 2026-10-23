@@ -1172,8 +1172,8 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
               child: Text(
                 '${notes.isEmpty ? '' : '$notes\n\n'}'
                 'This phone has $installed. The update downloads here, then '
-                'Android asks before installing it. Your account and setup '
-                'stay as they are.',
+                'Android asks before installing it; Play Protect may ask to '
+                'scan it first. Your account and setup stay as they are.',
                 style: const TextStyle(
                   color: _inkDim,
                   fontSize: 13.5,
