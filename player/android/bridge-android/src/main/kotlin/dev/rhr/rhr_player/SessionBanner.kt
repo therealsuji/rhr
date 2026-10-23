@@ -116,12 +116,16 @@ data class SessionBanner(
 				null,
 				Style.BUSY)
 
-			"update_failed" -> SessionBanner(
-				if (message.isEmpty()) "Update failed — check your terminal"
-				else "Update failed: $message",
-				0,
-				Style.FAILED,
-				failure = message)
+			"update_failed" -> {
+				// The same phase ends a player update and the install of an app,
+				// which is often a first install rather than an update.
+				val what = if (foreignApp) "Install failed" else "Update failed"
+				SessionBanner(
+					if (message.isEmpty()) "$what — check your terminal" else "$what: $message",
+					0,
+					Style.FAILED,
+					failure = message)
+			}
 
 			"syncing" -> SessionBanner("Syncing your app…", null, Style.BUSY)
 

@@ -119,6 +119,39 @@ void main() {
     sender.close();
   });
 
+  test('a device that kept part of the APK gets only the rest', () async {
+    final transport = _FakeTransport();
+    final sender = PlayerUpdateSender(transport);
+    final done = sender.send(apk);
+    await _pumpUntil(() => transport.sentText.isNotEmpty);
+    final begin = transport.sentText.single;
+    // The sender says it can start part-way, or no device may keep bytes.
+    expect(begin['resume'], isTrue);
+    final id = begin['id'] as int;
+    final kept = apkBytes.length ~/ 3;
+    sender.handleMessage({
+      't': 'update_status',
+      'id': id,
+      'state': 'ready',
+      'offset': kept,
+    });
+    await _pumpUntil(
+      () => transport.sentText.any((m) => m['t'] == 'update_commit'),
+    );
+    final streamed = BytesBuilder();
+    for (final frame in transport.sentFrames) {
+      streamed.add(frame.payload);
+    }
+    expect(gzip.decode(streamed.toBytes()), apkBytes.sublist(kept));
+    sender.handleMessage({
+      't': 'update_status',
+      'id': id,
+      'state': 'committed',
+    });
+    expect(await done, PlayerUpdateOutcome.committed);
+    sender.close();
+  });
+
   test('pending_user surfaces as its own outcome', () async {
     final transport = _FakeTransport();
     final sender = PlayerUpdateSender(transport);

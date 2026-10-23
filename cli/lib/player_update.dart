@@ -4,9 +4,13 @@
 // via Android's PackageInstaller and rejoins the session.
 //
 // Wire protocol (dev → device unless noted):
-//   {"t":"update_begin","id":N,"size":S,"sha256":H}   announce the transfer
+//   {"t":"update_begin","id":N,"size":S,"sha256":H,"resume":true}
+//                                                     announce the transfer
 //   {"t":"update_status","id":N,"state":...}          device → dev acks:
-//       "ready"         updater accepted the transfer, chunks may flow
+//       "ready"         updater accepted the transfer, chunks may flow;
+//                       "offset" is how much of this same APK the device
+//                       kept from a transfer the connection cut short, and
+//                       the gzip stream starts at that byte of the APK
 //       "committed"     APK verified; installation is being requested
 //       "pending_user"  Android is showing the install confirmation sheet
 //       "failure"       verification or install failed ("message" says why)
@@ -191,6 +195,9 @@ final class PlayerUpdateSender {
   Completer<void>? _stateArrived;
   var _closed = false;
 
+  /// Bytes of the APK the device already holds, from its "ready".
+  var _readyOffset = 0;
+
   /// Feed one decoded text message from the transport stream. Returns true
   /// when the message belonged to this transfer (callers skip their own
   /// handling for those). opAck binary frames for the transfer id must also
@@ -228,6 +235,10 @@ final class PlayerUpdateSender {
         'sha256': digest.toString(),
         'kind': kind.name,
         if (target.isNotEmpty) 'target': target,
+        // A connection that drops mid-transfer used to cost the whole APK
+        // again on every reconnect, so a flaky one never finished. This
+        // sender can start part-way, so the device may keep what it has.
+        'resume': true,
       }),
     );
     final answer = await _awaitState(
@@ -239,7 +250,9 @@ final class PlayerUpdateSender {
       // The phone asks the tester before it accepts an app it did not ask
       // for, and gives them a minute to answer; this waits a little longer
       // so the phone's own verdict arrives first.
-      stderr.writeln('[rhr] waiting for the install to be allowed on the phone');
+      stderr.writeln(
+        '[rhr] waiting for the install to be allowed on the phone',
+      );
       await _awaitState(
         {'ready'},
         timeout: const Duration(seconds: 75),
@@ -260,17 +273,25 @@ final class PlayerUpdateSender {
     // there: the phone showed a finished transfer as half done.
     // Compressing first costs one pass over a file that was just written
     // (so it is in page cache) and buys a total the bar can actually reach.
+    final offset = _readyOffset.clamp(0, size);
+    if (offset > 0) {
+      stderr.writeln(
+        '[rhr] resuming the transfer at ${_mb(offset)} of ${_mb(size)} MB',
+      );
+    }
     stderr.writeln('[rhr] compressing the transfer (gzip)');
     final compressed = File(
       '${Directory.systemTemp.createTempSync('rhr_update').path}/payload.gz',
     );
-    await apk.openRead().transform(gzip.encoder).pipe(compressed.openWrite());
+    await apk
+        .openRead(offset)
+        .transform(gzip.encoder)
+        .pipe(compressed.openWrite());
     final payload = compressed;
     // What the bar measures: the bytes that actually cross the wire.
     final wireSize = payload.lengthSync();
     stderr.writeln(
-      '[rhr] compressed ${(size / (1024 * 1024)).toStringAsFixed(1)} MB to '
-      '${(wireSize / (1024 * 1024)).toStringAsFixed(1)} MB',
+      '[rhr] compressed ${_mb(size - offset)} MB to ${_mb(wireSize)} MB',
     );
 
     var sent = 0;
@@ -357,6 +378,10 @@ final class PlayerUpdateSender {
       final status = _pendingStates.removeAt(0);
       final state = status['state'];
       if (state is! String) continue;
+      if (state == 'ready') {
+        final offset = status['offset'];
+        _readyOffset = offset is int ? offset : 0;
+      }
       if (accepted.contains(state)) {
         return state;
       }
@@ -389,3 +414,5 @@ final class PlayerUpdateSender {
     _stateArrived = null;
   }
 }
+
+String _mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(1);
