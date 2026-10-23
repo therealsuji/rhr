@@ -323,6 +323,12 @@ class MainActivity : FlutterActivity() {
 					AgentSetup.open(this)
 					result.success(null)
 				}
+				// The player's own update, downloaded and installed from the lobby.
+				"updatePlayer" -> {
+					PlayerUpdate.start(this, call.argument<String>("version").orEmpty())
+					result.success(null)
+				}
+				"playerUpdateState" -> result.success(PlayerUpdate.state())
 				// Whether Android lets the player install apps yet, so an
 				// agent install interrupted by that permission can carry on.
 				"canInstallPackages" -> result.success(packageManager.canRequestPackageInstalls())

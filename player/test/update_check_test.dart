@@ -57,7 +57,10 @@ void main() {
 
     test('whitespace around either side does not matter', () {
       expect(
-        compareVersions(installed: ' 0.1.0-beta.8 ', latestTag: ' v0.1.0-beta.8 '),
+        compareVersions(
+          installed: ' 0.1.0-beta.8 ',
+          latestTag: ' v0.1.0-beta.8 ',
+        ),
         isA<UpToDate>(),
       );
     });
@@ -67,7 +70,7 @@ void main() {
     test('a network failure is reported, not swallowed', () async {
       final status = await checkForUpdate(
         installedVersion: () async => '0.1.0-beta.8',
-        fetchTag: () async => throw const SocketExceptionStub(),
+        fetchRelease: () async => throw const SocketExceptionStub(),
       );
       expect(status, isA<UpdateCheckFailed>());
     });
@@ -75,10 +78,20 @@ void main() {
     test('a successful check compares what it fetched', () async {
       final status = await checkForUpdate(
         installedVersion: () async => '0.1.0-beta.7',
-        fetchTag: () async => 'v0.1.0-beta.8',
+        fetchRelease: () async => (tag: 'v0.1.0-beta.8', notes: ''),
       );
       expect(status, isA<UpdateAvailable>());
     });
+  });
+
+  test('release notes keep what changed and drop the install blurb', () {
+    const body =
+        '## What\'s new in beta.27\n\n**Player**\n- Set up `RHR Agent` from the phone.\n\n'
+        '---\n\n**rhr player** — the generic Flutter shell.';
+    expect(
+      releaseNotes(body),
+      "What's new in beta.27\n\nPlayer\n• Set up RHR Agent from the phone.",
+    );
   });
 }
 
