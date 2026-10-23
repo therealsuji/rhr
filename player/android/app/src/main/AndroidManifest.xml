@@ -118,6 +118,10 @@
         <receiver
             android:name=".UpdateResultReceiver"
             android:exported="false" />
+        <!-- PackageInstaller callback for a player update downloaded in the lobby. -->
+        <receiver
+            android:name=".PlayerInstallReceiver"
+            android:exported="false" />
         <!-- PackageInstaller callback for installing RHR Agent from the lobby. -->
         <receiver
             android:name=".AgentInstallReceiver"

@@ -23,7 +23,6 @@ import 'package:rhr_bridge/session_link.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import 'account_join.dart';
 import 'session_code_field.dart';
@@ -103,6 +102,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// "on". Null until read, and off Android.
   String? _agent;
   bool _installingAgent = false;
+
+  /// The release a player update was waiting on the install permission for.
+  String? _updateAfterPermission;
 
   /// Set when an agent install sent the user to allow installs: coming back
   /// with that allowed carries on with the install rather than asking for a
@@ -349,6 +351,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       // Back from Android's installer or the accessibility switch.
       _readAccounts();
       _continueAgentInstall();
+      _continuePlayerUpdate();
       // Pass the current VM URI along: iOS has no logcat watcher, so the
       // native service re-announces from this. Android ignores the arg and
       // discovers the URI from logcat itself.
@@ -575,7 +578,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   void _tell(String message) {
     if (!mounted) return;
     if (!_active) setState(() => _status = message);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// Whether this phone is waiting on its account rendezvous, rather than on
@@ -586,9 +591,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// no other can connect until Resume. Disconnecting would only have the
   /// phone wait for them again at once.
   Future<void> _pauseOrResume() async {
-    await _session.invokeMethod(
-      _nativeStatus == 'paused' ? 'resume' : 'pause',
-    );
+    await _session.invokeMethod(_nativeStatus == 'paused' ? 'resume' : 'pause');
   }
 
   /// A scan carries its own relay when the host's QR named one; a typed code
@@ -1132,27 +1135,64 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     (Icons.refresh_rounded, 'Reset state', 'clear'),
   ];
 
-  /// Says what the check found, and offers the release page when there is
-  /// something to go and get.
-  ///
-  /// Opening the browser rather than downloading here is deliberate: the APK
-  /// is over 100 MB, and Chrome already handles a transfer that size, with
-  /// resume, better than a first attempt in this app would.
+  /// Says what the check found. A newer release shows what changed and
+  /// installs from here: the player downloads it, and Android asks.
   void _showUpdateResult(UpdateStatus status) {
-    final (title, body, showOpen) = switch (status) {
+    if (status case UpdateAvailable(
+      :final installed,
+      :final latest,
+      :final notes,
+    )) {
+      showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: _surface,
+          title: Text(
+            'Update to $latest',
+            style: const TextStyle(color: _ink, fontSize: 17),
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 360),
+            child: SingleChildScrollView(
+              child: Text(
+                '${notes.isEmpty ? '' : '$notes\n\n'}'
+                'This phone has $installed. The update downloads here, then '
+                'Android asks before installing it. Your account and setup '
+                'stay as they are.',
+                style: const TextStyle(
+                  color: _inkDim,
+                  fontSize: 13.5,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: TextButton.styleFrom(foregroundColor: _inkDim),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _updatePlayer(latest);
+              },
+              style: FilledButton.styleFrom(backgroundColor: _violet),
+              child: const Text('Update'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    final (title, body) = switch (status) {
       UpToDate(:final version) => (
         'Up to date',
         'This phone is running the newest player ($version).',
-        false,
       ),
-      UpdateAvailable(:final installed, :final latest) => (
-        'Update available',
-        'This phone has $installed. The newest release is $latest.\n\n'
-            'Opening the release page downloads the APK; Android will ask '
-            'before installing it.',
-        true,
-      ),
-      UpdateCheckFailed(:final reason) => ('Could not check', reason, false),
+      UpdateCheckFailed(:final reason) => ('Could not check', reason),
+      UpdateAvailable() => throw StateError('handled above'),
     };
     showDialog<void>(
       context: context,
@@ -1167,23 +1207,45 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
             style: TextButton.styleFrom(foregroundColor: _inkDim),
-            child: Text(showOpen ? 'Not now' : 'OK'),
+            child: const Text('OK'),
           ),
-          if (showOpen)
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                launchUrl(
-                  Uri.parse(releasesPage),
-                  mode: LaunchMode.externalApplication,
-                );
-              },
-              style: TextButton.styleFrom(foregroundColor: _violet),
-              child: const Text('Open releases'),
-            ),
         ],
       ),
     );
+  }
+
+  /// Downloads [version] and hands it to Android, showing how far along it
+  /// is. Hiding the dialog leaves the download running; asking again shows
+  /// it.
+  Future<void> _updatePlayer(String version) async {
+    await _connector.invokeMethod<void>('updatePlayer', {'version': version});
+    if (!mounted) return;
+    final outcome = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _PlayerUpdateDialog(version: version),
+    );
+    if (!mounted) return;
+    if (outcome == 'permission') {
+      _updateAfterPermission = version;
+      _tell(
+        'Allow RHR Player to install apps. The update carries on when you '
+        'come back.',
+      );
+    } else if (outcome == 'retry') {
+      await _updatePlayer(version);
+    }
+  }
+
+  /// Back from allowing installs: the update the user started goes on.
+  Future<void> _continuePlayerUpdate() async {
+    final version = _updateAfterPermission;
+    if (version == null) return;
+    if (await _connector.invokeMethod<bool>('canInstallPackages') != true) {
+      return;
+    }
+    _updateAfterPermission = null;
+    if (mounted) await _updatePlayer(version);
   }
 
   void _showDebugSheet() {
@@ -1418,6 +1480,119 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
           fontFamily: 'monospace',
         ),
       ),
+    );
+  }
+}
+
+/// How a player update is going, read from the native side while it runs.
+class _PlayerUpdateDialog extends StatefulWidget {
+  const _PlayerUpdateDialog({required this.version});
+
+  final String version;
+
+  @override
+  State<_PlayerUpdateDialog> createState() => _PlayerUpdateDialogState();
+}
+
+class _PlayerUpdateDialogState extends State<_PlayerUpdateDialog> {
+  Timer? _poll;
+  String _phase = 'downloading';
+  int _done = 0;
+  int _total = -1;
+  String? _problem;
+
+  @override
+  void initState() {
+    super.initState();
+    _read();
+    _poll = Timer.periodic(const Duration(milliseconds: 400), (_) => _read());
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _read() async {
+    final state = await _connector.invokeMapMethod<String, Object?>(
+      'playerUpdateState',
+    );
+    if (!mounted || state == null) return;
+    final phase = state['phase'] as String? ?? 'idle';
+    if (phase == 'permission') {
+      Navigator.of(context).pop('permission');
+      return;
+    }
+    setState(() {
+      _phase = phase;
+      _done = (state['done'] as num?)?.toInt() ?? 0;
+      _total = (state['total'] as num?)?.toInt() ?? -1;
+      _problem = state['problem'] as String?;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    String mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(0);
+    final (text, progress) = switch (_phase) {
+      'downloading' when _total > 0 => (
+        'Downloading ${mb(_done)} of ${mb(_total)} MB',
+        _done / _total,
+      ),
+      'downloading' => ('Downloading…', null),
+      'verifying' => ('Checking the download…', null),
+      'installing' => ('Android is asking to install the update.', null),
+      'failed' => (_problem ?? 'The update stopped.', 0.0),
+      _ => ('Starting…', null),
+    };
+    final failed = _phase == 'failed';
+    return AlertDialog(
+      backgroundColor: _LobbyScreenState._surface,
+      title: Text(
+        'Updating to ${widget.version}',
+        style: const TextStyle(color: _LobbyScreenState._ink, fontSize: 17),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            text,
+            style: TextStyle(
+              color: failed
+                  ? _LobbyScreenState._err
+                  : _LobbyScreenState._inkDim,
+              fontSize: 13.5,
+              height: 1.4,
+            ),
+          ),
+          if (!failed) ...[
+            const SizedBox(height: 14),
+            LinearProgressIndicator(
+              value: progress,
+              color: _violetColor,
+              backgroundColor: _LobbyScreenState._surfaceHi,
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          style: TextButton.styleFrom(
+            foregroundColor: _LobbyScreenState._inkDim,
+          ),
+          // The download carries on behind a hidden dialog.
+          child: Text(failed || _phase == 'installing' ? 'Close' : 'Hide'),
+        ),
+        if (failed)
+          TextButton(
+            onPressed: () => Navigator.of(context).pop('retry'),
+            style: TextButton.styleFrom(foregroundColor: _violetColor),
+            child: const Text('Try again'),
+          ),
+      ],
     );
   }
 }

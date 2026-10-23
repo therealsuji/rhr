@@ -1,22 +1,16 @@
 package dev.rhr.rhr_player
 
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityManager
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.MessageDigest
 
 /**
  * Puts RHR Agent on the phone from the player itself, so agent control is
@@ -31,7 +25,6 @@ internal object AgentSetup {
 	const val PACKAGE = "dev.rhr.agent"
 	private const val TAG = "rhr_agent_setup"
 	private const val MAX_APK_BYTES = 64L shl 20
-	private const val RELEASES = "https://github.com/therealsuji/rhr/releases/download"
 
 	/**
 	 * "missing", "untrusted" (signed with another key), "outdated" (from an
@@ -50,7 +43,7 @@ internal object AgentSetup {
 		// Releases stamp the player and the agent with one build number. An
 		// agent built locally carries none, and is whatever its builder meant.
 		val player = packages.getPackageInfo(context.packageName, 0)
-		if (agent.versionName != LOCAL_BUILD && agent.longVersionCodeCompat() < player.longVersionCodeCompat()) {
+		if (agent.versionName != LOCAL_BUILD && ReleaseApk.versionCode(agent) < ReleaseApk.versionCode(player)) {
 			return "outdated"
 		}
 		val accessibility = context.getSystemService(AccessibilityManager::class.java)
@@ -75,16 +68,21 @@ internal object AgentSetup {
 			return "Allow RHR Player to install apps. The install carries on when you come back."
 		}
 		val version = packages.getPackageInfo(context.packageName, 0).versionName ?: ""
-		val apk = File(context.cacheDir, "rhr-agent.apk")
+		val apk = File(context.cacheDir, "rhr-agent.apk").apply { delete() }
 		try {
-			download(URL("$RELEASES/v$version/rhr-agent-$version.apk"), apk)
-				?.let { return it.replace("{version}", version) }
-			val archive = archiveInfo(packages, apk)
+			ReleaseApk.download(ReleaseApk.url(version, "rhr-agent-$version.apk"), apk, MAX_APK_BYTES)
+				?.let { problem ->
+					return if (problem.startsWith("Not found")) {
+						"No RHR Agent is published for player $version. A player you built yourself " +
+							"needs RHR Agent built with the same key; install it with rhr mcp's install_agent."
+					} else problem
+				}
+			val archive = ReleaseApk.archiveInfo(context, apk)
 			if (archive?.packageName != PACKAGE) return "The download is not RHR Agent. Try again later."
-			if (certificates(archive) != certificates(ownInfo(context))) {
+			if (!ReleaseApk.signedLikePlayer(context, archive)) {
 				return "The downloaded RHR Agent is not signed like this player, so it was not installed."
 			}
-			commit(context, apk)
+			ReleaseApk.commit(context, apk, PACKAGE, Intent(context, AgentInstallReceiver::class.java))
 			return null
 		} catch (e: Exception) {
 			Log.w(TAG, "agent install failed: $e")
@@ -97,10 +95,6 @@ internal object AgentSetup {
 	/** The agent's versionName when it was not built by a release. */
 	private const val LOCAL_BUILD = "0.0.0-dev"
 
-	@Suppress("DEPRECATION")
-	private fun PackageInfo.longVersionCodeCompat(): Long =
-		if (Build.VERSION.SDK_INT >= 28) longVersionCode else versionCode.toLong()
-
 	/** Opens the agent's screen, which walks the user to its switch. */
 	fun open(context: Context) {
 		context.startActivity(
@@ -108,86 +102,6 @@ internal object AgentSetup {
 				.setClassName(PACKAGE, "$PACKAGE.MainActivity")
 				.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
 		)
-	}
-
-	/** Null when [to] holds the APK, or the reason it does not. */
-	private fun download(url: URL, to: File): String? {
-		val connection = url.openConnection() as HttpURLConnection
-		connection.connectTimeout = 15_000
-		connection.readTimeout = 30_000
-		try {
-			when (connection.responseCode) {
-				200 -> Unit
-				404 -> return "No RHR Agent is published for player {version}. A player you built " +
-					"yourself needs RHR Agent built with the same key; install it with rhr mcp's install_agent."
-				else -> return "GitHub answered ${connection.responseCode}. Try again later."
-			}
-			if (connection.contentLengthLong > MAX_APK_BYTES) return "The download is too large to be RHR Agent."
-			connection.inputStream.use { input ->
-				to.outputStream().use { output ->
-					val buffer = ByteArray(64 * 1024)
-					var total = 0L
-					while (true) {
-						val read = input.read(buffer)
-						if (read < 0) break
-						total += read
-						if (total > MAX_APK_BYTES) return "The download is too large to be RHR Agent."
-						output.write(buffer, 0, read)
-					}
-				}
-			}
-			return null
-		} finally {
-			connection.disconnect()
-		}
-	}
-
-	private fun commit(context: Context, apk: File) {
-		val installer = context.packageManager.packageInstaller
-		val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-			.apply {
-				setAppPackageName(PACKAGE)
-				setSize(apk.length())
-			}
-		val sessionId = installer.createSession(params)
-		installer.openSession(sessionId).use { session ->
-			session.openWrite("rhr-agent.apk", 0, apk.length()).use { out ->
-				apk.inputStream().use { it.copyTo(out) }
-				session.fsync(out)
-			}
-			val pending = PendingIntent.getBroadcast(
-				context,
-				sessionId,
-				Intent(context, AgentInstallReceiver::class.java),
-				PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-			)
-			session.commit(pending.intentSender)
-		}
-	}
-
-	private fun ownInfo(context: Context): PackageInfo =
-		context.packageManager.getPackageInfo(context.packageName, signingFlags())
-
-	private fun archiveInfo(packages: PackageManager, apk: File): PackageInfo? =
-		packages.getPackageArchiveInfo(apk.path, signingFlags())
-
-	@Suppress("DEPRECATION")
-	private fun signingFlags(): Int =
-		if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES
-		else PackageManager.GET_SIGNATURES
-
-	/** SHA-256 of each signing certificate, as a set to compare. */
-	@Suppress("DEPRECATION")
-	private fun certificates(info: PackageInfo): Set<String> {
-		val signatures = if (Build.VERSION.SDK_INT >= 28) {
-			info.signingInfo?.apkContentsSigners
-		} else {
-			info.signatures
-		} ?: return emptySet()
-		val sha = MessageDigest.getInstance("SHA-256")
-		return signatures.map { signature ->
-			sha.digest(signature.toByteArray()).joinToString("") { "%02x".format(it) }
-		}.toSet()
 	}
 }
 
