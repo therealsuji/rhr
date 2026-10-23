@@ -38,6 +38,7 @@ const _relayUrl = String.fromEnvironment(
 const _preferDirect = bool.fromEnvironment('RHR_DIRECT', defaultValue: true);
 
 const _session = MethodChannel('rhr/session');
+const _connector = MethodChannel('rhr/connector');
 const _violetColor = Color(0xFF7C4DFF);
 const _hintColor = Color(0xFF5A4E80);
 
@@ -98,11 +99,15 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   /// This build's version, shown in the footer. Null until read.
   String? _installedVersion;
 
-  /// RHR Agent on this phone: "missing", "untrusted", "off" or "on". Null
-  /// until read, and while the phone has joined no account: agent control
-  /// is for the account's computers.
+  /// RHR Agent on this phone: "missing", "untrusted", "outdated", "off" or
+  /// "on". Null until read, and off Android.
   String? _agent;
   bool _installingAgent = false;
+
+  /// Set when an agent install sent the user to allow installs: coming back
+  /// with that allowed carries on with the install rather than asking for a
+  /// second tap.
+  bool _installAgentOnReturn = false;
 
   /// The accounts this phone has joined, shown so the user can see whose
   /// computers may connect and leave any of them.
@@ -180,13 +185,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     _readAccounts();
   }
 
-  /// Reads the joined accounts, and RHR Agent's state when there are any.
+  /// Reads the joined accounts, and RHR Agent's state.
+  ///
+  /// The agent does not need an account: a computer connected with a code
+  /// drives the phone just the same.
   Future<void> _readAccounts() async {
     final accounts = await joinedAccounts();
-    final agent = accounts.isNotEmpty
-        ? await const MethodChannel(
-            'rhr/connector',
-          ).invokeMethod<String>('agentStatus')
+    final agent = defaultTargetPlatform == TargetPlatform.android
+        ? await _connector.invokeMethod<String>('agentStatus')
         : null;
     if (!mounted) return;
     setState(() {
@@ -198,18 +204,28 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _installAgent() async {
+    _installAgentOnReturn =
+        await _connector.invokeMethod<bool>('canInstallPackages') != true;
     setState(() {
       _installingAgent = true;
       _agentProblem = null;
     });
-    final problem = await const MethodChannel(
-      'rhr/connector',
-    ).invokeMethod<String>('installAgent');
+    final problem = await _connector.invokeMethod<String>('installAgent');
     if (!mounted) return;
     setState(() {
       _installingAgent = false;
       _agentProblem = problem;
     });
+  }
+
+  /// Back from allowing installs: the install the user started goes on.
+  Future<void> _continueAgentInstall() async {
+    if (!_installAgentOnReturn) return;
+    if (await _connector.invokeMethod<bool>('canInstallPackages') != true) {
+      return;
+    }
+    _installAgentOnReturn = false;
+    if (mounted) await _installAgent();
   }
 
   /// Reads this build's version for the footer.
@@ -271,7 +287,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 progress: decided['progress'] as int?,
                 visible: decided['visible'] as bool? ?? false,
               );
-        final waiting = _active && s == 'waiting_host';
+        // An account phone waits for as long as it likes; only a code that
+        // nobody has connected on in a while is worth a hint.
+        final waiting = _active && s == 'waiting_host' && !_onAccount;
         if (waiting) {
           _waitingSince ??= DateTime.now();
         } else {
@@ -313,11 +331,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
         'waiting_host' => 'Waiting for your computer',
         'retrying' || 'closed' => 'Reconnecting',
         'rejected' => 'Connection unavailable',
+        'paused' => 'Paused',
         _ => 'Connecting…',
       },
       switch (_nativeStatus) {
         'connected' => _ok,
         'rejected' => _err,
+        'paused' => _inkDim,
         _ => _warn,
       },
     );
@@ -328,6 +348,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       // Back from Android's installer or the accessibility switch.
       _readAccounts();
+      _continueAgentInstall();
       // Pass the current VM URI along: iOS has no logcat watcher, so the
       // native service re-announces from this. Android ignores the arg and
       // discovers the URI from logcat itself.
@@ -452,12 +473,6 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       _relayPin = null;
     });
     await _connect(auto: true);
-    if (!mounted) return;
-    setState(() {
-      _status = accounts.length == 1
-          ? 'Waiting for ${accounts.first.email}.'
-          : 'Waiting for any of ${accounts.length} accounts.';
-    });
   }
 
   /// Asks before joining, then joins.
@@ -545,16 +560,35 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       if (!mounted) return;
     }
     await _readAccounts();
-    if (!mounted) return;
-    setState(() {
-      _status = switch (outcome) {
-        JoinAccepted(:final account, alreadyJoined: true) =>
-          'Already joined ${account.email}.',
-        JoinAccepted(:final account) =>
-          'Joined ${account.email}. Your computer can now connect to this phone.',
-        JoinRejected(:final reason) => reason,
-      };
+    _tell(switch (outcome) {
+      JoinAccepted(:final account, alreadyJoined: true) =>
+        'Already joined ${account.email}.',
+      JoinAccepted(:final account) =>
+        'Joined ${account.email}. Run rhr run on your computer to connect.',
+      JoinRejected(:final reason) => reason,
     });
+  }
+
+  /// Says how something the user did turned out. A snackbar rather than the
+  /// status line, which the session card replaces while a session is up,
+  /// and a session is up again by the time most of these finish.
+  void _tell(String message) {
+    if (!mounted) return;
+    if (!_active) setState(() => _status = message);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Whether this phone is waiting on its account rendezvous, rather than on
+  /// a code someone gave it.
+  bool get _onAccount => rhrRendezvousInstallation(_code.text) != null;
+
+  /// Pause, on an account phone: the computer connected now is dropped and
+  /// no other can connect until Resume. Disconnecting would only have the
+  /// phone wait for them again at once.
+  Future<void> _pauseOrResume() async {
+    await _session.invokeMethod(
+      _nativeStatus == 'paused' ? 'resume' : 'pause',
+    );
   }
 
   /// A scan carries its own relay when the host's QR named one; a typed code
@@ -587,9 +621,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
       _relay = _relayUrl;
       _fallbackRelays = const [];
       _relayPin = null;
+      _waitingSince = null;
+      _showWaitingHint = false;
       _status = 'Disconnected. Scan a QR or enter a code to connect.';
     });
     await _waitOnAccountRendezvous();
+    if (_active && _onAccount) {
+      _tell('Disconnected. Waiting for your computer again.');
+    }
   }
 
   /// Takes this phone off [account], after asking. A session waiting on the
@@ -680,9 +719,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     });
     setState(() {
       _active = true;
-      _status =
-          'Waiting for your computer. RHR will check this phone '
-          'before preparing your app.';
+      _status = null;
     });
   }
 
@@ -745,10 +782,15 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                           ),
                         ),
                         const SizedBox(height: 12),
-                        const Text(
-                          'Scan the QR in your terminal to run your app on '
-                          'this phone. You stay in control — leave any time.',
-                          style: TextStyle(
+                        Text(
+                          _accounts.isEmpty
+                              ? 'Scan the QR in your terminal to run your app '
+                                    'on this phone. You stay in control — '
+                                    'leave any time.'
+                              : 'Run rhr run in your project and your app '
+                                    'opens here. Scan a QR to connect another '
+                                    'computer.',
+                          style: const TextStyle(
                             color: _inkDim,
                             fontSize: 14,
                             height: 1.45,
@@ -790,7 +832,7 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                           _accountsCard(),
                           const SizedBox(height: 18),
                         ],
-                        if (_agent case final agent? when agent != 'on') ...[
+                        if (_agent case final agent?) ...[
                           _agentCard(agent),
                           const SizedBox(height: 18),
                         ],
@@ -957,9 +999,9 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
             children: [
               _dot(color),
               const SizedBox(width: 8),
-              const Text(
-                'SESSION',
-                style: TextStyle(
+              Text(
+                _onAccount ? 'ACCOUNT' : 'SESSION',
+                style: const TextStyle(
                   color: _inkDim,
                   fontSize: 11,
                   letterSpacing: 1.2,
@@ -969,7 +1011,13 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
               const Spacer(),
               Flexible(
                 child: Text(
-                  _code.text,
+                  // The rendezvous is a name for machines; whose computers
+                  // may connect is what the user wants to know.
+                  _onAccount
+                      ? (_accounts.length == 1
+                            ? _accounts.single.email
+                            : '${_accounts.length} accounts')
+                      : _code.text,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -1000,15 +1048,31 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                   ),
                 ),
               const Spacer(),
-              TextButton.icon(
-                onPressed: _disconnect,
-                icon: const Icon(Icons.link_off, size: 16),
-                label: const Text('Disconnect / reset'),
-                style: TextButton.styleFrom(
-                  foregroundColor: _err,
-                  padding: EdgeInsets.zero,
+              if (_onAccount)
+                TextButton.icon(
+                  onPressed: _pauseOrResume,
+                  icon: Icon(
+                    _nativeStatus == 'paused'
+                        ? Icons.play_arrow_rounded
+                        : Icons.pause_rounded,
+                    size: 16,
+                  ),
+                  label: Text(_nativeStatus == 'paused' ? 'Resume' : 'Pause'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: _violet,
+                    padding: EdgeInsets.zero,
+                  ),
+                )
+              else
+                TextButton.icon(
+                  onPressed: _disconnect,
+                  icon: const Icon(Icons.link_off, size: 16),
+                  label: const Text('Disconnect / reset'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: _err,
+                    padding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
             ],
           ),
         ],
@@ -1199,6 +1263,14 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     switch (_nativeStatus) {
       case 'connected':
         return 'Connected to your computer. RHR is preparing your app.';
+      case 'paused':
+        return 'Paused. No computer can connect until you resume.';
+      case 'rejected' when _onAccount:
+        return 'Your account could not be reached for this phone. Check the '
+            "phone's connection, or leave the account and scan a new invite.";
+      case 'waiting_host' || 'idle' when _onAccount:
+        return 'Waiting for your computer. Run rhr run in your project and '
+            'it connects here. Keep RHR open.';
       case 'rejected':
         return 'No session on this code yet. Check the code, or run rhr run in your terminal first.';
       case 'retrying':
@@ -1251,28 +1323,41 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     ),
   );
 
-  /// Sets up agent control from the phone: install RHR Agent, then turn it
-  /// on. After that the coding agent on the computer can do the rest,
-  /// including the prompts an install raises.
+  /// Agent control from the phone: install RHR Agent, turn it on, keep it
+  /// current, and turn it off again. After that the coding agent on the
+  /// computer can do the rest, including the prompts an install raises.
   Widget _agentCard(String agent) {
     final (text, action, onPressed) = switch (agent) {
       'missing' => (
         'Let your coding agent use this phone. RHR Agent lets it see the '
-            'screen, tap, and approve installs, so you do not have to.',
+            'screen, tap, and approve installs, so you do not have to. '
+            'Android asks a few times while it is set up, once with your PIN.',
         _installingAgent ? 'Installing…' : 'Install RHR Agent',
+        _installingAgent ? null : _installAgent,
+      ),
+      'outdated' => (
+        'RHR Agent on this phone is older than this player. Update it so '
+            'your coding agent keeps working.',
+        _installingAgent ? 'Updating…' : 'Update RHR Agent',
         _installingAgent ? null : _installAgent,
       ),
       'off' => (
         'RHR Agent is installed. Turn it on so your coding agent can use '
             'this phone.',
         'Turn on RHR Agent',
-        () => const MethodChannel('rhr/connector').invokeMethod('openAgent'),
+        () => _connector.invokeMethod<void>('openAgent'),
+      ),
+      'on' => (
+        'RHR Agent is on. While a computer is connected, your coding agent '
+            'can see and tap this phone.',
+        'Turn off',
+        () => _connector.invokeMethod<void>('openAgent'),
       ),
       _ => (
         'The RHR Agent on this phone is signed with a different key than '
-            'this player. Uninstall it in Settings, then install it here.',
-        null,
-        null,
+            'this player. Uninstall it from App info, then install it here.',
+        'Open App info',
+        () => _connector.invokeMethod<void>('agentInfo'),
       ),
     };
     return Container(
@@ -1296,10 +1381,18 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
               style: const TextStyle(color: _err, fontSize: 12.5, height: 1.4),
             ),
           ],
-          if (action != null) ...[
-            const SizedBox(height: 12),
+          const SizedBox(height: 12),
+          if (agent == 'on')
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: onPressed,
+                style: TextButton.styleFrom(foregroundColor: _inkDim),
+                child: Text(action),
+              ),
+            )
+          else
             FilledButton(onPressed: onPressed, child: Text(action)),
-          ],
         ],
       ),
     );

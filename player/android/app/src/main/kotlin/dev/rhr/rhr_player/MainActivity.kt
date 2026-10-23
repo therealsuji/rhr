@@ -205,10 +205,12 @@ class MainActivity : FlutterActivity() {
 							android.net.Uri.parse("package:$packageName")))
 						result.success(null)
 					}
-					"kick" -> {
+					// "pause" and "resume" are the overlay's Pause, offered by the
+					// lobby too: on an account phone it is what Disconnect means.
+					"kick", "pause", "resume" -> {
 						startService(
 							Intent(this, RhrSessionService::class.java)
-								.putExtra("cmd", "kick"))
+								.putExtra("cmd", call.method))
 						result.success(null)
 					}
 					"stop" -> {
@@ -319,6 +321,17 @@ class MainActivity : FlutterActivity() {
 				}.start()
 				"openAgent" -> {
 					AgentSetup.open(this)
+					result.success(null)
+				}
+				// Whether Android lets the player install apps yet, so an
+				// agent install interrupted by that permission can carry on.
+				"canInstallPackages" -> result.success(packageManager.canRequestPackageInstalls())
+				// App info for the agent: where an agent signed with another
+				// key is uninstalled, without the player needing that permission.
+				"agentInfo" -> {
+					startActivity(
+						Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+							android.net.Uri.parse("package:${AgentSetup.PACKAGE}")))
 					result.success(null)
 				}
 				else -> result.notImplemented()
