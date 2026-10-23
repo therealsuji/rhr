@@ -205,6 +205,17 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     });
   }
 
+  /// Re-reads RHR Agent's state, redrawing only when it changed.
+  Future<void> _refreshAgent() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    final agent = await _connector.invokeMethod<String>('agentStatus');
+    if (!mounted || agent == _agent) return;
+    setState(() {
+      _agentProblem = null;
+      _agent = agent;
+    });
+  }
+
   Future<void> _installAgent() async {
     _installAgentOnReturn =
         await _connector.invokeMethod<bool>('canInstallPackages') != true;
@@ -276,6 +287,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
     _statusTimer?.cancel();
     _statusTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (!mounted) return;
+      // Android rebinds an updated or newly enabled RHR Agent a moment
+      // after the user is back, so a single read on return could show it
+      // off when it is on.
+      unawaited(_refreshAgent());
       try {
         final decided = await _session.invokeMapMethod<String, Object?>(
           'banner',
