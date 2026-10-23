@@ -33,16 +33,25 @@ internal object AgentSetup {
 	private const val MAX_APK_BYTES = 64L shl 20
 	private const val RELEASES = "https://github.com/therealsuji/rhr/releases/download"
 
-	/** "missing", "untrusted" (signed with another key), "off", or "on". */
+	/**
+	 * "missing", "untrusted" (signed with another key), "outdated" (from an
+	 * older release than this player), "off", or "on".
+	 */
 	fun status(context: Context): String {
 		val packages = context.packageManager
-		try {
+		val agent = try {
 			packages.getPackageInfo(PACKAGE, 0)
 		} catch (_: PackageManager.NameNotFoundException) {
 			return "missing"
 		}
 		if (packages.checkSignatures(context.packageName, PACKAGE) != PackageManager.SIGNATURE_MATCH) {
 			return "untrusted"
+		}
+		// Releases stamp the player and the agent with one build number. An
+		// agent built locally carries none, and is whatever its builder meant.
+		val player = packages.getPackageInfo(context.packageName, 0)
+		if (agent.versionName != LOCAL_BUILD && agent.longVersionCodeCompat() < player.longVersionCodeCompat()) {
+			return "outdated"
 		}
 		val accessibility = context.getSystemService(AccessibilityManager::class.java)
 		val on = accessibility
@@ -63,7 +72,7 @@ internal object AgentSetup {
 				Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
 					.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
 			)
-			return "Allow RHR Player to install apps, then come back and tap Install again."
+			return "Allow RHR Player to install apps. The install carries on when you come back."
 		}
 		val version = packages.getPackageInfo(context.packageName, 0).versionName ?: ""
 		val apk = File(context.cacheDir, "rhr-agent.apk")
@@ -84,6 +93,13 @@ internal object AgentSetup {
 			apk.delete()
 		}
 	}
+
+	/** The agent's versionName when it was not built by a release. */
+	private const val LOCAL_BUILD = "0.0.0-dev"
+
+	@Suppress("DEPRECATION")
+	private fun PackageInfo.longVersionCodeCompat(): Long =
+		if (Build.VERSION.SDK_INT >= 28) longVersionCode else versionCode.toLong()
 
 	/** Opens the agent's screen, which walks the user to its switch. */
 	fun open(context: Context) {

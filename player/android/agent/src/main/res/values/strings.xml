@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">RHR Agent</string>
     <string name="service_description">Lets your coding agent see this phone\'s screen and tap on it, through the RHR player, while you are connected to an RHR session. It does nothing at other times.</string>
-    <string name="status_off">RHR Agent is off.\n\nTurn it on to let your coding agent see this phone\'s screen and tap on it while you are connected to an RHR session. It does nothing at other times.\n\nTap Turn on, then Installed apps (Downloaded apps on some phones), RHR Agent, the switch, and Allow.\n\nIf the switch is greyed out, tap Open App info, then ⋮, then Allow restricted settings, and come back here.</string>
+    <string name="status_off">RHR Agent is off.\n\nTurn it on so your coding agent can see this phone\'s screen and tap on it while you are connected to an RHR session. It does nothing at other times.\n\n1. Tap Turn on.\n2. Tap Installed apps (Downloaded apps on some phones), then RHR Agent.\n3. Turn on the switch, then tap Allow.\n\nIf Android says the app was denied access, or the switch is greyed out: tap Open App info, then ⋮ at the top, then Allow restricted settings, and confirm with your PIN. Come back here and start again at step 1.</string>
     <string name="status_on">RHR Agent is on.\n\nWhile you are connected to an RHR session, your coding agent can see this phone\'s screen and tap on it. The RHR player says so while it acts, and the session notification has Stop agent control.</string>
     <string name="allow_restricted">Open App info</string>
     <string name="turn_on">Turn on</string>
