@@ -70,12 +70,19 @@ void main() {
       InternetAddress.loopbackIPv4,
       config['port'] as int,
     );
-    final closed = socket.drain<void>().then((_) => true);
-    // Writes may fail once the server hangs up; that is the point.
+    // A hang-up is a close or, when it lands mid-write, a reset: either is
+    // the server cutting the line off.
+    final closed = socket.drain<void>().then((_) => true, onError: (_) => true);
+    // Writes may fail once the server hangs up; that is the point. Under load
+    // the failure can surface synchronously from add.
     socket.done.catchError((_) {});
     for (var i = 0; i < 8 && !await _settled(closed); i++) {
-      socket.add(List.filled(1024, 0x61));
-      await socket.flush().catchError((_) {});
+      try {
+        socket.add(List.filled(1024, 0x61));
+        await socket.flush();
+      } on SocketException {
+        break;
+      }
     }
     expect(await closed.timeout(const Duration(seconds: 2)), isTrue);
     socket.destroy();
