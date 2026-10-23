@@ -56,4 +56,20 @@ void main() {
     backoff.markReady();
     expect(backoff.directPathImpossible(noPath), isFalse);
   });
+
+  test('a held phone is waited for through the claim grace, then given up', () {
+    final backoff = ReconnectBackoff();
+    final start = DateTime(2026);
+    expect(backoff.busyTooLong(start), isFalse);
+    expect(
+      backoff.busyTooLong(start.add(const Duration(seconds: 50))),
+      isFalse,
+    );
+    expect(
+      backoff.busyTooLong(start.add(const Duration(seconds: 121))),
+      isTrue,
+    );
+    backoff.markReady();
+    expect(backoff.busyTooLong(start.add(const Duration(minutes: 5))), isFalse);
+  });
 }
