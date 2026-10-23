@@ -41,4 +41,25 @@ void main() {
     await forgetPreferredDevice(project.path);
     expect(await preferredDevice(project.path), isNull);
   });
+
+  test('moves an older project-root preference under .dart_tool', () async {
+    File('${project.path}/.rhr-device').writeAsStringSync('phoneOld\n');
+    expect(await preferredDevice(project.path), 'phoneOld');
+    expect(File('${project.path}/.rhr-device').existsSync(), isFalse);
+    expect(await preferredDevice(project.path), 'phoneOld');
+  });
+
+  test('a device is named by its id, its label, or the start of its id', () {
+    const devices = [
+      (id: 'W5KSE8zQ', label: 'samsung SM-S918B'),
+      (id: 'Nm5rLalf', label: 'samsung SM-A566B'),
+      (id: 'Cf3iJ1bm', label: 'samsung SM-A566B'),
+    ];
+    expect(matchDevices(devices, 'Nm5rLalf').single.id, 'Nm5rLalf');
+    expect(matchDevices(devices, 'Samsung sm-s918b').single.id, 'W5KSE8zQ');
+    expect(matchDevices(devices, 'Cf3').single.id, 'Cf3iJ1bm');
+    // Two phones of one model share a label; that is ambiguous, not a pick.
+    expect(matchDevices(devices, 'samsung SM-A566B'), hasLength(2));
+    expect(matchDevices(devices, 'pixel'), isEmpty);
+  });
 }

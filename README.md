@@ -43,7 +43,7 @@ The player targets Android `arm64-v8a`, Flutter 3.44.2 stable (Dart 3.12.2, engi
 rhr invite
 ```
 
-Scan the QR with the player. The phone joins your account as a *device*: no sign-up, no password on the phone — it holds a membership, not an identity. `rhr devices` lists it. From then on the phone waits for your account's computers; `rhr run` finds it without QRs or codes, wherever it is. Disconnect on the phone goes back to waiting, and reconnecting never needs the QR again. Either side can end the membership.
+It signs you in if needed, shows a QR, and waits until a phone joins. Scan the QR with the player. The phone joins your account as a *device*: no sign-up, no password on the phone. It holds a membership, not an identity. `rhr devices` lists it. From then on the phone waits for your account's computers, and `rhr run` uses it without QRs or codes, wherever it is: the only phone on the account, or the one you pick when there are several (`--device` takes its name, its id, or the start of its id). Pause on the phone keeps every computer out until you resume. Either side can end the membership.
 
 Works without an account too: a plain session code and QR is still the setup path (for a LAN with no account service, or a phone nobody wants joined to anything). `rhr run` without an account prints its QR and guides you through it.
 
@@ -79,7 +79,7 @@ The CLI re-pairs with the phone when it comes back — crash, force-stop, player
 
 ### Session selection
 
-For `rhr run` and `rhr attach`: `--device <id>` first, else `--code <session>`, else `code:` in `.rhr.yaml`, then a saved recent code or a fresh one. Passing both `--device` and `--code` is refused rather than one quietly winning. A session code is bearer credential for the phone's debug VM — treat it like a password.
+For `rhr run` and `rhr attach`: `--device <name|id>` first, else `--code <session>`, else `code:` in `.rhr.yaml`, else the phone the project last used, else the phone on your account, then a saved recent code or a fresh one. Passing both `--device` and `--code` is refused rather than one quietly winning. A session code is bearer credential for the phone's debug VM — treat it like a password.
 
 ## Relay
 

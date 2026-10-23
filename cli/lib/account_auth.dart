@@ -444,10 +444,22 @@ Future<String?> rendezvousTicket(String rendezvous) async {
 /// The device this project last connected to.
 ///
 /// Per project rather than global: someone with two projects and two phones
-/// should not have one of them silently retarget the other.
-File _preferredDeviceFile(String project) => File('$project/.rhr-device');
+/// should not have one of them silently retarget the other. Under
+/// `.dart_tool` with the rest of RHR's project state, where it is neither a
+/// file in the user's tree nor something a commit picks up.
+File _preferredDeviceFile(String project) =>
+    File('$project/.dart_tool/rhr/device');
+
+/// Where earlier releases kept it, in the project root.
+File _legacyPreferredDeviceFile(String project) => File('$project/.rhr-device');
 
 Future<String?> preferredDevice(String project) async {
+  final legacy = _legacyPreferredDeviceFile(project);
+  if (legacy.existsSync()) {
+    final value = (await legacy.readAsString()).trim();
+    await legacy.delete();
+    if (value.isNotEmpty) await rememberDevice(project, value);
+  }
   final file = _preferredDeviceFile(project);
   if (!file.existsSync()) return null;
   final value = (await file.readAsString()).trim();
@@ -455,12 +467,61 @@ Future<String?> preferredDevice(String project) async {
 }
 
 Future<void> rememberDevice(String project, String installationId) async {
-  await _preferredDeviceFile(project).writeAsString('$installationId\n');
+  final file = _preferredDeviceFile(project);
+  await file.parent.create(recursive: true);
+  await file.writeAsString('$installationId\n');
 }
 
 Future<void> forgetPreferredDevice(String project) async {
   final file = _preferredDeviceFile(project);
   if (file.existsSync()) await file.delete();
+}
+
+/// A phone on the signed-in account: its installation id, which the account
+/// service knows it by, and the name the phone gave itself.
+typedef AccountDevice = ({String id, String label});
+
+/// The phones on [session]'s account.
+Future<List<AccountDevice>> listAccountDevices(
+  AccountSession session, {
+  HttpClient? client,
+}) async {
+  final http = client ?? HttpClient();
+  try {
+    final request = await http.getUrl(
+      Uri.parse('${accountService()}/account/devices'),
+    );
+    request.headers.add('Authorization', 'Bearer ${session.accessToken}');
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) {
+      throw AuthFailure('could not list devices: $body');
+    }
+    final devices = (jsonDecode(body) as Map<String, Object?>)['devices'];
+    return [
+      for (final entry in devices is List ? devices : const [])
+        if (entry is Map && entry['installationId'] is String)
+          (
+            id: entry['installationId'] as String,
+            label: entry['label'] is String ? entry['label'] as String : '',
+          ),
+    ];
+  } finally {
+    if (client == null) http.close();
+  }
+}
+
+/// The devices [wanted] names: the one whose id it is; else those whose
+/// label it is, ignoring case; else those whose id starts with it. More than
+/// one means it is ambiguous, none that it names nothing.
+List<AccountDevice> matchDevices(List<AccountDevice> devices, String wanted) {
+  final byId = devices.where((d) => d.id == wanted).toList();
+  if (byId.isNotEmpty) return byId;
+  final byLabel = devices
+      .where((d) => d.label.toLowerCase() == wanted.toLowerCase())
+      .toList();
+  if (byLabel.isNotEmpty) return byLabel;
+  return devices.where((d) => d.id.startsWith(wanted)).toList();
 }
 
 /// Where the signed-in session lives between runs.
