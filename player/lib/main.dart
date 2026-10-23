@@ -1178,7 +1178,10 @@ class _LobbyScreenState extends State<LobbyScreen> with WidgetsBindingObserver {
                 Navigator.of(context).pop();
                 _updatePlayer(latest);
               },
-              style: FilledButton.styleFrom(backgroundColor: _violet),
+              style: FilledButton.styleFrom(
+                backgroundColor: _violet,
+                foregroundColor: Colors.white,
+              ),
               child: const Text('Update'),
             ),
           ],
@@ -1541,6 +1544,11 @@ class _PlayerUpdateDialogState extends State<_PlayerUpdateDialog> {
         _done / _total,
       ),
       'downloading' => ('Downloading…', null),
+      'waiting' => (
+        'The connection dropped. Continuing from ${mb(_done)} MB when it is '
+            'back…',
+        _total > 0 ? _done / _total : null,
+      ),
       'verifying' => ('Checking the download…', null),
       'installing' => ('Android is asking to install the update.', null),
       'failed' => (_problem ?? 'The update stopped.', 0.0),

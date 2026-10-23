@@ -8,6 +8,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.util.Log
 import java.io.File
+import java.io.IOException
 
 /**
  * Updates the player to a published release from the player itself: download
@@ -26,7 +27,11 @@ internal object PlayerUpdate {
 	private const val TAG = "rhr_player_update"
 	private const val MAX_APK_BYTES = 256L shl 20
 
-	/** "idle", "downloading", "verifying", "installing", "permission" or "failed". */
+	/**
+	 * "idle", "downloading", "waiting" (the connection dropped and the
+	 * download will continue), "verifying", "installing", "permission" or
+	 * "failed".
+	 */
 	@Volatile var phase = "idle"
 		private set
 	@Volatile var done = 0L
@@ -76,10 +81,32 @@ internal object PlayerUpdate {
 		// server for the rest of it gets "nothing left", and it is checked again.
 		File(folder, name).takeIf { it.exists() }?.renameTo(partial)
 		try {
-			ReleaseApk.download(ReleaseApk.url(version, name), partial, MAX_APK_BYTES) { got, size ->
-				done = got
-				total = size
-			}?.let { return fail(it) }
+			// A dropped connection is routine on a phone, and continuing costs
+			// only what was not yet received, so it is retried before anyone
+			// is asked to.
+			var attempt = 0
+			while (true) {
+				val problem = try {
+					ReleaseApk.download(ReleaseApk.url(version, name), partial, MAX_APK_BYTES) { got, size ->
+						phase = "downloading"
+						done = got
+						total = size
+					}
+				} catch (e: IOException) {
+					if (++attempt > RETRIES) {
+						return fail(
+							"The connection dropped at ${mb(done)} of ${mb(total)} MB. " +
+								"Try again to continue from there.",
+						)
+					}
+					Log.i(TAG, "download dropped ($e); retry $attempt")
+					phase = "waiting"
+					Thread.sleep((2_000L shl attempt).coerceAtMost(30_000L))
+					continue
+				}
+				problem?.let { return fail(it) }
+				break
+			}
 
 			phase = "verifying"
 			val expected = ReleaseApk.publishedSha256(version, name)
@@ -115,6 +142,10 @@ internal object PlayerUpdate {
 			fail("Could not update: ${e.message ?: e}")
 		}
 	}
+
+	private const val RETRIES = 6
+
+	private fun mb(bytes: Long) = if (bytes < 0) "?" else (bytes shr 20).toString()
 
 	private fun fail(message: String) {
 		Log.w(TAG, message)
