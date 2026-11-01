@@ -79,6 +79,16 @@ internal object DeviceEndpoints {
 	private const val AGENT_PACKAGE = "dev.rhr.agent"
 	private const val ATTACHED = 0
 
+	/**
+	 * Ops that look at or touch the screen, and so are the agent using this
+	 * phone. `info` is deliberately absent: `status` and `install_agent` poll
+	 * it, and a glow through a long install wait would say the agent was
+	 * working when it was only checking whether it could.
+	 */
+	private val SCREEN_OPS = setOf(
+		"screenshot", "tree", "tap", "long_press", "swipe", "set_text", "global", "launch",
+	)
+
 	fun open(context: Context, target: Int, connectedPackage: String?): ChannelEnd = when (target) {
 		TARGET_DEVICE -> openAgent(context)
 		TARGET_LOGS -> if (connectedPackage != null) openBeaconLogs(context, connectedPackage) else openOwnLogs()
@@ -161,7 +171,8 @@ internal object DeviceEndpoints {
 		// Only an answer from the agent itself means it can see and tap; one
 		// of these says it cannot, so the user is not told otherwise.
 		if (response.optString("error") !in setOf("agent_missing", "agent_untrusted", "accessibility_off")) {
-			RhrSessionService.agentActed()
+			if (request.optString("op") in SCREEN_OPS) RhrSessionService.agentLooked()
+			else RhrSessionService.agentActed()
 		}
 		return response
 	}

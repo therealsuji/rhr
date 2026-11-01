@@ -286,16 +286,65 @@ class RhrSessionService : Service() {
 		@Volatile var foreignAppName: String = "your app"
 
 		/**
-		 * Device control, as the user sees it: only in the session
-		 * notification, never on screen, where it would cover the app the
-		 * agent is reading. [agentControlling] holds from the agent's first
-		 * answer until the host leaves, and is when the notification offers
-		 * "Stop agent control". [agentStopped] is the user's choice: it
-		 * refuses every request until they allow it again or start another
-		 * session, and survives Android restarting the player.
+		 * Device control, as the user sees it. [agentControlling] drives the
+		 * session notification and holds from the agent's first answer until
+		 * the host leaves. [agentWorking] is the edge glow: true while screen
+		 * requests are flowing and for a short tail after the last one, so the
+		 * light says "using it now" rather than "allowed to". [agentStopped] is
+		 * the user's choice: it refuses every request until they allow it again
+		 * or start another session, and survives Android restarting the player.
 		 */
 		@Volatile var agentStopped = false
 		@Volatile var agentControlling = false
+
+		/** How long the glow outlives the last request. */
+		private const val AGENT_ACTIVE_MS = 8_000L
+
+		/**
+		 * Window opacity for the glow strips. Android passes touches through an
+		 * untrusted overlay at or below 0.8; the light itself is in the view.
+		 */
+		private const val GLOW_WINDOW_ALPHA = 0.8f
+
+		/** Uptime of the last screen request, or 0 when none has happened. */
+		@Volatile private var agentActedAt = 0L
+
+		private val agentClock by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+		/**
+		 * True while the agent is using the phone, and for a short tail after.
+		 * One tool call is often a tap, a settle, a screenshot and a tree, and
+		 * the model thinks between calls; a short tail keeps the light from
+		 * strobing through those gaps.
+		 */
+		val agentWorking: Boolean
+			get() = agentActedAt != 0L &&
+				android.os.SystemClock.uptimeMillis() - agentActedAt < AGENT_ACTIVE_MS
+
+		/**
+		 * A request that looked at or touched the screen. The glow follows
+		 * this, not [agentActed]: a status check is not the agent using the
+		 * phone.
+		 */
+		fun agentLooked() {
+			agentActedAt = android.os.SystemClock.uptimeMillis()
+			agentActed()
+			updateListeners.forEach { it() }
+			agentClock.removeCallbacks(agentLapsed)
+			agentClock.postDelayed(agentLapsed, AGENT_ACTIVE_MS + 100)
+		}
+
+		/** The agent left or the user stopped it: drop the glow now. */
+		fun clearAgentActivity() {
+			if (agentActedAt == 0L) return
+			agentActedAt = 0L
+			agentClock.removeCallbacks(agentLapsed)
+			updateListeners.forEach { it() }
+		}
+
+		private val agentLapsed = Runnable {
+			if (!agentWorking) updateListeners.forEach { it() }
+		}
 
 		/** RHR Agent answered a request: it can see and tap this phone. */
 		fun agentActed() {
@@ -485,6 +534,7 @@ class RhrSessionService : Service() {
 		super.onCreate()
 		RhrSessionService.current = this
 		updateListeners.add(refreshScreenHold)
+		updateListeners.add(refreshGlow)
 		if (android.os.Build.VERSION.SDK_INT >= 24) {
 			getSystemService(android.net.ConnectivityManager::class.java)
 				?.registerDefaultNetworkCallback(networkCallback)
@@ -597,6 +647,7 @@ class RhrSessionService : Service() {
 					// back after Android restarted the player stays stopped.
 					agentStopped = agentStoppedEarlier(requestedCode)
 					agentControlling = false
+					clearAgentActivity()
 					// A pause stays with its session code until the user
 					// resumes or disconnects: the same code coming back after
 					// Android restarted the player is still paused.
@@ -636,6 +687,8 @@ class RhrSessionService : Service() {
 				// the banner, so leaving it would hide "Paused".
 				setProgress("", 0, 0)
 				updatingForeignApp = false
+				agentControlling = false
+				clearAgentActivity()
 				status = "paused"
 			}
 			"resume" -> {
@@ -659,6 +712,8 @@ class RhrSessionService : Service() {
 			}
 			"stop_agent" -> {
 				setAgentStopped(true)
+				agentControlling = false
+				clearAgentActivity()
 				refreshNotification()
 			}
 			"allow_agent" -> {
@@ -669,6 +724,8 @@ class RhrSessionService : Service() {
 				stopped.set(true)
 				paused = false
 				setAgentStopped(false)
+				agentControlling = false
+				clearAgentActivity()
 				ws?.close(1000, "stopped")
 				directTransport?.close()
 				directTransport = null
@@ -707,8 +764,11 @@ class RhrSessionService : Service() {
 		directTransport = null
 		devfsObserver?.stopWatching()
 		updateListeners.remove(refreshScreenHold)
+		updateListeners.remove(refreshGlow)
 		main.removeCallbacksAndMessages(null)
 		holdScreen(false)
+		removeGlowWindows()
+		clearAgentActivity()
 		if (RhrSessionService.current === this) RhrSessionService.current = null
 		super.onDestroy()
 	}
@@ -761,6 +821,121 @@ class RhrSessionService : Service() {
 		runCatching { wm.addView(view, params) }
 			.onSuccess { screenHold = view }
 			.onFailure { Log.w(TAG, "screen hold rejected", it) }
+	}
+
+	// ---- agent edge glow ---------------------------------------------------
+
+	private val refreshGlow: () -> Unit = {
+		main.post { if (RhrSessionService.current === this) updateGlow() }
+	}
+	private var glowViews: List<AgentGlow> = emptyList()
+	private var glowShown = false
+
+	private val hideGlow = Runnable {
+		if (!glowShown) removeGlowWindows()
+	}
+
+	/**
+	 * The edge light, in connector mode only: there the app is a separate
+	 * process and no Activity of ours is on screen. In player mode the guest
+	 * shares the player's window, so DevOverlay draws the light itself. That
+	 * split is what makes the glow work without "display over other apps" in
+	 * player mode and with the permission app mode already requires.
+	 */
+	private fun updateGlow() {
+		val wanted = usesExternalVm && agentWorking &&
+			android.provider.Settings.canDrawOverlays(this)
+		if (wanted) {
+			main.removeCallbacks(hideGlow)
+			if (glowViews.isEmpty()) addGlowWindows()
+			glowShown = true
+			glowViews.forEach { it.glow(true) }
+			return
+		}
+		if (!glowShown) return
+		glowShown = false
+		glowViews.forEach { it.glow(false) }
+		main.removeCallbacks(hideGlow)
+		main.postDelayed(hideGlow, AgentGlow.FADE_OUT_MS + 60)
+	}
+
+	/**
+	 * One window per edge, sized to the light. A single full-screen window
+	 * would count as an obscuring overlay for every touch on the display:
+	 * Android combines the opacity of overlapping overlays, and an app that
+	 * filters obscured touches would drop the agent's taps. Geometry keeps the
+	 * middle of the screen untouched.
+	 */
+	private fun addGlowWindows() {
+		// TYPE_APPLICATION_OVERLAY is API 26, like holdScreen.
+		if (android.os.Build.VERSION.SDK_INT < 26 ||
+			!android.provider.Settings.canDrawOverlays(this)
+		) return
+		val wm = getSystemService(android.view.WindowManager::class.java)
+		val (w, h) = screenSize()
+		val strip = (AgentGlow.FALLOFF_DP * resources.displayMetrics.density)
+			.toInt().coerceAtLeast(1)
+		val specs = listOf(
+			AgentGlow.Edge.TOP to intArrayOf(w, strip, 0, 0),
+			AgentGlow.Edge.BOTTOM to intArrayOf(w, strip, 0, h - strip),
+			AgentGlow.Edge.LEFT to intArrayOf(strip, h, 0, 0),
+			AgentGlow.Edge.RIGHT to intArrayOf(strip, h, w - strip, 0),
+		)
+		val added = ArrayList<AgentGlow>(specs.size)
+		for ((edge, box) in specs) {
+			val view = AgentGlow(this, edge)
+			view.alpha = 0f
+			val params = glowParams(box[0], box[1], box[2], box[3])
+			if (runCatching { wm.addView(view, params) }.isSuccess) {
+				added.add(view)
+			} else {
+				Log.w(TAG, "agent glow window rejected")
+			}
+		}
+		glowViews = added
+	}
+
+	private fun removeGlowWindows() {
+		val wm = getSystemService(android.view.WindowManager::class.java)
+		glowViews.forEach { runCatching { wm.removeView(it) } }
+		glowViews = emptyList()
+	}
+
+	private fun glowParams(width: Int, height: Int, x: Int, y: Int) =
+		android.view.WindowManager.LayoutParams(
+			width,
+			height,
+			android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+			android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+				android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+				android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+				android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+			android.graphics.PixelFormat.TRANSLUCENT,
+		).apply {
+			gravity = android.view.Gravity.TOP or android.view.Gravity.START
+			this.x = x
+			this.y = y
+			alpha = GLOW_WINDOW_ALPHA
+			title = "rhr-agent-glow"
+			if (android.os.Build.VERSION.SDK_INT >= 30) {
+				layoutInDisplayCutoutMode =
+					android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+				// The light belongs at the physical edge, not below the bars.
+				fitInsetsTypes = 0
+			} else if (android.os.Build.VERSION.SDK_INT >= 28) {
+				layoutInDisplayCutoutMode =
+					android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+			}
+		}
+
+	private fun screenSize(): Pair<Int, Int> {
+		if (android.os.Build.VERSION.SDK_INT >= 30) {
+			val bounds = getSystemService(android.view.WindowManager::class.java)
+				.currentWindowMetrics.bounds
+			return bounds.width() to bounds.height()
+		}
+		val metrics = resources.displayMetrics
+		return metrics.widthPixels to metrics.heightPixels
 	}
 
 	// ---- live VM service URI discovery ------------------------------------
@@ -1136,6 +1311,7 @@ class RhrSessionService : Service() {
 								agentControlling = false
 								refreshNotification()
 							}
+							clearAgentActivity()
 							return
 						}
 						// Anything else is host traffic (hello, ping, progress,

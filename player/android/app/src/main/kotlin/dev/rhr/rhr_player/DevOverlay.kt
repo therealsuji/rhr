@@ -237,6 +237,7 @@ class DevOverlay(
 	private lateinit var bar: ProgressBar
 	private lateinit var fab: TextView
 	private var menu: View? = null
+	private var glow: AgentGlow? = null
 
 	private val sensors =
 		activity.getSystemService(Context.SENSOR_SERVICE) as SensorManager?
@@ -298,6 +299,7 @@ class DevOverlay(
 		if (AdbReceivers.register(activity, receiver, "dev.rhr.DEBUG_MENU")) {
 			debugMenuReceiver = receiver
 		}
+		buildGlow()
 		buildProgressCard()
 		buildFab()
 		render()
@@ -322,11 +324,37 @@ class DevOverlay(
 		cancelTween(fab)
 		snap?.let { ui.removeCallbacks(it) }
 		bubble = Bubble.HIDDEN
+		glow = null
 		// Tearing down mid-drag would otherwise strand the dismiss target on
 		// screen with nothing left to remove it.
 		hideDismissTarget()
 		host.remove(root)
 		ui.removeCallbacksAndMessages(null)
+	}
+
+	// ---- agent edge glow ---------------------------------------------------
+
+	/**
+	 * Player mode only. The guest app and the player share this window, so a
+	 * plain view at the bottom of the overlay tree is enough and no "display
+	 * over other apps" permission is needed. Connector mode gets its light
+	 * from the session service, which draws above the separate app.
+	 */
+	private fun buildGlow() {
+		if (host.transient) return
+		val view = AgentGlow(activity, AgentGlow.Edge.ALL)
+		view.alpha = 0f
+		glow = view
+		root.addView(
+			view,
+			FrameLayout.LayoutParams(
+				ViewGroup.LayoutParams.MATCH_PARENT,
+				ViewGroup.LayoutParams.MATCH_PARENT))
+	}
+
+	private fun renderGlow() {
+		val view = glow ?: return
+		view.glow(RhrSessionService.agentWorking && !RhrSessionService.usesExternalVm)
 	}
 
 	// ---- progress card (top, floating pill) ------------------------------
@@ -1159,6 +1187,7 @@ class DevOverlay(
 
 	private fun render() {
 		if (!attached) return
+		renderGlow()
 		renderConsent()
 		// What to say is decided by [SessionBanner], which is pure and unit
 		// tested; this only paints it. The two used to be one `when` block
