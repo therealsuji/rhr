@@ -106,24 +106,26 @@ void main() {
     await run.close();
   });
 
-  test('a second project takes the phone, and the first cannot take it back',
-      () async {
-    final first = await attach('a');
-    final firstEnded = first.stream.drain<void>();
-    await (await attach('b')).selectedRelay;
+  test(
+    'a second project takes the phone, and the first cannot take it back',
+    () async {
+      final first = await attach('a');
+      final firstEnded = first.stream.drain<void>();
+      await (await attach('b')).selectedRelay;
 
-    await firstEnded.timeout(const Duration(seconds: 5));
-    // The first run's process holds only its own claim.
-    RelayRace.releaseClaim(code);
-    final comeback = RelayRace.connect(
-      relays: [daemon.relay],
-      code: code,
-      claimFile: File('${state.path}/a.claim'),
-      ticketFor: _ticket,
-      headers: daemon.headers,
-    );
-    await expectLater(comeback, throwsA(isA<DeviceHandedOverException>()));
-  });
+      await firstEnded.timeout(const Duration(seconds: 5));
+      // The first run's process holds only its own claim.
+      RelayRace.releaseClaim(code);
+      final comeback = RelayRace.connect(
+        relays: [daemon.relay],
+        code: code,
+        claimFile: File('${state.path}/a.claim'),
+        ticketFor: _ticket,
+        headers: daemon.headers,
+      );
+      await expectLater(comeback, throwsA(isA<DeviceHandedOverException>()));
+    },
+  );
 
   test('refuses a local process without the token', () async {
     await expectLater(

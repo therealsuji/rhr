@@ -181,8 +181,7 @@ final class HostDaemon {
     }
     final upstream = _upstream;
     if (upstream == null || _stopping) {
-      request.response.statusCode =
-          _refusal ?? HttpStatus.serviceUnavailable;
+      request.response.statusCode = _refusal ?? HttpStatus.serviceUnavailable;
       await request.response.close();
       return;
     }
@@ -196,10 +195,7 @@ final class HostDaemon {
       return;
     }
     final socket = await WebSocketTransformer.upgrade(request);
-    final run = _Run(
-      socket,
-      resuming ? current.claim : _newClaim(),
-    );
+    final run = _Run(socket, resuming ? current.claim : _newClaim());
     if (current != null) {
       if (!resuming) _supersededClaims.add(current.claim);
       await current.socket.close(4010, 'handed over to another run');
@@ -298,6 +294,10 @@ const hostDaemonTokenHeader = 'x-rhr-daemon-token';
 File hostDaemonFile(String code) =>
     File('${accountSessionFile().parent.path}/daemon/$code.json');
 
+/// Where the daemon for [code] started by [ensureHostDaemon] writes its log.
+File hostDaemonLog(String code) =>
+    File('${accountSessionFile().parent.path}/daemon/$code.log');
+
 typedef HostDaemonAddress = ({String relay, Map<String, String> headers});
 
 /// The daemon serving [code], if one is running and answers.
@@ -310,9 +310,7 @@ Future<HostDaemonAddress?> liveHostDaemon(String code, {File? file}) async {
   } on FormatException {
     return null;
   }
-  if (saved is! Map ||
-      saved['port'] is! int ||
-      saved['token'] is! String) {
+  if (saved is! Map || saved['port'] is! int || saved['token'] is! String) {
     return null;
   }
   final port = saved['port'] as int;
@@ -340,7 +338,7 @@ Future<HostDaemonAddress> ensureHostDaemon(
 }) async {
   final live = await liveHostDaemon(code);
   if (live != null) return live;
-  final log = File('${hostDaemonFile(code).path}.log');
+  final log = hostDaemonLog(code);
   ensurePrivateDirectory(log.parent);
   await Process.start(
     'sh',

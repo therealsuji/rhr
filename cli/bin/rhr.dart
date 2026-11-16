@@ -1028,7 +1028,11 @@ Future<int?> _runSession({
   unawaited(
     relayTransport.selectedRelay.then<void>(
       (relay) => stderr.writeln(
-        '[rhr] selected ${relay.startsWith('ws://127.0.0.1') ? 'LAN' : 'internet'} '
+        '[rhr] selected ${relayHeaders.containsKey(hostDaemonTokenHeader)
+            ? 'rhr daemon'
+            : relay.startsWith('ws://127.0.0.1')
+            ? 'LAN'
+            : 'internet'} '
         'transport $relay (session $code)',
       ),
       onError: (_, _) {},
@@ -2880,7 +2884,7 @@ Future<int> _runAttachProductFlow({
   if (throughDaemon) {
     stderr.writeln(
       '[rhr] reaching the phone through the rhr daemon, which keeps it '
-      'connected between runs (log: ${hostDaemonFile(sessionCode).path}.log)',
+      'connected between runs (log: ${hostDaemonLog(sessionCode).path})',
     );
   } else if (localRelay != null) {
     stderr.writeln(
