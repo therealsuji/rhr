@@ -31,6 +31,7 @@ import 'package:rhr_cli/devfs_upload.dart';
 import 'package:rhr_cli/direct_path.dart';
 import 'package:rhr_cli/direct_session_transport.dart';
 import 'package:rhr_cli/flutter_compatibility.dart';
+import 'package:rhr_cli/host_daemon.dart';
 import 'package:rhr_cli/local_relay.dart';
 import 'package:rhr_cli/native_fingerprint.dart';
 import 'package:rhr_cli/player_builder.dart';
@@ -75,6 +76,9 @@ Usage:
                               rhr session running for the project
                               (rhr setup registers it with Claude Code, Codex
                               and OpenCode)
+  rhr daemon --code <dev-...> keep an account phone connected between runs;
+                              run and attach start it on their own, and it
+                              stops 15 minutes after the last run leaves
   rhr doctor                  check the local Flutter/RHR setup
   rhr login                   sign in so this machine can use account devices
   rhr logout                  forget the signed-in account
@@ -217,6 +221,29 @@ Future<void> main(List<String> args) async {
       startSession: startDetachedRun,
     );
     await server.done;
+    exit(0);
+  }
+
+  if (args.first == 'daemon') {
+    String? code;
+    var relay = defaultPublicRelay;
+    for (var i = 1; i < args.length; i++) {
+      switch (args[i]) {
+        case '--code' when i + 1 < args.length:
+          code = args[++i];
+        case '--relay' when i + 1 < args.length:
+          relay = args[++i];
+        default:
+          stderr.writeln('unknown arg: ${args[i]}');
+          exit(64);
+      }
+    }
+    if (code == null || rhrRendezvousInstallation(code) == null) {
+      stderr.writeln('rhr daemon: --code must name an account phone (dev-...)');
+      exit(64);
+    }
+    _requireAllowedRelay(relay);
+    await HostDaemon.serve(code: code, relay: relay);
     exit(0);
   }
 
@@ -638,8 +665,12 @@ Future<void> main(List<String> args) async {
   final reconnectBackoff = ReconnectBackoff();
   while (true) {
     try {
+      final daemon = rhrRendezvousInstallation(code) == null
+          ? null
+          : await ensureHostDaemon(code, relay: relay);
       final result = await _runSession(
-        relays: [relay],
+        relays: [daemon?.relay ?? relay],
+        relayHeaders: daemon?.headers ?? const {},
         code: code,
         project: project,
         pidFile: pidFile,
@@ -682,6 +713,9 @@ Future<void> main(List<String> args) async {
         stderr.writeln('[rhr] direct connection failed: $failure');
         exit(_directFailureExitCode);
       }
+    } on DeviceHandedOverException catch (handedOver) {
+      stderr.writeln('[rhr] $handedOver This run ends.');
+      exit(_deviceBusyExitCode);
     } on DevicePausedException catch (paused) {
       // Only the phone's owner can end a pause, so wait for them without a
       // limit and without the "session dropped" line below.
@@ -904,6 +938,7 @@ Future<int?> _runSession({
   RunRoute? routeOverride,
   RunProgress? runProgress,
   void Function()? onReady,
+  Map<String, String> relayHeaders = const {},
 }) async {
   final compatibility = readProjectCompatibilityProfile(project);
   String? assetStoreId;
@@ -913,8 +948,11 @@ Future<int?> _runSession({
       relays: relays,
       code: code,
       claimFile: File('$project/.dart_tool/rhr/claim.json'),
+      headers: relayHeaders,
     );
   } on DevicePausedException {
+    rethrow;
+  } on DeviceHandedOverException {
     rethrow;
   } on DeviceBusyException {
     // Someone else is on this device. The caller waits out a claim the relay
@@ -2781,7 +2819,10 @@ Future<int> _runAttachProductFlow({
   final configuredRelay = relay ?? config['relay'];
   if (configuredRelay != null) _requireAllowedRelay(configuredRelay);
   preferDirect ??= config['direct']?.toLowerCase() != 'false';
-  final localRelay = await LocalRelay.start(sessionCode);
+  // An account phone is reached through the host daemon, which keeps it
+  // connected between runs; it never dials a LAN relay.
+  final throughDaemon = rhrRendezvousInstallation(sessionCode) != null;
+  final localRelay = throughDaemon ? null : await LocalRelay.start(sessionCode);
   final deviceRelays = relayCandidates(
     local: localRelay?.advertisedUrl,
     configured: configuredRelay,
@@ -2836,7 +2877,12 @@ Future<int> _runAttachProductFlow({
       '${qr.text}\n  Scan with the RHR player\n\n',
     );
   }
-  if (localRelay != null) {
+  if (throughDaemon) {
+    stderr.writeln(
+      '[rhr] reaching the phone through the rhr daemon, which keeps it '
+      'connected between runs (log: ${hostDaemonFile(sessionCode).path}.log)',
+    );
+  } else if (localRelay != null) {
     stderr.writeln(
       '[rhr] LAN fast path: ${localRelay.advertisedUrl} '
       '(relay fallback: ${deviceRelays.last})',
@@ -2858,8 +2904,12 @@ Future<int> _runAttachProductFlow({
     var transferRetries = 0;
     while (true) {
       try {
+        final daemon = throughDaemon
+            ? await ensureHostDaemon(sessionCode, relay: phoneRelays.single)
+            : null;
         final result = await _runSession(
-          relays: devRelays,
+          relays: daemon == null ? devRelays : [daemon.relay],
+          relayHeaders: daemon?.headers ?? const {},
           code: sessionCode,
           project: project,
           pidFile: null,
@@ -2909,6 +2959,9 @@ Future<int> _runAttachProductFlow({
         stderr.writeln(
           '[rhr] $failure Reconnecting and reusing the built APK.',
         );
+      } on DeviceHandedOverException catch (handedOver) {
+        stderr.writeln('[rhr] $handedOver This run ends.');
+        return _deviceBusyExitCode;
       } on DevicePausedException catch (paused) {
         // Only the phone's owner can end a pause, so wait for them without a
         // limit and without the "session dropped" line below.

@@ -46,6 +46,17 @@ abstract interface class SessionTransport {
   Future<void> close();
 }
 
+/// Thrown when another project on this computer took the phone over from this
+/// run, through the host daemon. Final: retrying would take it back.
+final class DeviceHandedOverException implements Exception {
+  const DeviceHandedOverException();
+
+  @override
+  String toString() =>
+      'another project on this computer took the phone (its `rhr run` is '
+      'using it now).';
+}
+
 /// Thrown when the relay refuses because the phone's owner paused this device.
 ///
 /// Only the owner can end it, so no time limit applies the way it does to
@@ -89,7 +100,14 @@ final class DeviceAccessException implements Exception {
 /// It forwards messages only from the candidate that first announces device
 /// info and closes the remaining candidates once that winner is selected.
 final class RelayRace implements RelayControlTransport, SessionTransport {
-  RelayRace._(this._code, this._claimFile);
+  RelayRace._(this._code, this._claimFile, this._sayHello, this._headers);
+
+  /// Whether this end says hello. A hello makes the phone set up a direct
+  /// path to whoever sent it; the host daemon relays each project's own.
+  final bool _sayHello;
+
+  /// Sent with every dial, beside the claim and ticket.
+  final Map<String, String> _headers;
 
   final File? _claimFile;
 
@@ -149,6 +167,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   _RelayCandidate? _winner;
   bool _ticketRefused = false;
   bool _paused = false;
+  bool _handedOver = false;
   var _closed = false;
 
   Stream<Object> get stream => _events.stream;
@@ -167,6 +186,8 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     required String code,
     File? claimFile,
     Future<String?> Function(String rendezvous) ticketFor = rendezvousTicket,
+    bool hello = true,
+    Map<String, String> headers = const {},
   }) async {
     // A rendezvous is a public name; the relay admits a developer to it only
     // with a ticket, and tickets are short-lived, so each dial asks afresh.
@@ -180,7 +201,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         );
       }
     }
-    final race = RelayRace._(code, claimFile);
+    final race = RelayRace._(code, claimFile, hello, headers);
     final uniqueRelays = relays.toSet();
     final refusals = <String>[];
     await Future.wait(
@@ -195,7 +216,10 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         ),
       ),
     );
-    if (refusals.isNotEmpty || race._ticketRefused || race._paused) {
+    if (refusals.isNotEmpty ||
+        race._ticketRefused ||
+        race._paused ||
+        race._handedOver) {
       // The relays that admitted us each hold a claim this run will not use.
       for (final candidate in race._candidates) {
         if (!candidate.closed) candidate.channel.sink.add(_release);
@@ -210,13 +234,16 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         );
       }
       if (race._paused) throw const DevicePausedException();
+      if (race._handedOver) throw const DeviceHandedOverException();
       throw DeviceBusyException(refusals.first);
     }
     if (race._candidates.isEmpty) {
       throw StateError('could not connect to any relay candidate');
     }
-    for (final candidate in race._candidates) {
-      candidate.channel.sink.add(race._hello);
+    if (hello) {
+      for (final candidate in race._candidates) {
+        candidate.channel.sink.add(race._hello);
+      }
     }
     return race;
   }
@@ -249,7 +276,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
     try {
       socket = await WebSocket.connect(
         '$relay/s/$code/host',
-        headers: {_claimHeader: ?claim, _ticketHeader: ?ticket},
+        headers: {..._headers, _claimHeader: ?claim, _ticketHeader: ?ticket},
       ).timeout(const Duration(seconds: 8));
     } catch (e) {
       // The relay refuses a claim someone else holds with 409; anything else
@@ -258,6 +285,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       final text = '$e';
       if (text.contains('status code: 409')) refusals.add(_busyReason(text));
       if (text.contains('status code: 423')) _paused = true;
+      if (text.contains('status code: 410')) _handedOver = true;
       // A ticket the account service refused will be refused again; waiting
       // on the other candidates would hang on a phone that never arrives.
       if (ticket != null && text.contains('status code: 401')) {
@@ -334,7 +362,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       // connected. Repeat it after the cached info arrives so a host-first
       // pairing can still trigger optional device-side upgrades (such as
       // direct WebRTC signaling).
-      candidate.channel.sink.add(_hello);
+      if (_sayHello) candidate.channel.sink.add(_hello);
       // A loser's claim is dead weight: left alone, its relay would hold the
       // device for a grace period and refuse this host's next run.
       for (final loser in _candidates.where(
