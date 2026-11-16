@@ -53,6 +53,43 @@ class RhrSessionService : Service() {
 		private const val PAUSED_CODE = "paused_session_code"
 		/** rhr_native preference: the session code agent control was stopped for. */
 		private const val AGENT_STOPPED_CODE = "agent_stopped_session_code"
+		/** rhr_native preferences: the last session started, until it is stopped. */
+		private const val RESTORE_CODE = "restore_code"
+		private const val RESTORE_RELAYS = "restore_relays"
+		private const val RESTORE_PIN = "restore_pin"
+		private const val RESTORE_DIRECT = "restore_prefer_direct"
+		/** The VM address that means "no engine yet"; the lobby sends the same. */
+		private const val NO_VM = "http://127.0.0.1:0/"
+
+		/**
+		 * The start command for the session this phone last joined and nobody
+		 * stopped, or null. Android restarting the player (an update, a reboot,
+		 * memory pressure) must not leave the phone off the network until
+		 * someone opens it: the computer is waiting on it.
+		 *
+		 * Restored on the player's own engine. Whatever app the last host
+		 * launched belongs to that host's run, which launches it again.
+		 */
+		fun savedStart(context: Context): Intent? {
+			val preferences = context.getSharedPreferences("rhr_native", Context.MODE_PRIVATE)
+			val code = preferences.getString(RESTORE_CODE, null) ?: return null
+			val saved = org.json.JSONArray(preferences.getString(RESTORE_RELAYS, "[]"))
+			val relays = ArrayList((0 until saved.length()).map(saved::getString))
+			if (relays.isEmpty()) return null
+			return Intent(context, RhrSessionService::class.java)
+				.putExtra("cmd", "start")
+				.putExtra("relayUrl", relays.first())
+				.putStringArrayListExtra("relayUrls", relays)
+				.putExtra("relayPin", preferences.getString(RESTORE_PIN, null))
+				.putExtra("code", code)
+				.putExtra("vmUri", NO_VM)
+				.putExtra("preferDirect", preferences.getBoolean(RESTORE_DIRECT, true))
+		}
+
+		/** Brings back [savedStart]'s session, if there is one. */
+		fun restore(context: Context) {
+			savedStart(context)?.let(context::startForegroundService)
+		}
 		// More concurrent VM channels than Flutter's tooling ever opens (a
 		// handful, plus DevTools). Each costs a socket and two threads, so a
 		// peer that keeps opening them must hit a ceiling.
@@ -571,15 +608,21 @@ class RhrSessionService : Service() {
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-		when (intent?.getStringExtra("cmd")) {
+		// Android restarting this sticky service redelivers no intent, and the
+		// session it was running is the one to come back.
+		val command = intent ?: savedStart(this) ?: run {
+			stopSelf()
+			return START_NOT_STICKY
+		}
+		when (command.getStringExtra("cmd")) {
 			"start" -> {
 				val requestedRelay =
-					intent.getStringExtra("relayUrl") ?: return START_NOT_STICKY
+					command.getStringExtra("relayUrl") ?: return START_NOT_STICKY
 				// A plaintext relay off loopback would hand the session code,
 				// and with it this app's VM service, to the network. Links are
 				// checked before they get here; this holds for every caller.
 				val requestedRelays =
-					(intent.getStringArrayListExtra("relayUrls") ?: arrayListOf(requestedRelay))
+					(command.getStringArrayListExtra("relayUrls") ?: arrayListOf(requestedRelay))
 						.filter { it.isNotBlank() }
 						.distinct()
 						.ifEmpty { listOf(requestedRelay) }
@@ -588,18 +631,18 @@ class RhrSessionService : Service() {
 					Log.w(TAG, "refusing a session with no TLS relay")
 					return START_NOT_STICKY
 				}
-				val requestedPin = intent.getStringExtra("relayPin")
+				val requestedPin = command.getStringExtra("relayPin")
 				val requestedCode =
-					intent.getStringExtra("code") ?: return START_NOT_STICKY
+					command.getStringExtra("code") ?: return START_NOT_STICKY
 				val requestedVm =
-					intent.getStringExtra("vmUri") ?: return START_NOT_STICKY
+					command.getStringExtra("vmUri") ?: return START_NOT_STICKY
 				// watchVm=false: the vmUri IS the door (connector mode — the
 				// target app is a different process, so our own logcat can
 				// never see its engine lines). Default true: the player
 				// hosts its own engine and tracks guest kernel swaps.
-				val requestedOwnVm = intent.getBooleanExtra("watchVm", true)
+				val requestedOwnVm = command.getBooleanExtra("watchVm", true)
 				if (requestedOwnVm) ownVmUri = requestedVm
-				val requestedDirect = intent.getBooleanExtra("preferDirect", true)
+				val requestedDirect = command.getBooleanExtra("preferDirect", true)
 				val sameLiveSession = reconnectThread?.isAlive == true &&
 					!stopped.get() && sessionCode == requestedCode &&
 					// Connector mode: the vmUri is FRESHLY discovered from
@@ -664,6 +707,12 @@ class RhrSessionService : Service() {
 					startPresenceWatch()
 					startReconnectLoop(sessionGeneration)
 				}
+				getSharedPreferences("rhr_native", Context.MODE_PRIVATE).edit()
+					.putString(RESTORE_CODE, requestedCode)
+					.putString(RESTORE_RELAYS, org.json.JSONArray(requestedRelays).toString())
+					.putString(RESTORE_PIN, requestedPin)
+					.putBoolean(RESTORE_DIRECT, requestedDirect)
+					.apply()
 				updateListeners.forEach { it() }
 				startForeground(NOTIF_ID, buildNotification())
 			}
@@ -724,6 +773,11 @@ class RhrSessionService : Service() {
 				stopped.set(true)
 				paused = false
 				setAgentStopped(false)
+				// A stopped session is not one Android brings back.
+				getSharedPreferences("rhr_native", Context.MODE_PRIVATE).edit()
+					.remove(RESTORE_CODE).remove(RESTORE_RELAYS)
+					.remove(RESTORE_PIN).remove(RESTORE_DIRECT)
+					.apply()
 				agentControlling = false
 				clearAgentActivity()
 				ws?.close(1000, "stopped")
@@ -1021,6 +1075,19 @@ class RhrSessionService : Service() {
 			currentVm = vmUri
 		}
 		announceInfo()
+	}
+
+	/**
+	 * Opens this app's screen, the only thing that starts its Flutter engine,
+	 * when a host arrives and there is no engine to give it: Android restarted
+	 * the player in the background. The VM watcher announces the engine once
+	 * it is up. A background service may open an Activity only with "display
+	 * over other apps", which a session already asks for.
+	 */
+	private fun openOwnEngine() {
+		val launch = packageManager.getLaunchIntentForPackage(packageName) ?: return
+		runCatching { startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+			.onFailure { Log.w(TAG, "[$logTag] could not open the player for its engine: $it") }
 	}
 
 	private fun announceInfo() {
@@ -1332,6 +1399,7 @@ class RhrSessionService : Service() {
 							hostConnectionId = runRequest?.optString("connectionId")
 							cleanupChannels()
 							resumeOwnVm()
+							if (watchOwnVm && vmUri.contains(":0/")) openOwnEngine()
 						}
 						if (hello && (runRequestHandler != null || !vmUri.contains(":0/"))) {
 							// Wait for the host hello before creating the offer. A

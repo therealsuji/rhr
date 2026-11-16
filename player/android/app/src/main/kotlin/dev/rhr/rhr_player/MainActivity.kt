@@ -39,13 +39,6 @@ class MainActivity : FlutterActivity() {
 		super.onCreate(savedInstanceState)
 		readInvite(intent)
 		if (reusedEngine) Handler(Looper.getMainLooper()).post { deliverSessionLink() }
-		// The library owns the tunnel; the player owns the over-the-wire
-		// self-update (PackageInstaller). Registered before any session can
-		// start so an update arriving mid-session always has a handler.
-		RhrSessionService.updateHandlerFactory = { ctx, sendText, sendBinary ->
-			RhrPlayerUpdater(ctx, sendText, sendBinary)
-		}
-		RhrSessionService.runRequestHandler = RunPreparation::handle
 		registerDebugFaultReceiver()
 	}
 
