@@ -10,7 +10,9 @@ import android.os.Looper
  * package for it. Android only shows its own install sheet the first time a
  * package arrives from this installer; after that the player is the
  * installer of record and updates go through silently. So the player asks
- * first, every time, naming the package, before it accepts a single byte.
+ * first, naming the package, before it accepts a single byte. RHR Agent being
+ * on skips the question: it already lets the computer tap this phone, and
+ * means the user does not want to be asked.
  *
  * One question at a time. The [DevOverlay] paints it on whichever surface is
  * up (the player's Activity, or the system overlay above the tester's app),

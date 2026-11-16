@@ -80,6 +80,8 @@ class RhrPlayerUpdater(
 	private var installTarget = ""
 	/** The question in front of the tester for a kind=app transfer. */
 	private var consent: InstallConsent.Request? = null
+	/** Android's sheet for the committed install, until it is answered. */
+	@Volatile private var pendingConfirm: Intent? = null
 	private var file: File? = null
 	// OutputStream, not FileOutputStream: a gzip transfer inflates through
 	// GzipSink on the way to the file.
@@ -119,6 +121,29 @@ class RhrPlayerUpdater(
 		}
 		if (refusal != null) {
 			status(id, "failure", refusal)
+			return
+		}
+		// The same APK is already waiting on Android's sheet, usually because
+		// the run that sent it died. Sending it again would cost the whole
+		// transfer and then cancel the sheet it is waiting on.
+		val waiting = synchronized(this) {
+			val confirm = pendingConfirm
+			val sessionId = installSessionId
+			if (message.optBoolean("reuse_pending") && confirm != null && sessionId != null &&
+				sha == expectedSha256 && size == expectedSize && kind == installKind &&
+				(kind == "player" || target == installTarget) &&
+				context.packageManager.packageInstaller.getSessionInfo(sessionId) != null
+			) {
+				transferId = id
+				confirm
+			} else {
+				pendingConfirm = null
+				null
+			}
+		}
+		if (waiting != null) {
+			active = this
+			onPendingUser(waiting)
 			return
 		}
 		synchronized(this) {
@@ -166,8 +191,9 @@ class RhrPlayerUpdater(
 		val approval = InstallConsent.approval(
 			RhrSessionService.currentCode, target, synchronized(this) { expectedSha256 },
 		)
-		if (InstallConsent.alreadyAllowed(approval)) {
-			// The same bytes again after a dropped transfer; already allowed.
+		if (InstallConsent.alreadyAllowed(approval) || AgentHands.available(context)) {
+			// The same bytes again after a dropped transfer are already allowed,
+			// and RHR Agent on means nobody is meant to be looking at the phone.
 			synchronized(this) {
 				if (transferId != id || finished) return
 				openFile()
@@ -405,14 +431,18 @@ class RhrPlayerUpdater(
 		}
 	}
 
-	fun onPendingUser() {
+	fun onPendingUser(confirm: Intent) {
+		pendingConfirm = confirm
 		// Android is holding a sheet in front of the user. Say what it
 		// wants, or the phone reads as busy while it is actually waiting.
 		RhrSessionService.setInstallPhase("install_confirm")
 		status(transferId, "pending_user")
+		context.startActivity(confirm)
+		AgentHands.confirmInstall(context) { pendingConfirm === confirm }
 	}
 
 	fun onInstalled() {
+		pendingConfirm = null
 		finished = true
 		RhrSessionService.setInstallPhase("installed")
 		status(transferId, "installed")
@@ -447,6 +477,7 @@ class RhrPlayerUpdater(
 	// Callers may or may not hold the monitor; status/cleanup are safe either
 	// way (send goes straight to the socket, file deletion is idempotent).
 	private fun fail(message: String) {
+		pendingConfirm = null
 		finished = true
 		// The CLI normally echoes a failure back as the
 		// "update_failed" phase, but a failure whose cause IS the socket
@@ -508,8 +539,7 @@ class UpdateResultReceiver : BroadcastReceiver() {
 				val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
 				if (confirm != null) {
 					confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-					updater.onPendingUser()
-					context.startActivity(confirm)
+					updater.onPendingUser(confirm)
 				}
 			}
 			PackageInstaller.STATUS_SUCCESS -> {

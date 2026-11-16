@@ -12,7 +12,9 @@
 //                       kept from a transfer the connection cut short, and
 //                       the gzip stream starts at that byte of the APK
 //       "committed"     APK verified; installation is being requested
-//       "pending_user"  Android is showing the install confirmation sheet
+//       "pending_user"  Android is showing the install confirmation sheet;
+//                       as the answer to update_begin it means this same APK
+//                       is already on that sheet, so no bytes are needed
 //       "failure"       verification or install failed ("message" says why)
 //   binary opUpdateData frames                        APK chunks, flow-
 //       controlled with opAck on the transfer id (high-bit range, so tunnel
@@ -193,6 +195,7 @@ final class PlayerUpdateSender {
   // the device between two waits (e.g. a failure mid-stream) is ever lost.
   final _pendingStates = <Map<String, dynamic>>[];
   Completer<void>? _stateArrived;
+  Completer<void>? _ackWait;
   var _closed = false;
 
   /// Bytes of the APK the device already holds, from its "ready".
@@ -209,7 +212,30 @@ final class PlayerUpdateSender {
     _pendingStates.add(message);
     _stateArrived?.complete();
     _stateArrived = null;
+    // A phone that gave up sends no more acks, so don't wait out the timeout.
+    if (message['state'] == 'failure') _endAckWait();
     return true;
+  }
+
+  void _endAckWait() {
+    _ackWait?.complete();
+    _ackWait = null;
+  }
+
+  /// Reads the failure the phone reported while this end was only sending.
+  void _throwIfPhoneFailed() {
+    for (final status in _pendingStates) {
+      if (status['state'] == 'failure') throw _phoneFailure(status);
+    }
+  }
+
+  PlayerUpdateFailure _phoneFailure(Map<String, dynamic> status) {
+    final detail = '${status['message'] ?? 'unknown error'}';
+    return PlayerUpdateFailure(
+      detail.contains('INSTALL_FAILED_ABORTED')
+          ? 'Installation canceled on the phone. Run rhr again to retry.'
+          : '${kind == UpdateKind.app ? 'App installation' : 'Player update'} failed on the phone: $detail',
+    );
   }
 
   /// Feed acked byte counts for this transfer (opAck frames whose channel
@@ -239,13 +265,21 @@ final class PlayerUpdateSender {
         // again on every reconnect, so a flaky one never finished. This
         // sender can start part-way, so the device may keep what it has.
         'resume': true,
+        'reuse_pending': true,
       }),
     );
     final answer = await _awaitState(
-      {'ready', 'awaiting_approval'},
+      {'ready', 'awaiting_approval', 'pending_user'},
       timeout: const Duration(seconds: 15),
       onTimeout: 'the player did not acknowledge the update',
     );
+    if (answer == 'pending_user') {
+      stderr.writeln(
+        '[rhr] This build is already waiting on the phone\'s install prompt; '
+        'not sending it again.',
+      );
+      return _awaitInstall();
+    }
     if (answer == 'awaiting_approval') {
       // The phone asks the tester before it accepts an app it did not ask
       // for, and gives them a minute to answer; this waits a little longer
@@ -300,6 +334,7 @@ final class PlayerUpdateSender {
         final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
         var offset = 0;
         while (offset < bytes.length) {
+          _throwIfPhoneFailed();
           final end = (offset + _chunkBytes).clamp(0, bytes.length);
           final piece = Uint8List.sublistView(bytes, offset, end);
           await _transport.sendPayload(
@@ -308,8 +343,8 @@ final class PlayerUpdateSender {
           sent += piece.length;
           onProgress?.call(sent, wireSize);
           if (_flow.sent(_transferId, piece.length)) {
-            final window = Completer<void>();
-            _flow.onWindowOpen(_transferId, window.complete);
+            final window = _ackWait = Completer<void>();
+            _flow.onWindowOpen(_transferId, _endAckWait);
             await window.future.timeout(
               const Duration(seconds: 60),
               onTimeout: () => throw PlayerUpdateFailure(
@@ -334,6 +369,10 @@ final class PlayerUpdateSender {
     _transport.sendControl(
       jsonEncode({'t': 'update_commit', 'id': _transferId}),
     );
+    return _awaitInstall();
+  }
+
+  Future<PlayerUpdateOutcome> _awaitInstall() async {
     if (kind == UpdateKind.app) {
       // Foreign package: the player process survives, the system sheet
       // waits for a user tap, and the result broadcast carries the
@@ -385,12 +424,11 @@ final class PlayerUpdateSender {
       if (accepted.contains(state)) {
         return state;
       }
-      if (state == 'failure') {
-        final detail = '${status['message'] ?? 'unknown error'}';
-        throw PlayerUpdateFailure(
-          detail.contains('INSTALL_FAILED_ABORTED')
-              ? 'Installation canceled on the phone. Run rhr again to retry.'
-              : '${kind == UpdateKind.app ? 'App installation' : 'Player update'} failed on the phone: $detail',
+      if (state == 'failure') throw _phoneFailure(status);
+      if (state == 'pending_user') {
+        stderr.writeln(
+          '[rhr] Android is showing its install prompt. RHR Agent answers it; '
+          'with the agent off, tap Update or Install on the phone.',
         );
       }
       // Other states ("receiving") are informational; keep waiting.

@@ -297,6 +297,74 @@ void main() {
     },
   );
 
+  test('an APK already on the install sheet is not sent again', () async {
+    final transport = _FakeTransport();
+    final sender = PlayerUpdateSender(
+      transport,
+      kind: UpdateKind.app,
+      target: 'dev.test.app',
+    );
+    final done = sender.send(apk);
+    await _pumpUntil(() => transport.sentText.isNotEmpty);
+    final begin = transport.sentText.single;
+    expect(begin['reuse_pending'], isTrue);
+    final id = begin['id'] as int;
+    sender.handleMessage({
+      't': 'update_status',
+      'id': id,
+      'state': 'pending_user',
+    });
+    sender.handleMessage({
+      't': 'update_status',
+      'id': id,
+      'state': 'installed',
+    });
+    expect(await done, PlayerUpdateOutcome.installed);
+    expect(transport.sentFrames, isEmpty);
+    expect(transport.sentText.any((m) => m['t'] == 'update_commit'), isFalse);
+    sender.close();
+  });
+
+  test('a failure during an ack wait ends the transfer at once', () async {
+    final transport = _FakeTransport();
+    final sender = PlayerUpdateSender(transport);
+    final random = Random(9);
+    final big = File('${tmp.path}/big.apk')
+      ..writeAsBytesSync(
+        List<int>.generate(windowBytes + 64 * 1024, (_) => random.nextInt(256)),
+      );
+    final done = sender.send(big);
+    await _pumpUntil(() => transport.sentText.isNotEmpty);
+    final id = transport.sentText.first['id'] as int;
+    sender.handleMessage({'t': 'update_status', 'id': id, 'state': 'ready'});
+    await _pumpUntil(
+      () =>
+          transport.sentFrames.fold<int>(
+            0,
+            (sum, f) => sum + f.payload.length,
+          ) >=
+          windowBytes,
+    );
+    sender.handleMessage({
+      't': 'update_status',
+      'id': id,
+      'state': 'failure',
+      'message': 'out of disk',
+    });
+    await expectLater(
+      done.timeout(const Duration(seconds: 5)),
+      throwsA(
+        isA<PlayerUpdateFailure>().having(
+          (f) => f.message,
+          'message',
+          contains('out of disk'),
+        ),
+      ),
+    );
+    expect(transport.sentText.any((m) => m['t'] == 'update_commit'), isFalse);
+    sender.close();
+  });
+
   test('messages for other transfers are left to the caller', () {
     final sender = PlayerUpdateSender(_FakeTransport());
     expect(sender.handleMessage({'t': 'info'}), isFalse);

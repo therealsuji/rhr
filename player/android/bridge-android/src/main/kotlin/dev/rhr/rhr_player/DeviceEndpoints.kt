@@ -119,7 +119,7 @@ internal object DeviceEndpoints {
 		}
 	}
 
-	private fun askAgent(context: Context, request: JSONObject): JSONObject {
+	internal fun askAgent(context: Context, request: JSONObject): JSONObject {
 		fun refusal(error: String, message: String) =
 			JSONObject().put("id", request.optInt("id")).put("error", error).put("message", message)
 		if (RhrSessionService.agentStopped) {

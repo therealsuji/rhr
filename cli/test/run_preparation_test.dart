@@ -152,6 +152,52 @@ void main() {
     },
   );
 
+  for (final (agentOn, expectation) in [
+    (true, 'goes ahead without asking'),
+    (false, 'still needs approval'),
+  ]) {
+    test(
+      'with RHR Agent ${agentOn ? 'on' : 'off'} a build $expectation',
+      () async {
+        final directory = Directory.systemTemp.createTempSync(
+          'rhr-preparation-',
+        );
+        addTearDown(() => directory.deleteSync(recursive: true));
+        final phone = Phone();
+        final preparation = RunPreparation(
+          transport: phone,
+          project: directory.path,
+          profile: project(native: ['custom channel']),
+          policy: PlayerUpdatePolicy.prompt,
+        );
+        phone.onRequest = (request) => preparation.handleMessage({
+          't': 'run_response',
+          'id': request['id'],
+          'ok': true,
+          'ready': true,
+          'on': agentOn,
+        });
+        preparation.handleMessage({
+          't': 'info',
+          'compatibility': player,
+          'playerPackage': 'dev.rhr.rhr_player',
+          'playerCertificate': 'a' * 64,
+        });
+        final outcome = await preparation.run().then<Object?>(
+          (_) => null,
+          onError: (Object error) => error,
+        );
+        // The temp project cannot build; only reaching the build matters.
+        expect(outcome is ApprovalRequired, !agentOn);
+        expect(
+          phone.messages.any((message) => message['phase'] == 'building'),
+          agentOn,
+        );
+        preparation.close();
+      },
+    );
+  }
+
   test(
     'persist refuses a project the player hosts, before touching the phone',
     () async {

@@ -239,6 +239,16 @@ final class RunPreparation {
     }
   }
 
+  /// Whether the phone says RHR Agent is on. A player too old to answer
+  /// refuses the request, which reads the same as off.
+  Future<bool> _agentOn() async {
+    try {
+      return (await request('agent'))['on'] == true;
+    } on StateError {
+      return false;
+    }
+  }
+
   Future<void> _approve(String plan) async {
     final approval = '$_deviceId:$plan';
     if (progress.approvedPlans.contains(approval)) return;
@@ -247,9 +257,13 @@ final class RunPreparation {
       progress.approvedPlans.add(approval);
       return;
     }
-    if (policy == PlayerUpdatePolicy.never || !stdin.hasTerminal) {
-      throw ApprovalRequired(plan);
+    if (policy == PlayerUpdatePolicy.never) throw ApprovalRequired(plan);
+    if (await _agentOn()) {
+      stderr.writeln('[rhr] RHR Agent is on, so RHR is going ahead.');
+      progress.approvedPlans.add(approval);
+      return;
     }
+    if (!stdin.hasTerminal) throw ApprovalRequired(plan);
     stderr.write('[rhr] Continue? [y/N] ');
     final answer = await _connected(
       terminalInput
@@ -294,7 +308,6 @@ final class RunPreparation {
       );
     }
     await _setup('install_permission');
-    phase('updating', player ? 'Sending player update.' : 'Sending your app.');
     final sender = PlayerUpdateSender(
       transport,
       kind: player ? UpdateKind.player : UpdateKind.app,
@@ -303,10 +316,20 @@ final class RunPreparation {
     _sender = sender;
     try {
       await _connected(transport.payloadReady);
+      phase(
+        'updating',
+        player ? 'Sending player update.' : 'Sending your app.',
+      );
+      var loggedTenths = 0;
       final outcome = await _connected(
         sender.send(
           apk,
           onProgress: (sent, total) {
+            final tenths = sent * 10 ~/ total;
+            if (tenths > loggedTenths) {
+              loggedTenths = tenths;
+              stderr.writeln('[rhr] sent ${tenths * 10}% of the transfer');
+            }
             if (!_closed.isCompleted)
               transport.sendControl(
                 jsonEncode({

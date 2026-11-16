@@ -54,6 +54,9 @@ object RunPreparation {
 							} ?: emptyList<String>()))
 						}
 					}
+					// RHR Agent on means the user already said to get on with it,
+					// so the computer stops asking too.
+					"agent" -> response.put("on", AgentHands.available(context))
 					// The overlay the session controls are drawn in; holding it
 					// also lets the player open the app from the background.
 					"beacon_setup" -> {
