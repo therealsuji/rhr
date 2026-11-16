@@ -162,6 +162,9 @@ class PlayerInstallReceiver : BroadcastReceiver() {
 				@Suppress("DEPRECATION")
 				intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)?.let {
 					context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+					// With RHR Agent on, the update goes through on its own; a
+					// success replaces this process, a failure ends the phase.
+					AgentHands.confirmInstall(context) { PlayerUpdate.phase == "installing" }
 				}
 			}
 			PackageInstaller.STATUS_SUCCESS -> Unit
