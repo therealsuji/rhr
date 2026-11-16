@@ -202,12 +202,18 @@ class RhrPlayerUpdater(
 			return
 		}
 		status(id, "awaiting_approval")
-		val request = InstallConsent.ask(target, approval) { allowed ->
+		val request = InstallConsent.ask(target, approval) { answer ->
 			val accepted = synchronized(this) {
 				if (transferId != id || finished) return@ask
 				consent = null
-				if (!allowed) fail("installing $target was not allowed on the phone") else openFile()
-				allowed
+				when (answer) {
+					InstallConsent.Answer.ALLOWED -> openFile()
+					InstallConsent.Answer.DECLINED ->
+						fail("installing $target was declined on the phone")
+					InstallConsent.Answer.UNANSWERED ->
+						fail("nobody answered the question to install $target on the phone")
+				}
+				answer == InstallConsent.Answer.ALLOWED
 			}
 			if (accepted) status(id, "ready")
 		}

@@ -23,8 +23,13 @@ import android.os.Looper
  * again for something already allowed only trains people to tap through.
  */
 object InstallConsent {
+	/** How the question ended. */
+	enum class Answer { ALLOWED, DECLINED, UNANSWERED }
+
 	/**
-	 * How long the question stays up before it counts as a no. The CLI gives
+	 * How long the question stays up before it is taken down unanswered,
+	 * which installs nothing, like a no, but is reported as its own thing:
+	 * nobody saw it is not the tester refused. The CLI gives
 	 * up on an unanswered transfer sooner than this (see "ready" in
 	 * cli/lib/player_update.dart); an answer after that reaches nobody, and
 	 * the developer's next run asks again.
@@ -34,7 +39,7 @@ object InstallConsent {
 	class Request(
 		val packageName: String,
 		internal val approval: String,
-		internal val onAnswer: (allowed: Boolean) -> Unit,
+		internal val onAnswer: (Answer) -> Unit,
 	)
 
 	@Volatile var pending: Request? = null
@@ -53,23 +58,23 @@ object InstallConsent {
 	private val main = Handler(Looper.getMainLooper())
 
 	/** Puts the question up, replacing any earlier one. [onAnswer] runs on the main thread. */
-	fun ask(packageName: String, approval: String, onAnswer: (allowed: Boolean) -> Unit): Request {
+	fun ask(packageName: String, approval: String, onAnswer: (Answer) -> Unit): Request {
 		val request = Request(packageName, approval, onAnswer)
 		synchronized(this) { pending = request }
-		main.postDelayed({ answer(request, allowed = false) }, TIMEOUT_MS)
+		main.postDelayed({ answer(request, Answer.UNANSWERED) }, TIMEOUT_MS)
 		redraw()
 		return request
 	}
 
 	/** The tester's answer, or the timeout's. Only the first one counts. */
-	fun answer(request: Request, allowed: Boolean) {
+	fun answer(request: Request, answer: Answer) {
 		synchronized(this) {
 			if (pending !== request) return
 			pending = null
-			if (allowed) this.allowed += request.approval
+			if (answer == Answer.ALLOWED) this.allowed += request.approval
 		}
 		redraw()
-		request.onAnswer(allowed)
+		request.onAnswer(answer)
 	}
 
 	/** Takes the question down without an answer; the asker already moved on. */

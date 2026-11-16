@@ -242,8 +242,8 @@ class SessionBannerTest {
 	fun `an app install that fails says install, not update`() {
 		val app = SessionBanner.of(
 			phase = "update_failed", status = "connected", foreignApp = true,
-			message = "installing dev.example was not allowed on the phone")
-		assertEquals("Install failed: installing dev.example was not allowed on the phone", app.label)
+			message = "installing dev.example was declined on the phone")
+		assertEquals("Install failed: installing dev.example was declined on the phone", app.label)
 		val player = SessionBanner.of(phase = "update_failed", status = "connected")
 		assertTrue(player.label.startsWith("Update failed"))
 	}

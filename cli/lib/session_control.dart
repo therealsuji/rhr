@@ -238,7 +238,53 @@ String? findSessionProject(String start) {
       '--project <dir>.',
     );
   }
-  return found.singleOrNull;
+  if (found.isNotEmpty) return found.single;
+
+  // The same project checked out again as a git worktree is the same app on
+  // the same phone: a session run from `../app-review` belongs to an agent
+  // started in `app` too.
+  final elsewhere = [
+    for (final worktree in _otherWorktrees(start))
+      if (running(worktree)) worktree,
+  ];
+  if (elsewhere.length > 1) {
+    throw StateError(
+      'Several worktrees of $start run rhr sessions: ${elsewhere.join(', ')}. '
+      'Start your coding agent in the one you mean, or register rhr mcp with '
+      '--project <dir>.',
+    );
+  }
+  return elsewhere.singleOrNull;
+}
+
+/// [start]'s folder in each other worktree of its git repository: the same
+/// path below each worktree's root. Empty outside git, or when git fails.
+List<String> _otherWorktrees(String start) {
+  String? git(List<String> args) {
+    try {
+      final result = Process.runSync('git', ['-C', start, ...args]);
+      return result.exitCode == 0 ? (result.stdout as String).trim() : null;
+    } on ProcessException {
+      return null;
+    }
+  }
+
+  final root = git(['rev-parse', '--show-toplevel']);
+  final listing = git(['worktree', 'list', '--porcelain']);
+  if (root == null || listing == null) return const [];
+  final String here;
+  try {
+    here = Directory(start).resolveSymbolicLinksSync();
+  } on FileSystemException {
+    return const [];
+  }
+  if (!here.startsWith(root)) return const [];
+  final below = here.substring(root.length);
+  return [
+    for (final line in listing.split('\n'))
+      if (line.startsWith('worktree ') && line.substring(9) != root)
+        '${line.substring(9)}$below',
+  ];
 }
 
 /// Sends [command] to the session running for [project], and waits for its

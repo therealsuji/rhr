@@ -131,6 +131,30 @@ void main() {
     session('apps/tablet');
     expect(() => findSessionProject(root.path), throwsA(isA<StateError>()));
   });
+
+  test('findSessionProject finds a session run from another worktree', () {
+    final base = Directory.systemTemp.createTempSync('rhr-worktree-');
+    addTearDown(() => base.deleteSync(recursive: true));
+    final main = Directory('${base.path}/app')..createSync();
+    void git(List<String> args) {
+      final result = Process.runSync('git', ['-C', main.path, ...args]);
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+    }
+
+    git(['init', '-q']);
+    git([
+      '-c', 'user.name=t', '-c', 'user.email=t@t', //
+      'commit', '-q', '--allow-empty', '-m', 'init',
+    ]);
+    git(['worktree', 'add', '-q', '--detach', '${base.path}/app-review']);
+    final review = Directory(
+      '${base.path}/app-review',
+    ).resolveSymbolicLinksSync();
+
+    expect(findSessionProject(main.path), isNull);
+    SessionControl.fileFor(review).createSync(recursive: true);
+    expect(findSessionProject(main.path), review);
+  });
 }
 
 /// Whether [future] has already completed, without waiting for it.

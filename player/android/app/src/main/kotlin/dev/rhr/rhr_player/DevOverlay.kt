@@ -282,7 +282,7 @@ class DevOverlay(
 		host.onBackPressed = {
 			ui.post {
 				val asked = consentFor
-				if (asked != null) InstallConsent.answer(asked, allowed = false) else closeMenu()
+				if (asked != null) InstallConsent.answer(asked, InstallConsent.Answer.DECLINED) else closeMenu()
 			}
 		}
 
@@ -1157,12 +1157,12 @@ class DevOverlay(
 			setPadding(0, dp(10), 0, 0)
 		})
 		sheet.addView(iconRow("↓", "Install", primary = true) {
-			InstallConsent.answer(request, allowed = true)
+			InstallConsent.answer(request, InstallConsent.Answer.ALLOWED)
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT,
 			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
 		sheet.addView(iconRow("✕", "Don't install", primary = false) {
-			InstallConsent.answer(request, allowed = false)
+			InstallConsent.answer(request, InstallConsent.Answer.DECLINED)
 		}, LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT,
 			ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
