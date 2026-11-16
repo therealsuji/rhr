@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:rhr_cli/relay_race.dart';
 import 'package:test/test.dart';
 
@@ -17,6 +18,15 @@ Future<HttpServer> _refusingRelay(int status) async {
 }
 
 void main() {
+  test('only the public relay counts as unable to carry payloads', () {
+    expect(onlyPublicRelays([defaultPublicRelay]), isTrue);
+    expect(onlyPublicRelays(['wss://relay.example.com']), isFalse);
+    expect(
+      onlyPublicRelays(['wss://192.168.1.5:9000', defaultPublicRelay]),
+      isFalse,
+    );
+  });
+
   test('a paused phone is reported as paused, not as busy', () async {
     final relay = await _refusingRelay(423);
     addTearDown(() => relay.close(force: true));
@@ -25,13 +35,7 @@ void main() {
         relays: ['ws://127.0.0.1:${relay.port}'],
         code: 'rhr-2345-6789-abcd',
       ),
-      throwsA(
-        isA<DeviceBusyException>().having(
-          (e) => '$e',
-          'message',
-          contains('paused on the phone'),
-        ),
-      ),
+      throwsA(isA<DevicePausedException>()),
     );
   });
 

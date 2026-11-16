@@ -1,7 +1,87 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:dart_mcp/client.dart';
 import 'package:rhr_cli/rhr_mcp.dart';
+import 'package:rhr_cli/session_control.dart';
+import 'package:stream_channel/stream_channel.dart';
 import 'package:test/test.dart';
 
+/// Calls `status` on a server for [project] and returns what it answered.
+Future<String> _status(
+  String project, {
+  Future<void> Function(String project)? startSession,
+}) async {
+  final pipe = StreamChannelController<String>(sync: true);
+  final server = RhrMcpServer(
+    pipe.foreign,
+    start: project,
+    project: project,
+    startSession: startSession,
+    publishWait: Duration.zero,
+  );
+  final client = MCPClient(Implementation(name: 'test', version: '0'));
+  final connection = client.connectServer(pipe.local);
+  addTearDown(() async {
+    await client.shutdown();
+    await server.shutdown();
+  });
+  await connection.initialize(
+    InitializeRequest(
+      protocolVersion: ProtocolVersion.latestSupported,
+      capabilities: client.capabilities,
+      clientInfo: client.implementation,
+    ),
+  );
+  connection.notifyInitialized();
+  final result = await connection.callTool(CallToolRequest(name: 'status'));
+  return result.content.whereType<TextContent>().map((c) => c.text).join();
+}
+
 void main() {
+  group('a call with no live session', () {
+    late Directory project;
+    setUp(() => project = Directory.systemTemp.createTempSync('rhr_mcp_'));
+    tearDown(() => project.deleteSync(recursive: true));
+
+    test('starts one for a Flutter project', () async {
+      File('${project.path}/pubspec.yaml').writeAsStringSync('name: app');
+      final started = <String>[];
+      final answer = await _status(
+        project.path,
+        startSession: (dir) async => started.add(dir),
+      );
+      expect(started, [project.path]);
+      expect(answer, contains('starting a session'));
+    });
+
+    test('treats a killed session\'s leftover file as no session', () async {
+      File('${project.path}/pubspec.yaml').writeAsStringSync('name: app');
+      final closed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final port = closed.port;
+      await closed.close();
+      SessionControl.fileFor(project.path)
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync(
+          jsonEncode({'token': 't', 'device': port, 'logs': port}),
+        );
+      final started = <String>[];
+      await _status(
+        project.path,
+        startSession: (dir) async => started.add(dir),
+      );
+      expect(started, hasLength(1));
+    });
+
+    test('starts nothing outside a Flutter project', () async {
+      final answer = await _status(
+        project.path,
+        startSession: (_) async => fail('must not start a session'),
+      );
+      expect(answer, contains('No rhr session'));
+    });
+  });
+
   test('errorLines keeps error lines, whole Flutter reports, and exits', () {
     const lines = [
       'rhr-exit time=1 pid=9 reason=4 status=0 description=crash',

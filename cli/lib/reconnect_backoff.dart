@@ -6,6 +6,7 @@ final class ReconnectBackoff {
   int _noPath = 0;
   bool _wasReady = false;
   DateTime? _busySince;
+  bool _pauseReported = false;
 
   /// Consecutive attempts where no direct route opened before RHR says the
   /// two networks cannot connect directly and stops.
@@ -17,10 +18,14 @@ final class ReconnectBackoff {
   /// using the phone holds it past this.
   static const busyLimit = Duration(minutes: 2);
 
+  /// How often a paused phone is tried again, so a resume is picked up soon.
+  static const pausedRetry = Duration(seconds: 5);
+
   void markReady() {
     _failures = 0;
     _noPath = 0;
     _busySince = null;
+    _pauseReported = false;
     _wasReady = true;
   }
 
@@ -36,6 +41,13 @@ final class ReconnectBackoff {
   bool busyTooLong([DateTime? now]) {
     final at = now ?? DateTime.now();
     return at.difference(_busySince ??= at) > busyLimit;
+  }
+
+  /// True only for the first refusal of a pause, so the wait prints one line.
+  bool firstPauseRefusal() {
+    final first = !_pauseReported;
+    _pauseReported = true;
+    return first;
   }
 
   Duration nextDelay() {

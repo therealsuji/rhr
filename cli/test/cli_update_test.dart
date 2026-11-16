@@ -38,12 +38,30 @@ void main() {
         ['--check'],
         currentVersion: '0.1.0-beta.8',
         fetchRelease: () async => newer,
+        verify: (_) async => 'a' * 40,
         activate: (_) async => fail('Check must not install'),
         output: messages.add,
       ),
       0,
     );
     expect(messages.last, contains('Run `rhr update`'));
+  });
+
+  test('check does not offer a release that update would refuse', () async {
+    final messages = <String>[];
+    expect(
+      await runCliUpdate(
+        ['--check'],
+        currentVersion: '0.1.0-beta.8',
+        fetchRelease: () async => newer,
+        verify: (tag) async =>
+            throw UntrustedRelease('$tag carries no signature.'),
+        output: messages.add,
+      ),
+      1,
+    );
+    expect(messages.last, contains('carries no signature'));
+    expect(messages.join(), isNot(contains('Run `rhr update`')));
   });
 
   test('does not reinstall or downgrade', () async {

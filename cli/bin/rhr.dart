@@ -101,8 +101,8 @@ run options:
   --relay <wss://...>   use a private/self-hosted relay (or .rhr.yaml)
   --code <session>      override the saved pairing code (new code on first run)
   --device <name|id>    a phone on your account (see `rhr devices`)
-  --no-direct           use the relay for tunnel payloads (legacy/private mode;
-                        direct WebRTC is strict and enabled by default)
+  --no-direct           use the relay for tunnel payloads; needs a private relay,
+                        because the public one carries signalling only
   --resync              ignore the local asset manifest and re-push all assets
 
 persist and release options: --project, --relay, --code, --device, --no-direct.
@@ -128,8 +128,8 @@ attach options:
                         generic player (its APK has no per-project assets)
   --resync              forget the pushed-asset manifest and re-push all
   --no-flutter          just print the tunneled VM URI; don't run flutter attach
-  --no-direct           use the relay for tunnel payloads (legacy/private mode;
-                        direct WebRTC is strict and enabled by default)
+  --no-direct           use the relay for tunnel payloads; needs a private relay,
+                        because the public one carries signalling only
   --pid-file <path>     write the flutter process pid here
   --update-player       on version skew, rebuild and update the player without asking
   --no-update-player    on version skew, hard-block instead of offering an update
@@ -214,6 +214,7 @@ Future<void> main(List<String> args) async {
       stdioChannel(input: stdin, output: stdout),
       start: Directory.current.path,
       project: project,
+      startSession: startDetachedRun,
     );
     await server.done;
     exit(0);
@@ -589,6 +590,10 @@ Future<void> main(List<String> args) async {
   _requireAllowedRelay(relay);
   code ??= cfg['code'];
   if (direct && cfg['direct']?.toLowerCase() == 'false') direct = false;
+  if (!direct && onlyPublicRelays([relay])) {
+    stderr.writeln('[rhr] $relayBinaryUnsupported');
+    exit(_relayBinaryExitCode);
+  }
 
   code =
       await _resolveDevice(device: device, code: code, project: project) ??
@@ -677,6 +682,16 @@ Future<void> main(List<String> args) async {
         stderr.writeln('[rhr] direct connection failed: $failure');
         exit(_directFailureExitCode);
       }
+    } on DevicePausedException catch (paused) {
+      // Only the phone's owner can end a pause, so wait for them without a
+      // limit and without the "session dropped" line below.
+      if (reconnectBackoff.firstPauseRefusal()) {
+        stderr.writeln(
+          '[rhr] $paused Resume it there and RHR continues (ctrl-c to quit).',
+        );
+      }
+      await Future<void>.delayed(ReconnectBackoff.pausedRetry);
+      continue;
     } on DeviceBusyException catch (busy) {
       // Usually the claim of a run that was just stopped, which the relay
       // keeps for 45 s. Wait that out; a host still using the phone is
@@ -899,9 +914,11 @@ Future<int?> _runSession({
       code: code,
       claimFile: File('$project/.dart_tool/rhr/claim.json'),
     );
+  } on DevicePausedException {
+    rethrow;
   } on DeviceBusyException {
-    // Someone else is on this device, or it is paused. Retrying would only
-    // fight for it; the caller reports it and stops.
+    // Someone else is on this device. The caller waits out a claim the relay
+    // is still holding, then reports it and stops.
     rethrow;
   } on DeviceAccessException {
     // Ends the session loop: no number of retries makes a device that left
@@ -1406,8 +1423,12 @@ Future<int?> _runSession({
         fatalExit = _relayBinaryExitCode;
       }
       preparation?.close();
-      stderr.writeln('[rhr] relay connection closed');
-      if (!wsDied.isCompleted) wsDied.complete();
+      // A direct failure closes this stream too, once teardown runs. That
+      // failure is the cause and gets reported; the relay did nothing wrong.
+      if (!wsDied.isCompleted) {
+        stderr.writeln('[rhr] relay connection closed');
+        wsDied.complete();
+      }
     },
     onError: (Object e) {
       preparation?.close();
@@ -1510,11 +1531,17 @@ Future<int?> _runSession({
           return;
         }
         unauthenticated = null;
-        final opened = channel = nextChannel++;
-        sockets[opened] = sock;
-        sendPayload(encodeOpen(opened, target));
-        final rest = Uint8List.sublistView(bytes, newline + 1);
-        if (rest.isNotEmpty) tunnelData(opened, rest, sub);
+        // An agent can ask before the direct path is up, and a payload sent
+        // then is fatal to the session. Hold this socket until it is up.
+        sub.pause();
+        transport.payloadReady.then((_) {
+          final opened = channel = nextChannel++;
+          sockets[opened] = sock;
+          sendPayload(encodeOpen(opened, target));
+          final rest = Uint8List.sublistView(bytes, newline + 1);
+          if (rest.isNotEmpty) tunnelData(opened, rest, sub);
+          sub.resume();
+        }, onError: (Object _) => sock.destroy());
       },
       onDone: close,
       onError: (Object _) => close(),
@@ -2763,6 +2790,16 @@ Future<int> _runAttachProductFlow({
     local: localRelay?.loopbackUrl,
     configured: configuredRelay,
   );
+  // An account phone only dials its rendezvous on the configured or public
+  // relay; the LAN relay is reachable only through a pairing link.
+  final phoneRelays = rhrRendezvousInstallation(sessionCode) == null
+      ? deviceRelays
+      : [deviceRelays.last];
+  if (!preferDirect && onlyPublicRelays(phoneRelays)) {
+    await localRelay?.close();
+    stderr.writeln('[rhr] $relayBinaryUnsupported');
+    return _relayBinaryExitCode;
+  }
   final deepLink = sessionConnectionLink(
     sessionCode,
     deviceRelays,
@@ -2872,6 +2909,16 @@ Future<int> _runAttachProductFlow({
         stderr.writeln(
           '[rhr] $failure Reconnecting and reusing the built APK.',
         );
+      } on DevicePausedException catch (paused) {
+        // Only the phone's owner can end a pause, so wait for them without a
+        // limit and without the "session dropped" line below.
+        if (reconnectBackoff.firstPauseRefusal()) {
+          stderr.writeln(
+            '[rhr] $paused Resume it there and RHR continues (ctrl-c to quit).',
+          );
+        }
+        await Future<void>.delayed(ReconnectBackoff.pausedRetry);
+        continue;
       } on DeviceBusyException catch (busy) {
         // Usually the claim of a run that was just stopped, which the relay
         // keeps for 45 s. Wait that out; a host still using the phone is

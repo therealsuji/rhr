@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
 
+import 'package:rhr_bridge/relay_defaults.dart';
 import 'package:rhr_bridge/session_code.dart';
 
 import 'account_auth.dart';
@@ -30,6 +31,11 @@ const relayBinaryUnsupported =
     'Remove --no-direct so bulk data rides the direct WebRTC path, or use a '
     'private relay started with RHR_ALLOW_BINARY_PAYLOADS=1.';
 
+/// Whether every relay in [relays] is the public one, which refuses binary
+/// frames. A --no-direct session on them cannot move any payload.
+bool onlyPublicRelays(Iterable<String> relays) =>
+    relays.every((relay) => relay == defaultPublicRelay);
+
 abstract interface class SessionTransport {
   Stream<Object> get stream;
   Future<String> get selectedRelay;
@@ -38,6 +44,17 @@ abstract interface class SessionTransport {
   void sendControl(String message);
   Future<void> sendPayload(Uint8List message);
   Future<void> close();
+}
+
+/// Thrown when the relay refuses because the phone's owner paused this device.
+///
+/// Only the owner can end it, so no time limit applies the way it does to
+/// [DeviceBusyException].
+final class DevicePausedException implements Exception {
+  const DevicePausedException();
+
+  @override
+  String toString() => 'this device is paused on the phone.';
 }
 
 /// Thrown when the relay refuses because another host holds the device.
@@ -131,6 +148,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
   final _candidates = <_RelayCandidate>[];
   _RelayCandidate? _winner;
   bool _ticketRefused = false;
+  bool _paused = false;
   var _closed = false;
 
   Stream<Object> get stream => _events.stream;
@@ -177,7 +195,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
         ),
       ),
     );
-    if (refusals.isNotEmpty || race._ticketRefused) {
+    if (refusals.isNotEmpty || race._ticketRefused || race._paused) {
       // The relays that admitted us each hold a claim this run will not use.
       for (final candidate in race._candidates) {
         if (!candidate.closed) candidate.channel.sink.add(_release);
@@ -191,6 +209,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
           'Run `rhr devices` to check.',
         );
       }
+      if (race._paused) throw const DevicePausedException();
       throw DeviceBusyException(refusals.first);
     }
     if (race._candidates.isEmpty) {
@@ -238,12 +257,7 @@ final class RelayRace implements RelayControlTransport, SessionTransport {
       // race across several candidates expects some of them to fail.
       final text = '$e';
       if (text.contains('status code: 409')) refusals.add(_busyReason(text));
-      if (text.contains('status code: 423')) {
-        refusals.add(
-          'this device was paused on the phone. Resume it there, then run '
-          'rhr again.',
-        );
-      }
+      if (text.contains('status code: 423')) _paused = true;
       // A ticket the account service refused will be refused again; waiting
       // on the other candidates would hang on a phone that never arrives.
       if (ticket != null && text.contains('status code: 401')) {

@@ -95,7 +95,10 @@ class Session {
   }
 
   void _deviceClosed(WebSocketChannel ch) {
-    stderr.writeln('[relay] device channel done');
+    stderr.writeln(
+      '[relay] device channel done (code=${ch.closeCode} '
+      'reason=${ch.closeReason})',
+    );
     // A dead device's info is worse than none: a host attaching later would
     // tunnel to a VM service port that no longer exists.
     if (device == ch) {
@@ -110,6 +113,10 @@ class Session {
   }
 
   void _hostClosed(WebSocketChannel ch) {
+    stderr.writeln(
+      '[relay] host channel done (code=${ch.closeCode} '
+      'reason=${ch.closeReason})',
+    );
     if (host == ch) {
       host = null;
       _maybeEvict();

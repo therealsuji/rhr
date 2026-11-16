@@ -11,13 +11,35 @@ import 'device_control.dart';
 import 'session_control.dart';
 import 'version.dart';
 
+/// Where a session started by `rhr mcp` writes its output.
+File sessionLog(String project) => File('$project/.dart_tool/rhr/session.log');
+
+/// Starts `rhr run` for [project] in its own process group, with no terminal.
+Future<void> startDetachedRun(String project) async {
+  final log = sessionLog(project)..parent.createSync(recursive: true);
+  await Process.start(
+    'sh',
+    [
+      '-c',
+      r'exec "$0" "$@" >"$RHR_SESSION_LOG" 2>&1 </dev/null',
+      Platform.resolvedExecutable,
+      Platform.script.toFilePath(),
+      'run',
+    ],
+    workingDirectory: project,
+    environment: {'RHR_SESSION_LOG': log.path},
+    mode: ProcessStartMode.detached,
+  );
+}
+
 /// `rhr mcp`: lets a coding agent see, drive and debug the app on the user's
 /// phone, through the rhr session already holding that phone.
 ///
 /// The relay admits one host per phone, so this is a client of the
-/// running `rhr run`/`rhr attach` and never opens a session of its own. It
-/// finds the session in the project's `.dart_tool/rhr/control.json` and reads
-/// the file again whenever the session may have reconnected.
+/// running `rhr run`/`rhr attach`. It finds the session in the project's
+/// `.dart_tool/rhr/control.json` and reads the file again whenever the session
+/// may have reconnected. With none running it starts `rhr run` detached, so
+/// the session outlives whatever the coding agent does to its own shells.
 ///
 /// Three layers, each doing what only it can:
 /// - device control (RHR Agent on the phone): screen, window tree across all
@@ -27,11 +49,16 @@ import 'version.dart';
 base class RhrMcpServer extends MCPServer with ToolsSupport {
   /// Serves the session of [project] when given, else of the project found
   /// from [start] (see [findSessionProject]).
-  RhrMcpServer(super.channel, {required this.start, this.project})
-    : super.fromStreamChannel(
-        implementation: Implementation(name: 'rhr', version: rhrVersion),
-        instructions: _instructions,
-      ) {
+  RhrMcpServer(
+    super.channel, {
+    required this.start,
+    this.project,
+    this.startSession,
+    this.publishWait = const Duration(seconds: 20),
+  }) : super.fromStreamChannel(
+         implementation: Implementation(name: 'rhr', version: rhrVersion),
+         instructions: _instructions,
+       ) {
     registerTool(_statusTool, _status);
     registerTool(_screenshotTool, _screenshot);
     registerTool(_describeTool, _describe);
@@ -53,7 +80,17 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
 
   final String start;
   final String? project;
+
+  /// Starts a session for a project that has none. Null only reports it.
+  final Future<void> Function(String project)? startSession;
   _Session? _session;
+  DateTime? _startedAt;
+
+  /// How long a tool call waits for a session it just started to publish.
+  final Duration publishWait;
+
+  /// A session that fails to start is not started again sooner than this.
+  static const _restartAfter = Duration(minutes: 1);
 
   /// The project whose session this server talks to, looked up on every call:
   /// a session can start after the server does.
@@ -82,17 +119,59 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
   /// The running session, reconnecting when it has published new endpoints.
   Future<_Session> _current() async {
     final project = _project();
-    final endpoints = readSessionEndpoints(project);
-    if (endpoints == null) {
-      throw _ToolFailure(
-        'No rhr session is running for $project. Start one with `rhr run` '
-        '(or `rhr attach`) in the Flutter project, then try again.',
-      );
-    }
+    final endpoints =
+        await _liveEndpoints(project) ?? await _startAndWait(project);
     final session = _session;
     if (session != null && session.endpoints == endpoints) return session;
     await session?.close();
     return _session = _Session(endpoints);
+  }
+
+  /// A session killed outright leaves its file behind, so this also checks
+  /// that something still listens on the published port.
+  Future<SessionEndpoints?> _liveEndpoints(String project) async {
+    final endpoints = readSessionEndpoints(project);
+    if (endpoints == null) return null;
+    try {
+      final probe = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        endpoints.device,
+        timeout: const Duration(seconds: 1),
+      );
+      probe.destroy();
+      return endpoints;
+    } on SocketException {
+      return null;
+    }
+  }
+
+  Future<SessionEndpoints> _startAndWait(String project) async {
+    final starter = startSession;
+    if (starter == null || !File('$project/pubspec.yaml').existsSync()) {
+      throw _ToolFailure(
+        'No rhr session is running for $project, and it is not a Flutter '
+        'project rhr can start one in.',
+      );
+    }
+    final last = _startedAt;
+    if (last == null || DateTime.now().difference(last) > _restartAfter) {
+      _startedAt = DateTime.now();
+      try {
+        await starter(project);
+      } on ProcessException catch (e) {
+        throw _ToolFailure('Could not start `rhr run`: ${e.message}');
+      }
+    }
+    final deadline = DateTime.now().add(publishWait);
+    while (DateTime.now().isBefore(deadline)) {
+      final endpoints = await _liveEndpoints(project);
+      if (endpoints != null) return endpoints;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    throw _ToolFailure(
+      'rhr is starting a session for $project; try again shortly. Its output '
+      'is in ${sessionLog(project).path}.',
+    );
   }
 
   // ---- Status ----
@@ -120,9 +199,7 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
       },
       switch (session.endpoints.vm) {
         final vm? => 'session: running ($vm)',
-        null =>
-          'session: preparing the app on the phone. Device control works; '
-              'answer any prompt the phone shows with describe and tap.',
+        null => 'session: preparing the app on the phone',
       },
       if (session.endpoints.app case final app?) 'app package: $app',
       if (readConnectionInfo(project) case final connect?) ...[
@@ -138,6 +215,9 @@ base class RhrMcpServer extends MCPServer with ToolsSupport {
         'device control: on; screen ${info['width']}x${info['height']}, '
         'rotation ${info['rotation']}, foreground ${info['foreground']}',
       );
+      if (session.endpoints.vm == null) {
+        lines.add('  Answer any prompt the phone shows with describe and tap.');
+      }
     } on DeviceControlException catch (e) {
       lines.add(
         'device control: unavailable (${e.code}): ${e.message}\n'
@@ -671,7 +751,7 @@ final class _ToolFailure implements Exception {
 
 const _instructions = '''
 rhr drives the user's Android phone running a Flutter app, over the internet,
-through the user's running rhr session (start `rhr run` first).
+through the project's rhr session, which rhr starts if none is running.
 
 Loop: describe (or screenshot) to see the screen, then tap/swipe/type using the
 tap points from describe; each action returns the screen after it. Coordinates

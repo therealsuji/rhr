@@ -22,4 +22,5 @@ dependencies:
   vm_service: ^15.3.0
 
 dev_dependencies:
+  stream_channel: ^2.1.4
   test: ^1.25.0

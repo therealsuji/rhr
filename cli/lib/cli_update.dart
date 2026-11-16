@@ -255,15 +255,16 @@ Future<int> runCliUpdate(
       );
       return 0;
     }
-    if (args.contains('--check')) {
-      write('[rhr] Update available. Run `rhr update` to install it.');
-      return 0;
-    }
+    // Before --check answers, so it never offers what `rhr update` refuses.
     final commit = await (verify ?? verifiedReleaseCommit)(release.tag);
     write(
       '[rhr] ${release.tag} is signed by the RHR release key '
       '(commit ${commit.substring(0, 12)}).',
     );
+    if (args.contains('--check')) {
+      write('[rhr] Update available. Run `rhr update` to install it.');
+      return 0;
+    }
     write(
       '[rhr] Installing ${release.tag} into the Dart global package cache.',
     );

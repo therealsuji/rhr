@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:rhr_bridge/session_code.dart';
+import 'package:rhr_cli/session_control.dart';
 import 'package:test/test.dart';
 
 String _findRepo() {
@@ -69,6 +70,68 @@ Future<void> _waitFor(
 }
 
 void main() {
+  test(
+    'asking for device control before direct is up keeps the session',
+    () async {
+      final port = await _freePort();
+      final project = Directory.systemTemp.createTempSync('rhr_early_control_');
+      addTearDown(() => project.deleteSync(recursive: true));
+      final cliLines = <String>[];
+      final relay = await _spawn(
+        ['bin/relay.dart', '$port'],
+        workDir: '$_repo/relay',
+        lines: [],
+      );
+      final cli = await _spawn(
+        [
+          'bin/rhr.dart',
+          'attach',
+          '--no-flutter',
+          '--relay',
+          'ws://127.0.0.1:$port',
+          '--code',
+          mintRhrSessionCode(),
+          '--project',
+          project.path,
+        ],
+        workDir: '$_repo/cli',
+        lines: cliLines,
+      );
+      addTearDown(() {
+        cli.kill();
+        relay.kill();
+      });
+      int? exitCode;
+      unawaited(cli.exitCode.then((code) => exitCode = code));
+
+      SessionEndpoints? endpoints;
+      final deadline = DateTime.now().add(const Duration(seconds: 120));
+      while ((endpoints = readSessionEndpoints(project.path)) == null) {
+        if (DateTime.now().isAfter(deadline)) {
+          fail('session never published:\n${cliLines.join('\n')}');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+
+      // No phone has joined, so the direct path cannot be up yet.
+      final socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        endpoints!.device,
+      );
+      addTearDown(socket.destroy);
+      socket.writeln(endpoints.token);
+      await socket.flush();
+      await Future<void>.delayed(const Duration(seconds: 3));
+
+      expect(exitCode, isNull, reason: cliLines.join('\n'));
+      expect(
+        cliLines.join('\n'),
+        isNot(contains('direct WebRTC payload path is not ready')),
+      );
+    },
+    timeout: const Timeout(Duration(minutes: 3)),
+  );
+
   test(
     'default direct transport uses a relay that rejects binary payloads',
     () async {
@@ -163,159 +226,151 @@ void main() {
     timeout: const Timeout(Duration(seconds: 420)),
   );
 
-  test(
-    '--no-direct keeps the relay-only transport working',
-    () async {
-      final port = await _freePort();
-      final code = mintRhrSessionCode();
-      final relayLines = <String>[];
-      final cliLines = <String>[];
-      final deviceLines = <String>[];
-      final relay = await _spawn(
-        ['bin/relay.dart', '$port'],
-        workDir: '$_repo/relay',
-        lines: relayLines,
-        environment: const {'RHR_ALLOW_BINARY_PAYLOADS': '1'},
-      );
-      final cli = await _spawn(
-        [
-          'bin/rhr.dart',
-          'attach',
-          '--no-flutter',
-          '--no-direct',
-          '--relay',
-          'ws://127.0.0.1:$port',
-          '--code',
-          code,
-        ],
-        workDir: '$_repo/cli',
-        lines: cliLines,
-      );
-      final device = await _spawn(
-        [
-          '--enable-vm-service=0',
-          'example/fake_device.dart',
-          'ws://127.0.0.1:$port',
-          code,
-        ],
-        workDir: '$_repo/bridge',
-        lines: deviceLines,
-      );
+  test('--no-direct keeps the relay-only transport working', () async {
+    final port = await _freePort();
+    final code = mintRhrSessionCode();
+    final relayLines = <String>[];
+    final cliLines = <String>[];
+    final deviceLines = <String>[];
+    final relay = await _spawn(
+      ['bin/relay.dart', '$port'],
+      workDir: '$_repo/relay',
+      lines: relayLines,
+      environment: const {'RHR_ALLOW_BINARY_PAYLOADS': '1'},
+    );
+    final cli = await _spawn(
+      [
+        'bin/rhr.dart',
+        'attach',
+        '--no-flutter',
+        '--no-direct',
+        '--relay',
+        'ws://127.0.0.1:$port',
+        '--code',
+        code,
+      ],
+      workDir: '$_repo/cli',
+      lines: cliLines,
+    );
+    final device = await _spawn(
+      [
+        '--enable-vm-service=0',
+        'example/fake_device.dart',
+        'ws://127.0.0.1:$port',
+        code,
+      ],
+      workDir: '$_repo/bridge',
+      lines: deviceLines,
+    );
 
-      Future<void> stop(Process process) async {
-        // SIGTERM first so the CLI runs its farewell (it releases the device
-        // claim and tells the phone the host left), then SIGKILL if it
-        // does not go. Waiting only on SIGTERM made teardown the flakiest part
-        // of this file on CI: the handler does a short flush before exiting,
-        // and a loaded runner can outlast a fixed wait.
-        process.kill();
-        try {
-          await process.exitCode.timeout(const Duration(seconds: 10));
-        } on TimeoutException {
-          process.kill(ProcessSignal.sigkill);
-          await process.exitCode.timeout(const Duration(seconds: 10));
-        }
-      }
-
-      addTearDown(() async {
-        await stop(device);
-        await stop(cli);
-        await stop(relay);
-      });
-
-      await _waitFor(
-        cliLines,
-        RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
-        'relay-only tunnel',
-      );
-      final tunnelLine = cliLines.firstWhere(
-        (line) => line.contains('tunneled VM service:'),
-      );
-      final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
-      final client = HttpClient();
+    Future<void> stop(Process process) async {
+      // SIGTERM first so the CLI runs its farewell (it releases the device
+      // claim and tells the phone the host left), then SIGKILL if it
+      // does not go. Waiting only on SIGTERM made teardown the flakiest part
+      // of this file on CI: the handler does a short flush before exiting,
+      // and a loaded runner can outlast a fixed wait.
+      process.kill();
       try {
-        final response = await client
-            .getUrl(uri.resolve('getVMInfo'))
-            .then((request) => request.close())
-            .timeout(const Duration(seconds: 10));
-        expect(response.statusCode, HttpStatus.ok);
-      } finally {
-        client.close(force: true);
+        await process.exitCode.timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        process.kill(ProcessSignal.sigkill);
+        await process.exitCode.timeout(const Duration(seconds: 10));
       }
-    },
-    timeout: const Timeout(Duration(seconds: 420)),
-  );
+    }
 
-  test(
-    '--no-direct against a signalling-only relay fails once instead of '
-    'reconnecting forever',
-    () async {
-      final port = await _freePort();
-      final code = mintRhrSessionCode();
-      final relayLines = <String>[];
-      final cliLines = <String>[];
-      final deviceLines = <String>[];
-      final relay = await _spawn(
-        ['bin/relay.dart', '$port'],
-        workDir: '$_repo/relay',
-        lines: relayLines,
-      );
-      final cli = await _spawn(
-        [
-          'bin/rhr.dart',
-          'attach',
-          '--no-flutter',
-          '--no-direct',
-          '--relay',
-          'ws://127.0.0.1:$port',
-          '--code',
-          code,
-        ],
-        workDir: '$_repo/cli',
-        lines: cliLines,
-      );
-      final device = await _spawn(
-        [
-          '--enable-vm-service=0',
-          'example/fake_device.dart',
-          'ws://127.0.0.1:$port',
-          code,
-        ],
-        workDir: '$_repo/bridge',
-        lines: deviceLines,
-      );
-      addTearDown(() async {
-        device.kill(ProcessSignal.sigkill);
-        cli.kill(ProcessSignal.sigkill);
-        relay.kill(ProcessSignal.sigkill);
-      });
+    addTearDown(() async {
+      await stop(device);
+      await stop(cli);
+      await stop(relay);
+    });
 
-      await _waitFor(
-        cliLines,
-        RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
-        'relay-only tunnel',
-      );
-      final tunnelLine = cliLines.firstWhere(
-        (line) => line.contains('tunneled VM service:'),
-      );
-      final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
-      // The first tunnel frame is binary; the relay closes the socket for it.
-      final client = HttpClient();
-      try {
-        await client
-            .getUrl(uri.resolve('getVMInfo'))
-            .then((request) => request.close())
-            .timeout(const Duration(seconds: 10));
-      } on Object {
-        // The tunnel dying under the request is the expected outcome.
-      } finally {
-        client.close(force: true);
-      }
+    await _waitFor(
+      cliLines,
+      RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
+      'relay-only tunnel',
+    );
+    final tunnelLine = cliLines.firstWhere(
+      (line) => line.contains('tunneled VM service:'),
+    );
+    final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
+    final client = HttpClient();
+    try {
+      final response = await client
+          .getUrl(uri.resolve('getVMInfo'))
+          .then((request) => request.close())
+          .timeout(const Duration(seconds: 10));
+      expect(response.statusCode, HttpStatus.ok);
+    } finally {
+      client.close(force: true);
+    }
+  }, timeout: const Timeout(Duration(seconds: 420)));
 
-      expect(await cli.exitCode.timeout(const Duration(seconds: 30)), 77);
-      expect(cliLines, contains(contains('Remove --no-direct')));
-      expect(cliLines, isNot(contains(contains('reconnecting in'))));
-    },
-    timeout: const Timeout(Duration(seconds: 420)),
-  );
+  test('--no-direct against a signalling-only relay fails once instead of '
+      'reconnecting forever', () async {
+    final port = await _freePort();
+    final code = mintRhrSessionCode();
+    final relayLines = <String>[];
+    final cliLines = <String>[];
+    final deviceLines = <String>[];
+    final relay = await _spawn(
+      ['bin/relay.dart', '$port'],
+      workDir: '$_repo/relay',
+      lines: relayLines,
+    );
+    final cli = await _spawn(
+      [
+        'bin/rhr.dart',
+        'attach',
+        '--no-flutter',
+        '--no-direct',
+        '--relay',
+        'ws://127.0.0.1:$port',
+        '--code',
+        code,
+      ],
+      workDir: '$_repo/cli',
+      lines: cliLines,
+    );
+    final device = await _spawn(
+      [
+        '--enable-vm-service=0',
+        'example/fake_device.dart',
+        'ws://127.0.0.1:$port',
+        code,
+      ],
+      workDir: '$_repo/bridge',
+      lines: deviceLines,
+    );
+    addTearDown(() async {
+      device.kill(ProcessSignal.sigkill);
+      cli.kill(ProcessSignal.sigkill);
+      relay.kill(ProcessSignal.sigkill);
+    });
+
+    await _waitFor(
+      cliLines,
+      RegExp(r'tunneled VM service: http://127\.0\.0\.1:(\d+)/'),
+      'relay-only tunnel',
+    );
+    final tunnelLine = cliLines.firstWhere(
+      (line) => line.contains('tunneled VM service:'),
+    );
+    final uri = Uri.parse(tunnelLine.split('tunneled VM service: ').last);
+    // The first tunnel frame is binary; the relay closes the socket for it.
+    final client = HttpClient();
+    try {
+      await client
+          .getUrl(uri.resolve('getVMInfo'))
+          .then((request) => request.close())
+          .timeout(const Duration(seconds: 10));
+    } on Object {
+      // The tunnel dying under the request is the expected outcome.
+    } finally {
+      client.close(force: true);
+    }
+
+    expect(await cli.exitCode.timeout(const Duration(seconds: 30)), 77);
+    expect(cliLines, contains(contains('Remove --no-direct')));
+    expect(cliLines, isNot(contains(contains('reconnecting in'))));
+  }, timeout: const Timeout(Duration(seconds: 420)));
 }

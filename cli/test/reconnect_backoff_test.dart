@@ -3,6 +3,14 @@ import 'package:rhr_cli/reconnect_backoff.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('a pause is reported once per wait', () {
+    final backoff = ReconnectBackoff();
+    expect(backoff.firstPauseRefusal(), isTrue);
+    expect(backoff.firstPauseRefusal(), isFalse);
+    backoff.markReady();
+    expect(backoff.firstPauseRefusal(), isTrue);
+  });
+
   test('failed attempts back off and remain capped during an outage', () {
     final backoff = ReconnectBackoff();
     expect(List.generate(10, (_) => backoff.nextDelay().inSeconds), [
