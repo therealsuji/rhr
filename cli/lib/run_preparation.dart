@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 
 import 'apk_identity.dart';
 import 'beacon_build.dart';
+import 'direct_session_transport.dart';
 import 'flutter_compatibility.dart';
 import 'native_fingerprint.dart';
 import 'player_update.dart';
@@ -378,7 +379,14 @@ final class RunPreparation {
     try {
       return await _prepare();
     } catch (error) {
-      progress._settlePersist(error);
+      // The session loop reconnects after these, and its next preparation
+      // still owes the persist. Anything else ends the run, and the persist
+      // with it.
+      final retried =
+          error is RunDisconnected ||
+          (error is DirectTransportFailure && error.transient) ||
+          (error is PlayerUpdateFailure && error.retryable);
+      if (!retried) progress._settlePersist(error);
       rethrow;
     }
   }

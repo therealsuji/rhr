@@ -198,6 +198,28 @@ void main() {
     );
   }
 
+  test('a persist outlives a dropped connection', () async {
+    final progress = RunProgress();
+    var settled = false;
+    progress.requestPersist().then(
+      (_) => settled = true,
+      onError: (Object _) => settled = true,
+    );
+    final preparation = RunPreparation(
+      transport: Phone(),
+      project: Directory.systemTemp.path,
+      profile: project(),
+      policy: PlayerUpdatePolicy.always,
+      progress: progress,
+    );
+    final running = preparation.run();
+    preparation.close();
+    await expectLater(running, throwsA(isA<RunDisconnected>()));
+    await pumpEventQueue();
+    expect(settled, isFalse);
+    expect(progress.persistRequested, isTrue);
+  });
+
   test(
     'persist refuses a project the player hosts, before touching the phone',
     () async {
