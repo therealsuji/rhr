@@ -20,9 +20,24 @@ Future<List<String>> getHostAddresses({
   bool useIpv6 = true,
   bool useLinkLocalAddress = false,
 }) async {
-  // Networks to avoid (from Chromium's WebRTC implementation)
+  // Networks to avoid (from Chromium's WebRTC implementation), plus the
+  // bridges container and VM managers create (Docker's user networks are
+  // `br-<id>`). A peer elsewhere can never reach their addresses, and a socket
+  // bound to one leaves through an extra NAT that can win a triggered check
+  // and then carry no traffic the peer accepts.
   const costlyNetworks = ['ipsec', 'tun', 'utun', 'tap'];
-  const banNetworks = ['vmnet', 'veth', 'docker', 'vbox'];
+  const banNetworks = [
+    'vmnet',
+    'veth',
+    'docker',
+    'vbox',
+    'br-',
+    'virbr',
+    'lxcbr',
+    'lxdbr',
+    'podman',
+    'cni',
+  ];
 
   final addresses = <String>[];
 

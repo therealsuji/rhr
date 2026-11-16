@@ -122,6 +122,14 @@ class IceOptions {
   /// Default: 1500ms
   final Duration stunTimeout;
 
+  /// How long a UDP connectivity check keeps retransmitting its request
+  /// before the pair is given up (RFC 8489 Section 6.2.1). The first requests
+  /// often leave before the peer has our answer and can respond, and a NAT or
+  /// firewall drops what arrives before its pinhole is open, so one datagram
+  /// per pair is not a check. Kept inside the 15 s the whole check list gets.
+  /// Default: 10s
+  final Duration checkWindow;
+
   const IceOptions({
     this.stunServer,
     this.turnServer,
@@ -136,6 +144,7 @@ class IceOptions {
     this.relayOnly = false,
     this.icePacingInterval = const Duration(milliseconds: 5),
     this.stunTimeout = const Duration(milliseconds: 1500),
+    this.checkWindow = const Duration(seconds: 10),
   });
 }
 
@@ -602,15 +611,17 @@ class IceConnectionImpl implements IceConnection {
     _log.fine(
         '[ICE] STUN: Found ${hostCandidates.length} host candidates to probe');
 
-    // Try to get reflexive candidates for each host candidate
+    // Probe every host candidate at once: one that cannot reach the STUN
+    // server (a VPN interface, say) would otherwise hold up the rest for a
+    // whole timeout.
     // Like werift, only gather SRFLX for IPv4 candidates - IPv6 STUN is unreliable
-    for (final hostCandidate in hostCandidates) {
+    Future<void> probe(RTCIceCandidate hostCandidate) async {
       // Skip IPv6 candidates - STUN servers typically only support IPv4
       // and sending from IPv6 sockets often fails on misconfigured networks
       if (hostCandidate.host.contains(':')) {
         _log.fine(
             '[ICE] STUN: Skipping IPv6 candidate ${hostCandidate.host}:${hostCandidate.port}');
-        continue;
+        return;
       }
 
       _log.fine(
@@ -620,7 +631,7 @@ class IceConnectionImpl implements IceConnection {
         if (socket == null) {
           _log.fine(
               '[ICE] STUN: No socket for foundation ${hostCandidate.foundation}');
-          continue;
+          return;
         }
         // The server's address must be the socket's family: an IPv4 socket
         // cannot send to the IPv6 address a lookup may list first.
@@ -630,7 +641,7 @@ class IceConnectionImpl implements IceConnection {
         if (stunAddress == null) {
           _log.fine(
               '[ICE] STUN: No ${socket.address.type.name} address for $stunHost');
-          continue;
+          return;
         }
 
         // Create STUN binding request
@@ -651,7 +662,7 @@ class IceConnectionImpl implements IceConnection {
         if (!_trySendDatagram(socket, bytes, stunAddress, stunPort)) {
           _log.fine('[ICE] STUN: Send failed for ${hostCandidate.host}');
           _pendingStunTransactions.remove(tid);
-          continue;
+          return;
         }
 
         // Wait for response with timeout
@@ -723,9 +734,11 @@ class IceConnectionImpl implements IceConnection {
         // Failed to get reflexive candidate for this host, continue
         _log.fine(
             '[ICE] STUN: Failed for ${hostCandidate.host}:${hostCandidate.port}: $e');
-        continue;
+        return;
       }
     }
+
+    await Future.wait(hostCandidates.map(probe));
   }
 
   /// Gather relay candidates via TURN
@@ -1274,12 +1287,14 @@ class IceConnectionImpl implements IceConnection {
       StunMessage request, InternetAddress address, int port,
       {RawDatagramSocket? receivingSocket}) {
     // Debug: Log incoming request attributes to understand what Ring is sending
+    // USE-CANDIDATE is a flag with no value, so it decodes to null: test
+    // presence, not the value.
     final hasUseCandidate =
-        request.getAttribute(StunAttributeType.useCandidate) != null;
+        request.hasAttribute(StunAttributeType.useCandidate);
     final hasIceControlling =
-        request.getAttribute(StunAttributeType.iceControlling) != null;
+        request.hasAttribute(StunAttributeType.iceControlling);
     final hasIceControlled =
-        request.getAttribute(StunAttributeType.iceControlled) != null;
+        request.hasAttribute(StunAttributeType.iceControlled);
     // Extract USERNAME to see which credentials Ring expects
     final usernameAttr = request.getAttribute(StunAttributeType.username);
     final usernameStr = usernameAttr is String ? usernameAttr : null;
@@ -1637,6 +1652,33 @@ class IceConnectionImpl implements IceConnection {
     return false;
   }
 
+  /// Resends a check's request until [answered] completes, ICE has a
+  /// nominated pair or closes, or [IceOptions.checkWindow] runs out: at 250
+  /// ms, then doubling to at most 1.6 s apart. The same bytes each time, so
+  /// it stays one transaction whichever copy is answered.
+  void _retransmitCheck(Future<Object?> answered, bool Function() send) {
+    var settled = false;
+    answered.then((_) => settled = true, onError: (_) => settled = true);
+    final deadline = DateTime.now().add(_options.checkWindow);
+    Future<void> loop() async {
+      var interval = const Duration(milliseconds: 250);
+      while (true) {
+        await Future<void>.delayed(interval);
+        if (settled ||
+            _nominated != null ||
+            _state == IceState.closed ||
+            _state == IceState.failed ||
+            !DateTime.now().add(interval).isBefore(deadline)) {
+          return;
+        }
+        send();
+        if (interval < const Duration(milliseconds: 1600)) interval *= 2;
+      }
+    }
+
+    unawaited(loop());
+  }
+
   /// Maximum retries for error responses (401/487)
   static const int _maxConnectivityCheckRetries = 3;
 
@@ -1745,12 +1787,18 @@ class IceConnectionImpl implements IceConnection {
           _pendingStunTransactions.remove(tid);
           return false;
         }
+        _retransmitCheck(
+          completer.future,
+          () => _trySendDatagram(
+              socket!, requestBytes, remoteAddr, remoteCandidate.port),
+        );
       }
 
-      // Wait for response with timeout
+      // Wait for response with timeout. A UDP check retransmits for its
+      // whole window; a relayed one is sent once.
       try {
         final response = await completer.future.timeout(
-          _options.stunTimeout,
+          isRelay ? _options.stunTimeout : _options.checkWindow,
           onTimeout: () {
             _pendingStunTransactions.remove(tid);
             throw TimeoutException('STUN connectivity check timed out');
