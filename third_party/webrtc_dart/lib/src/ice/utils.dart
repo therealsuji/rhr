@@ -22,7 +22,7 @@ Future<List<String>> getHostAddresses({
 }) async {
   // Networks to avoid (from Chromium's WebRTC implementation), plus the
   // bridges container and VM managers create (Docker's user networks are
-  // `br-<id>`). A peer elsewhere can never reach their addresses, and a socket
+  // `br-<id>`; macOS puts VMs behind `bridge100` and up). A peer elsewhere can never reach their addresses, and a socket
   // bound to one leaves through an extra NAT that can win a triggered check
   // and then carry no traffic the peer accepts.
   const costlyNetworks = ['ipsec', 'tun', 'utun', 'tap'];
@@ -32,6 +32,7 @@ Future<List<String>> getHostAddresses({
     'docker',
     'vbox',
     'br-',
+    'bridge',
     'virbr',
     'lxcbr',
     'lxdbr',
