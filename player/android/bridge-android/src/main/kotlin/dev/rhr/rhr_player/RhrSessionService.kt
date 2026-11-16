@@ -1568,11 +1568,17 @@ class RhrSessionService : Service() {
 	private fun sendBinaryFrame(frame: ByteArray): Boolean {
 		if (preferDirect) {
 			val direct = directTransport
-			if (direct != null && direct.send(frame)) return true
-			ws?.let {
-				failDirectSession(it, "tunnel payload produced before WebRTC was ready")
+			// A host holds every channel until the peer is open, so nothing
+			// before then is this host's: it is a channel of the connection a
+			// reconnect just replaced, still draining. Dropping it keeps that
+			// leftover from failing the new session, and payloads still never
+			// ride the relay.
+			if (direct == null || !direct.isOpen()) {
+				Log.i(TAG, "[$logTag] dropped a leftover tunnel frame; WebRTC is not open")
+				return false
 			}
-			return false
+			// A rejected send fails the transport, and its onFailure the session.
+			return direct.send(frame)
 		}
 		return ws?.send(frame.toByteString()) == true
 	}
